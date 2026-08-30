@@ -16,6 +16,7 @@ function athenaApp() {
             {id: "skills", label: "Skills", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.2H22l-6 4.6 2.3 7.2-6.3-4.6-6.3 4.6 2.3-7.2-6-4.6h7.6z"/></svg>'},
             {id: "tasks", label: "Tasks", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>'},
             {id: "notes", label: "Notes", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>'},
+            {id: "models", label: "Models", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>'},
             {id: "settings", label: "Settings", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'},
         ],
 
@@ -32,12 +33,16 @@ function athenaApp() {
         isRecording: false,
         mediaRecorder: null,
         audioChunks: [],
-        model: "gpt-oss-20b-32k:latest",
-        modelLabel: "gpt-oss-20b-32k",
-        availableModels: [
-            {value: "gpt-oss-20b-32k:latest", label: "gpt-oss-20b-32k"},
-            {value: "qwen3.5:4b-q5-xl", label: "qwen3.5:4b"},
-        ],
+        model: "",
+        modelLabel: "Select a model",
+        modelEndpointUrl: "",
+        endpoints: JSON.parse(localStorage.getItem("athena_endpoints") || "[]"),
+        addEndpointOpen: false,
+        newEndpointType: "local",
+        newEndpointName: "",
+        newEndpointUrl: "",
+        newEndpointProvider: "openai",
+        newEndpointApiKey: "",
         maxCtx: 0,
         maxCtxText: "0",
         modelPopupOpen: false,
@@ -59,6 +64,12 @@ function athenaApp() {
         toggleTheme() {
             this.theme = this.theme === "dark" ? "light" : "dark";
             localStorage.setItem("athena_theme", this.theme);
+            document.documentElement.style.colorScheme = this.theme;
+            if (this.theme === "dark") {
+                document.body.classList.add("dark");
+            } else {
+                document.body.classList.remove("dark");
+            }
         },
 
         // --- session helpers ---
@@ -92,11 +103,19 @@ function athenaApp() {
             this.messages = [];
         },
 
-        switchSession(id) {
+        async switchSession(id) {
             this.sessionId = id;
             localStorage.setItem("athena_session", id);
             this.messages = [];
             this.sessionMenuOpen = null;
+            try {
+                const resp = await fetch(`/api/history/${id}`);
+                const history = await resp.json();
+                this.messages = history.map(m => ({...m, ttsLabel: "Play"}));
+                this.scrollToBottom();
+            } catch (e) {
+                console.error("Failed to load session history:", e);
+            }
         },
 
         togglePin(id) {
@@ -126,7 +145,91 @@ function athenaApp() {
         selectModel(m) {
             this.model = m.value;
             this.modelLabel = m.label;
+            this.modelEndpointUrl = m.endpointUrl || "";
             this.modelPopupOpen = false;
+        },
+
+        allAvailableModels() {
+            const list = [];
+            for (const ep of this.endpoints) {
+                if (ep.type !== "local") continue;
+                for (const m of (ep.enabledModels || [])) {
+                    list.push({value: m, label: `${m} (${ep.name})`, endpointUrl: ep.url});
+                }
+            }
+            return list;
+        },
+
+        saveEndpoints() {
+            localStorage.setItem("athena_endpoints", JSON.stringify(this.endpoints));
+        },
+
+        addEndpoint() {
+            const ep = {
+                id: generateUUID(),
+                name: this.newEndpointName || (this.newEndpointType === "local" ? "Local Endpoint" : "Online Provider"),
+                type: this.newEndpointType,
+                url: this.newEndpointUrl,
+                provider: this.newEndpointProvider,
+                apiKey: this.newEndpointApiKey,
+                detectedModels: [],
+                enabledModels: [],
+                detecting: false,
+                error: "",
+            };
+            this.endpoints.push(ep);
+            this.saveEndpoints();
+            this.addEndpointOpen = false;
+            this.newEndpointName = "";
+            this.newEndpointUrl = "";
+            this.newEndpointApiKey = "";
+        },
+
+        deleteEndpoint(id) {
+            if (!confirm("Remove this endpoint?")) return;
+            this.endpoints = this.endpoints.filter(e => e.id !== id);
+            this.saveEndpoints();
+        },
+
+        async detectModels(id) {
+            const ep = this.endpoints.find(e => e.id === id);
+            if (!ep) return;
+            ep.detecting = true;
+            ep.error = "";
+            try {
+                const resp = await fetch("/api/detect-models", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({url: ep.url}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    ep.error = data.error;
+                } else {
+                    ep.detectedModels = data.models || [];
+                    const prevEnabled = new Set(ep.enabledModels || []);
+                    const prevKnown = new Set(ep.detectedModels);
+                    ep.enabledModels = ep.detectedModels.filter(m => !prevKnown.has(m) || prevEnabled.has(m));
+                    if (ep.enabledModels.length === 0) ep.enabledModels = [...ep.detectedModels];
+                }
+            } catch (e) {
+                ep.error = "Request failed: " + e.message;
+            } finally {
+                ep.detecting = false;
+                this.saveEndpoints();
+            }
+        },
+
+        toggleModelEnabled(endpointId, modelName) {
+            const ep = this.endpoints.find(e => e.id === endpointId);
+            if (!ep) return;
+            const idx = ep.enabledModels.indexOf(modelName);
+            if (idx === -1) {
+                ep.enabledModels.push(modelName);
+            } else {
+                ep.enabledModels.splice(idx, 1);
+            }
+            this.saveEndpoints();
         },
 
         syncCtxFromText() {
@@ -202,6 +305,7 @@ function athenaApp() {
                         model: this.model,
                         max_ctx: this.maxCtx,
                         workspace: this.workspace,
+                        endpoint_url: this.modelEndpointUrl,
                     }),
                 });
 

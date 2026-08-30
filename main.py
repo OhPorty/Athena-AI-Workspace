@@ -56,6 +56,7 @@ class ChatIn(BaseModel):
     model: str = DEFAULT_MODEL
     max_ctx: int = 0  # 0 = dynamic sizing; any other value is an explicit override
     workspace: str = ""  # empty = no workspace bound; file tools stay disabled
+    endpoint_url: str = ""  # empty = use the default OLLAMA_URL
 
 
 class TtsIn(BaseModel):
@@ -100,6 +101,22 @@ def index():
         return f.read()
 
 
+class DetectModelsIn(BaseModel):
+    url: str
+
+@app.post("/api/detect-models")
+def detect_models(req: DetectModelsIn):
+    base = req.url.rstrip("/")
+    try:
+        resp = httpx.get(f"{base}/api/tags", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            names = [m.get("name") for m in data.get("models", []) if m.get("name")]
+            return {"models": names}
+        return {"error": f"Endpoint responded with HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"Could not reach endpoint: {e}"}
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
     send_to_lcm(req.session_id, "user", req.message)
@@ -124,7 +141,8 @@ def chat_stream(req: ChatIn):
 
     def generate():
         full_reply = ""
-        with httpx.stream("POST", OLLAMA_URL, json={
+        _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
+        with httpx.stream("POST", _target_url, json={
             "model": req.model,
             "messages": messages,
             "tools": tools if tools else None,
@@ -216,6 +234,17 @@ async def tts(req: TtsIn):
     buf.seek(0)
     return StreamingResponse(buf, media_type="audio/wav")
 
+
+@app.get("/api/history/{session_id}")
+def get_history(session_id: str):
+    try:
+        resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=3)
+        if resp.status_code == 200:
+            msgs = resp.json()
+            return [{"role": m["role"], "content": m["content"]} for m in msgs]
+    except Exception:
+        pass
+    return []
 
 @app.get("/health")
 def health():
