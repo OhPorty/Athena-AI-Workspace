@@ -78,11 +78,12 @@ class TtsIn(BaseModel):
 
 def get_lcm_context(session_id: str) -> list:
     try:
-        resp = httpx.get(f"{LCM_URL}/context/{session_id}", timeout=3)
+        resp = httpx.get(f"{LCM_URL}/context/{session_id}", timeout=30)
+        print(f"[DEBUG] LCM context status={resp.status_code} body={resp.text[:300]!r}", flush=True)
         if resp.status_code == 200:
             return resp.json().get("context", [])
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[DEBUG] LCM context EXCEPTION: {e!r}", flush=True)
     return []
 
 
@@ -132,6 +133,7 @@ def detect_models(req: DetectModelsIn):
 
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
+    print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
     send_to_lcm(req.session_id, "user", req.message)
 
     context = get_lcm_context(req.session_id)
@@ -145,7 +147,16 @@ def chat_stream(req: ChatIn):
     tools = get_lcm_tools()
     # TODO once Pi bridge exists: if req.workspace: tools += get_file_tools()
 
-    messages = [{"role": "system", "content": system_prompt}] + context
+    _raw_messages = [{"role": "system", "content": system_prompt}] + context
+    # Some chat templates (e.g. qwen3.5's) require every system-role
+    # message to be grouped at the very start of the conversation --
+    # LCM returns one separate system message per summary node, which
+    # otherwise ends up interleaved with real user/assistant turns and
+    # breaks that requirement. Merge them into a single leading system
+    # message, preserving order, then keep everything else as-is.
+    _system_parts = [m["content"] for m in _raw_messages if m.get("role") == "system"]
+    _non_system = [m for m in _raw_messages if m.get("role") != "system"]
+    messages = [{"role": "system", "content": "\n\n".join(_system_parts)}] + _non_system
     effective_max = req.max_ctx if req.max_ctx > 0 else MAX_CTX_DEFAULT
     ctx_size = pick_dynamic_ctx(messages, tools, max_ctx=effective_max)
     if req.max_ctx > 0:
@@ -178,6 +189,7 @@ def chat_stream(req: ChatIn):
         full_reply = ""
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
         _messages = list(messages)
+        print(f"[DEBUG] _messages roles={[m.get("role") for m in _messages]!r}", flush=True)
         MAX_ROUNDS = 5
 
         for _round in range(MAX_ROUNDS):
@@ -199,6 +211,7 @@ def chat_stream(req: ChatIn):
                     except json.JSONDecodeError:
                         continue
                     msg = chunk.get("message", {})
+                    print(f"[DEBUG] chunk={chunk}", flush=True)
                     thinking_delta = msg.get("thinking", "")
                     if thinking_delta:
                         yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
@@ -229,6 +242,7 @@ def chat_stream(req: ChatIn):
         else:
             yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'note': 'max tool rounds reached'})}\n\n"
 
+        print(f"[DEBUG] full_reply length={len(full_reply)!r} content={full_reply[:200]!r}", flush=True)
         send_to_lcm(req.session_id, "assistant", full_reply)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
