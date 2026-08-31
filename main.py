@@ -6,7 +6,7 @@ import io
 import json
 import tempfile
 import httpx
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -636,6 +636,82 @@ def get_history(session_id: str):
     except Exception:
         pass
     return []
+
+# ---------------------------------------------------------------------------
+# OpenAI-compat translation proxy: lets the Pi coding harness (or any
+# other OpenAI-compat client) get Athena's real dynamic ctx sizing.
+# Pi's own provider config speaks OpenAI /v1/chat/completions, which has
+# no field for num_ctx at all -- Ollama's OpenAI-compat shim silently
+# ignores context sizing entirely, always falling back to whatever a
+# model's Modelfile happens to default to (often just 4096). This proxy
+# receives the OpenAI-shaped request, computes real ctx using the exact
+# same pick_dynamic_ctx used for Athena's own chat, forwards to Ollama's
+# NATIVE /api/chat with num_ctx set correctly, then translates the
+# response back into OpenAI shape. Point Pi's base_url at this endpoint
+# instead of Ollama directly and it gets proper dynamic ctx for free,
+# with zero per-model Modelfile baking required.
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/chat/completions")
+async def openai_compat_proxy(request: Request):
+    body = await request.json()
+    model = body.get("model", DEFAULT_MODEL)
+    messages = body.get("messages", [])
+    tools = body.get("tools")
+    stream = body.get("stream", False)
+
+    ctx_size = pick_dynamic_ctx(messages, tools)
+
+    ollama_payload = {
+        "model": model,
+        "messages": messages,
+        "options": {"num_ctx": ctx_size},
+        "stream": stream,
+    }
+    if tools:
+        ollama_payload["tools"] = tools
+
+    if not stream:
+        resp = httpx.post(OLLAMA_URL, json=ollama_payload, timeout=180)
+        data = resp.json()
+        msg = data.get("message", {})
+        return {
+            "id": "athena-proxy",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": msg.get("content", ""), "tool_calls": msg.get("tool_calls")},
+                "finish_reason": "tool_calls" if msg.get("tool_calls") else "stop",
+            }],
+        }
+
+    def generate():
+        with httpx.stream("POST", OLLAMA_URL, json=ollama_payload, timeout=180) as resp:
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = chunk.get("message", {})
+                openai_chunk = {
+                    "id": "athena-proxy",
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": msg.get("content", "")} if msg.get("content") else ({"tool_calls": msg["tool_calls"]} if msg.get("tool_calls") else {}),
+                        "finish_reason": "stop" if chunk.get("done") else None,
+                    }],
+                }
+                yield f"data: {json.dumps(openai_chunk)}\n\n"
+                if chunk.get("done"):
+                    yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 
 @app.get("/health")
 def health():
