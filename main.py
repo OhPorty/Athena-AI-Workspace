@@ -245,6 +245,139 @@ def _web_fetch(url: str):
         return {"error": f"Fetch failed: {e}"}
 
 
+FILE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List files and directories at a path within the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path relative to workspace root. Use '.' for the root."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file's contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path relative to workspace root."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create a new file, or overwrite an existing one entirely. Use edit_file instead if you only need to change part of an existing file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "content": {"type": "string", "description": "Full file content to write."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace one exact occurrence of text in an existing file. old_text must match uniquely -- include enough surrounding context if the text could appear more than once.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "old_text": {"type": "string", "description": "Exact text to find and replace. Must appear exactly once in the file."},
+                    "new_text": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
+]
+
+def _resolve_workspace_path(workspace: str, rel_path: str) -> str:
+    """Resolve a model-supplied relative path against the workspace root,
+    refusing to ever resolve outside it. This is the actual safety
+    boundary for file tools -- without it, a path like '../../etc/passwd'
+    or an absolute path would let the model read/write anywhere on the
+    filesystem the Athena process has access to, not just the intended
+    workspace directory."""
+    workspace_root = os.path.realpath(workspace)
+    candidate = os.path.realpath(os.path.join(workspace_root, rel_path or "."))
+    if candidate != workspace_root and not candidate.startswith(workspace_root + os.sep):
+        raise ValueError(f"Path '{rel_path}' resolves outside the workspace, refusing.")
+    return candidate
+
+def _list_files(workspace: str, rel_path: str):
+    try:
+        target = _resolve_workspace_path(workspace, rel_path)
+        if not os.path.isdir(target):
+            return {"error": f"Not a directory: {rel_path}"}
+        entries = []
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            entries.append({"name": name, "type": "dir" if os.path.isdir(full) else "file"})
+        return {"path": rel_path, "entries": entries}
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"list_files failed: {e}"}
+
+def _read_file(workspace: str, rel_path: str):
+    try:
+        target = _resolve_workspace_path(workspace, rel_path)
+        if not os.path.isfile(target):
+            return {"error": f"Not a file: {rel_path}"}
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        return {"path": rel_path, "content": content[:20000]}
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"read_file failed: {e}"}
+
+def _write_file(workspace: str, rel_path: str, file_content: str):
+    try:
+        target = _resolve_workspace_path(workspace, rel_path)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(file_content)
+        return {"path": rel_path, "written": True, "bytes": len(file_content)}
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"write_file failed: {e}"}
+
+def _edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
+    try:
+        target = _resolve_workspace_path(workspace, rel_path)
+        if not os.path.isfile(target):
+            return {"error": f"Not a file: {rel_path}"}
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        count = content.count(old_text)
+        if count == 0:
+            return {"error": "old_text not found in file"}
+        if count > 1:
+            return {"error": f"old_text appears {count} times -- must be unique, add more context"}
+        content = content.replace(old_text, new_text)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"path": rel_path, "edited": True}
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"edit_file failed: {e}"}
+
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
     print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
@@ -261,7 +394,8 @@ def chat_stream(req: ChatIn):
     tools = get_lcm_tools()
     if req.search_url:
         tools = tools + WEB_TOOL_SCHEMAS
-    # TODO once Pi bridge exists: if req.workspace: tools += get_file_tools()
+    if req.workspace:
+        tools = tools + FILE_TOOL_SCHEMAS
 
     _raw_messages = [{"role": "system", "content": system_prompt}] + context
     # Some chat templates (e.g. qwen3.5's) require every system-role
@@ -296,6 +430,14 @@ def chat_stream(req: ChatIn):
             return _web_search(req.search_url, args.get("query", ""))
         if name == "web_fetch":
             return _web_fetch(args.get("url", ""))
+        if name == "list_files":
+            return _list_files(req.workspace, args.get("path", "."))
+        if name == "read_file":
+            return _read_file(req.workspace, args.get("path", ""))
+        if name == "write_file":
+            return _write_file(req.workspace, args.get("path", ""), args.get("content", ""))
+        if name == "edit_file":
+            return _edit_file(req.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
 
         args["session_id"] = req.session_id
         try:

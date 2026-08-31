@@ -271,7 +271,7 @@
                         <div class="space-y-1" x-show="ep.detectedModels && ep.detectedModels.length">
                             <template x-for="m in ep.detectedModels" :key="m">
                                 <label class="flex items-center gap-2 text-sm py-1 cursor-pointer">
-                                    <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-violet-600 checked:border-violet-600 cursor-pointer">
+                                    <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-violet-600 checked:border-violet-600 dark:checked:bg-violet-600 dark:checked:border-violet-600 cursor-pointer">
                                     <span x-text="m"></span>
                                 </label>
                             </template>

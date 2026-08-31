@@ -28,11 +28,15 @@
 .prose-msg pre {
     position: relative;
     background: #1e1e2e !important;
+    color: #e4e4e7 !important;
     border-radius: 10px;
     padding: 14px 16px;
     overflow-x: auto;
     font-size: 13px;
     margin: 0.75em 0;
+}
+.prose-msg pre code {
+    color: inherit !important;
 }
 .prose-msg code {
     font-family: "SF Mono", Consolas, monospace;
