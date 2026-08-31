@@ -136,6 +136,50 @@ def detect_models(req: DetectModelsIn):
     except Exception as e:
         return {"error": f"Could not reach endpoint: {e}"}
 
+
+@app.get("/api/workspace/browse")
+def browse_workspace(path: str = ""):
+    """List subdirectories at a given path, for the workspace picker.
+    Defaults to the user's home directory. Only lists directories --
+    this is for choosing a workspace ROOT, not general file browsing
+    (that's what the model's own list_files tool is for, once a
+    workspace is actually bound)."""
+    target = os.path.realpath(path) if path else os.path.expanduser("~")
+    if not os.path.isdir(target):
+        return {"error": f"Not a directory: {target}"}
+    try:
+        dirs = sorted([
+            name for name in os.listdir(target)
+            if os.path.isdir(os.path.join(target, name)) and not name.startswith(".")
+        ], key=str.lower)
+    except PermissionError:
+        return {"error": f"Permission denied: {target}"}
+    parent = os.path.dirname(target) if target != "/" else None
+    return {"path": target, "parent": parent, "directories": dirs}
+
+
+class MkdirIn(BaseModel):
+    path: str
+    name: str
+
+@app.post("/api/workspace/mkdir")
+def mkdir_workspace(req: MkdirIn):
+    """Create a new directory inside the given path, for the workspace
+    picker's 'New Folder' action."""
+    if not req.name or "/" in req.name or req.name in (".", ".."):
+        return {"error": "Invalid folder name."}
+    base = os.path.realpath(req.path)
+    if not os.path.isdir(base):
+        return {"error": f"Not a directory: {base}"}
+    new_dir = os.path.join(base, req.name)
+    try:
+        os.makedirs(new_dir, exist_ok=False)
+        return {"path": new_dir}
+    except FileExistsError:
+        return {"error": "A folder with that name already exists."}
+    except Exception as e:
+        return {"error": f"Could not create folder: {e}"}
+
 WEB_TOOL_SCHEMAS = [
     {
         "type": "function",

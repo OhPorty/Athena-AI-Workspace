@@ -159,7 +159,7 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
                                 <span x-text="maxCtx === 0 ? 'ctx: auto' : 'ctx: ' + maxCtx"></span>
                             </button>
-                            <button @click="workspacePopupOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition" :class="workspace ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'">
+                            <button @click="openWorkspacePopup()" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition" :class="workspace ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                                 <span x-text="workspace || 'no workspace'"></span>
                             </button>
@@ -185,7 +185,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             <div class="text-lg font-medium text-neutral-700 dark:text-neutral-300">No workspace connected</div>
             <div class="text-sm text-center max-w-sm">Set a workspace path in a chat's workspace pill to browse and edit files here. File tools stay off until you do.</div>
-            <button @click="currentPage = 'chat'; workspacePopupOpen = true" class="mt-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Set a workspace</button>
+            <button @click="currentPage = 'chat'; openWorkspacePopup()" class="mt-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Set a workspace</button>
         </div>
     </template>
 
@@ -363,11 +363,33 @@
 
 <!-- WORKSPACE POPUP -->
 <div x-show="workspacePopupOpen" x-cloak @click.self="workspacePopupOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-96 shadow-2xl">
+    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-[420px] shadow-2xl">
         <h3 class="font-semibold text-sm mb-2">Workspace</h3>
-        <p class="text-xs text-neutral-500 dark:text-neutral-400 mb-3">File creation/editing tools only activate when a workspace path is set. Leave empty to keep Athena read-only.</p>
-        <input type="text" x-model="workspace" placeholder="/home/user/project" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 mb-3">
-        <button @click="workspacePopupOpen = false" class="w-full py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Save</button>
+        <p class="text-xs text-neutral-500 dark:text-neutral-400 mb-3">File creation/editing tools only activate when a workspace is set. Choose "None" to keep Athena read-only.</p>
+
+        <div class="flex items-center gap-2 mb-2 text-xs">
+            <button @click="workspaceBrowseUp()" :disabled="!workspaceBrowseParent" class="px-2 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-30">&uarr; Up</button>
+            <span class="font-mono truncate flex-1 text-neutral-500 dark:text-neutral-400" x-text="workspaceBrowsePath"></span>
+        </div>
+
+        <div class="border border-neutral-200 dark:border-neutral-700 rounded-lg max-h-52 overflow-y-auto mb-3">
+            <template x-for="dir in workspaceBrowseDirs" :key="dir">
+                <div @click="workspaceBrowseInto(dir)" class="px-3 py-2 text-sm cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700 flex items-center gap-2">
+                    <span>📁</span><span x-text="dir"></span>
+                </div>
+            </template>
+            <div x-show="workspaceBrowseDirs.length === 0" class="px-3 py-3 text-xs text-neutral-400 dark:text-neutral-500">No subdirectories here.</div>
+        </div>
+
+        <div class="flex gap-2 mb-3">
+            <input type="text" x-model="newFolderName" placeholder="New folder name" class="flex-1 text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
+            <button @click="createWorkspaceFolder()" class="px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 text-xs hover:bg-neutral-100 dark:hover:bg-neutral-700">+ Create</button>
+        </div>
+
+        <div class="flex gap-2">
+            <button @click="workspace = ''; workspacePopupOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">None</button>
+            <button @click="workspace = workspaceBrowsePath; workspacePopupOpen = false" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Select This Folder</button>
+        </div>
     </div>
 </div>
 

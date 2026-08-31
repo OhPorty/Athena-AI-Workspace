@@ -50,6 +50,10 @@ function athenaApp() {
         modelPopupOpen: false,
         workspace: "",
         workspacePopupOpen: false,
+        workspaceBrowsePath: "",
+        workspaceBrowseParent: null,
+        workspaceBrowseDirs: [],
+        newFolderName: "",
 
         // --- notes ---
         notes: JSON.parse(localStorage.getItem("athena_notes") || "[]"),
@@ -184,6 +188,59 @@ function athenaApp() {
 
         saveSearchUrl() {
             localStorage.setItem("athena_search_url", this.searchUrl);
+        },
+
+        openWorkspacePopup() {
+            this.workspacePopupOpen = true;
+            this.newFolderName = "";
+            this.loadWorkspaceBrowse(this.workspace || "");
+        },
+
+        async loadWorkspaceBrowse(path) {
+            try {
+                const resp = await fetch(`/api/workspace/browse?path=${encodeURIComponent(path)}`);
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Browse error: " + data.error);
+                    return;
+                }
+                this.workspaceBrowsePath = data.path;
+                this.workspaceBrowseParent = data.parent;
+                this.workspaceBrowseDirs = data.directories;
+            } catch (e) {
+                alert("Browse failed: " + e.message);
+            }
+        },
+
+        workspaceBrowseUp() {
+            if (this.workspaceBrowseParent) {
+                this.loadWorkspaceBrowse(this.workspaceBrowseParent);
+            }
+        },
+
+        workspaceBrowseInto(dirName) {
+            const next = this.workspaceBrowsePath.replace(/\/$/, "") + "/" + dirName;
+            this.loadWorkspaceBrowse(next);
+        },
+
+        async createWorkspaceFolder() {
+            if (!this.newFolderName.trim()) return;
+            try {
+                const resp = await fetch("/api/workspace/mkdir", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({path: this.workspaceBrowsePath, name: this.newFolderName.trim()}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Create folder error: " + data.error);
+                    return;
+                }
+                this.newFolderName = "";
+                this.loadWorkspaceBrowse(this.workspaceBrowsePath);
+            } catch (e) {
+                alert("Create folder failed: " + e.message);
+            }
         },
 
         setAsDefaultModel() {
