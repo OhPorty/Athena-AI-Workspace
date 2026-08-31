@@ -329,7 +329,7 @@ function athenaApp() {
             }
             this.scrollToBottom();
 
-            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, ttsLabel: "Play"};
+            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, ttsLabel: "Play", toolCalls: []};
             this.messages.push(assistantMsg);
             const msgIndex = this.messages.length - 1;
 
@@ -367,6 +367,19 @@ function athenaApp() {
                         if (data.delta) {
                             this.messages[msgIndex].content += data.delta;
                             this.messages[msgIndex].thinkingOpen = false;
+                            this.scrollToBottom();
+                        }
+                        if (data.type === "tool_start") {
+                            this.messages[msgIndex].toolCalls.push({tool: data.tool, status: "running", output: null, open: true});
+                            this.scrollToBottom();
+                        }
+                        if (data.type === "tool_output") {
+                            const tc = this.messages[msgIndex].toolCalls.find(t => t.tool === data.tool && t.status === "running");
+                            if (tc) {
+                                tc.status = "done";
+                                tc.output = data.output;
+                                tc.open = false;
+                            }
                             this.scrollToBottom();
                         }
                         if (data.done) {

@@ -107,6 +107,24 @@
                                             <div x-show="msg.thinkingOpen" class="px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap max-h-48 overflow-y-auto" x-text="msg.thinking"></div>
                                         </div>
                                     </template>
+                                    <template x-if="msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length">
+                                        <div class="w-full space-y-1.5">
+                                            <template x-for="(tc, tcIdx) in msg.toolCalls" :key="tcIdx">
+                                                <div class="border border-neutral-200 dark:border-neutral-700 rounded-xl overflow-hidden">
+                                                    <div @click="tc.open = !tc.open" class="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-neutral-800 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400">
+                                                        <span class="flex items-center gap-2">
+                                                            <span x-show="tc.status === 'running'" class="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse"></span>
+                                                            <span x-show="tc.status === 'done'" class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
+                                                            <span class="font-mono" x-text="tc.tool"></span>
+                                                            <span x-text="tc.status === 'running' ? '(running...)' : '(done)'"></span>
+                                                        </span>
+                                                        <span x-text="tc.open ? '▲' : '▼'"></span>
+                                                    </div>
+                                                    <div x-show="tc.open" class="px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
                                     <div :class="msg.role === 'user' ? 'bg-violet-600 text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100'"
                                          class="text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(msg.content)"></div>
                                     <div class="flex items-center gap-3" x-show="msg.role === 'assistant' && msg.content">
