@@ -29,8 +29,14 @@ AGENT_SYSTEM_SUFFIX = (
     "rather than guessing when you need real information."
 )
 
-CTX_TIERS = [4096, 8192, 16384, 32768, 65536, 131072]
-MAX_CTX_DEFAULT = int(os.environ.get("ATHENA_MAX_CTX", "32768"))
+# Direct port of Odysseus's proven _pick_dynamic_ctx formula and step
+# list (src/llm_core.py) -- same steps, same len(text)//3 + 16000
+# headroom, same ceiling default. Not reinvented -- Odysseus's version
+# is confirmed working in production; this mirrors it exactly rather
+# than trusting a from-scratch reimplementation that kept landing at
+# the wrong number in testing.
+_CTX_STEPS = [4096, 16384, 32768, 65536, 131072]
+MAX_CTX_DEFAULT = int(os.environ.get("ATHENA_MAX_CTX", "65536"))  # matches Odysseus's OLLAMA_NUM_CTX_OVERRIDE
 
 def estimate_tokens(messages: list, tools: list = None) -> int:
     total_chars = 0
@@ -42,11 +48,18 @@ def estimate_tokens(messages: list, tools: list = None) -> int:
         total_chars += len(json.dumps(tools))
     return max(1, total_chars // 4)
 
-def pick_dynamic_ctx(messages: list, tools: list = None, output_headroom: int = 2048, max_ctx: int = MAX_CTX_DEFAULT) -> int:
-    needed = estimate_tokens(messages, tools) + output_headroom
-    for tier in CTX_TIERS:
-        if tier >= needed:
-            return min(tier, max_ctx)
+def pick_dynamic_ctx(messages: list, tools: list = None, max_ctx: int = MAX_CTX_DEFAULT) -> int:
+    combined_text = ""
+    for m in messages:
+        content = m.get("content") or ""
+        if isinstance(content, str):
+            combined_text += content
+    if tools:
+        combined_text += json.dumps(tools)
+    needed = len(combined_text) // 3 + 16000
+    for step in _CTX_STEPS:
+        if step >= needed and step <= max_ctx:
+            return step
     return max_ctx
 
 
@@ -139,29 +152,83 @@ def chat_stream(req: ChatIn):
         ctx_size = req.max_ctx
     prompt_tokens = estimate_tokens(messages, tools)
 
+    def _execute_tool_call(tool_call):
+        """Dispatch a single tool call. Right now only LCM's own tools
+        (lcm_recall_search, lcm_recall_expand) exist -- forward those to
+        LCM's generic /tools/call endpoint. Anything else currently has
+        nowhere to go and returns a clear error rather than failing silently."""
+        fn = tool_call.get("function", {})
+        name = fn.get("name", "")
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        args["session_id"] = req.session_id
+        try:
+            resp = httpx.post(f"{LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
+            if resp.status_code == 200:
+                return resp.json().get("result")
+            return {"error": f"Tool call failed: HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"error": f"Tool call failed: {e}"}
+
     def generate():
         full_reply = ""
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
-        with httpx.stream("POST", _target_url, json={
-            "model": req.model,
-            "messages": messages,
-            "tools": tools if tools else None,
-            "options": {"num_ctx": ctx_size},
-            "stream": True,
-        }, timeout=180) as resp:
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                delta = chunk.get("message", {}).get("content", "")
-                if delta:
-                    full_reply += delta
-                    yield f"data: {json.dumps({'delta': delta})}\n\n"
-                if chunk.get("done"):
-                    yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens})}\n\n"
+        _messages = list(messages)
+        MAX_ROUNDS = 5
+
+        for _round in range(MAX_ROUNDS):
+            round_reply = ""
+            round_tool_calls = []
+
+            with httpx.stream("POST", _target_url, json={
+                "model": req.model,
+                "messages": _messages,
+                "tools": tools if tools else None,
+                "options": {"num_ctx": ctx_size},
+                "stream": True,
+            }, timeout=180) as resp:
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    msg = chunk.get("message", {})
+                    thinking_delta = msg.get("thinking", "")
+                    if thinking_delta:
+                        yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
+                    delta = msg.get("content", "")
+                    if delta:
+                        round_reply += delta
+                        full_reply += delta
+                        yield f"data: {json.dumps({'delta': delta})}\n\n"
+                    if msg.get("tool_calls"):
+                        round_tool_calls.extend(msg["tool_calls"])
+                    if chunk.get("done"):
+                        break
+
+            if not round_tool_calls:
+                yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens})}\n\n"
+                break
+
+            # Model wants to call tool(s) -- execute each, tell the
+            # frontend what's happening, then loop back with results
+            # appended so the model can use them for its next turn.
+            _messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
+            for tc in round_tool_calls:
+                tool_name = tc.get("function", {}).get("name", "unknown")
+                yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
+                result = _execute_tool_call(tc)
+                yield f"data: {json.dumps({'type': 'tool_output', 'tool': tool_name, 'output': result})}\n\n"
+                _messages.append({"role": "tool", "content": json.dumps(result)})
+        else:
+            yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'note': 'max tool rounds reached'})}\n\n"
+
         send_to_lcm(req.session_id, "assistant", full_reply)
 
     return StreamingResponse(generate(), media_type="text/event-stream")

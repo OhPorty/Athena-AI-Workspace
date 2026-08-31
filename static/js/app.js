@@ -54,11 +54,32 @@ function athenaApp() {
         activeNoteId: null,
 
         init() {
+            // URL hash reflects state as #page/sessionId, e.g.
+            // #chat/9f2e... or #settings -- lets refresh/back-button/
+            // sharing a link actually restore where you were.
+            const hash = window.location.hash.replace(/^#/, "");
+            const [hashPage, hashSession] = hash.split("/");
+            if (hashPage) this.currentPage = hashPage;
+            if (hashSession) {
+                this.sessionId = hashSession;
+                localStorage.setItem("athena_session", hashSession);
+            }
+
             localStorage.setItem("athena_session", this.sessionId);
             if (!this.sessions.find(s => s.id === this.sessionId)) {
                 this.sessions.unshift({id: this.sessionId, label: "New chat", createdAt: Date.now(), pinned: false});
                 this.saveSessions();
             }
+
+            this.updateHash();
+            this.$watch("currentPage", () => this.updateHash());
+            this.$watch("sessionId", () => this.updateHash());
+        },
+
+        updateHash() {
+            const parts = [this.currentPage];
+            if (this.currentPage === "chat") parts.push(this.sessionId);
+            window.location.hash = parts.join("/");
         },
 
         toggleTheme() {
@@ -291,7 +312,7 @@ function athenaApp() {
             }
             this.scrollToBottom();
 
-            const assistantMsg = {role: "assistant", content: "", ctxUsed: null, promptTokens: null, ttsLabel: "Play"};
+            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, ttsLabel: "Play"};
             this.messages.push(assistantMsg);
             const msgIndex = this.messages.length - 1;
 
@@ -322,8 +343,13 @@ function athenaApp() {
                     for (const line of lines) {
                         if (!line.startsWith("data: ")) continue;
                         const data = JSON.parse(line.slice(6));
+                        if (data.thinking) {
+                            this.messages[msgIndex].thinking += data.thinking;
+                            this.scrollToBottom();
+                        }
                         if (data.delta) {
                             this.messages[msgIndex].content += data.delta;
+                            this.messages[msgIndex].thinkingOpen = false;
                             this.scrollToBottom();
                         }
                         if (data.done) {
