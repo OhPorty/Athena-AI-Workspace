@@ -33,6 +33,7 @@ function athenaApp() {
         isRecording: false,
         mediaRecorder: null,
         audioChunks: [],
+        defaultModel: JSON.parse(localStorage.getItem("athena_default_model") || "null"),
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
@@ -54,6 +55,16 @@ function athenaApp() {
         activeNoteId: null,
 
         init() {
+            // Load the saved default model, if one was ever set in
+            // Settings. This is separate from `model` (the active
+            // model for the current chat) so switching models mid-chat
+            // never silently overwrites your saved default.
+            if (this.defaultModel) {
+                this.model = this.defaultModel.value;
+                this.modelLabel = this.defaultModel.label;
+                this.modelEndpointUrl = this.defaultModel.endpointUrl || "";
+            }
+
             // URL hash reflects state as #page/sessionId, e.g.
             // #chat/9f2e... or #settings -- lets refresh/back-button/
             // sharing a link actually restore where you were.
@@ -168,6 +179,12 @@ function athenaApp() {
             this.modelLabel = m.label;
             this.modelEndpointUrl = m.endpointUrl || "";
             this.modelPopupOpen = false;
+        },
+
+        setAsDefaultModel() {
+            if (!this.model) return;
+            this.defaultModel = {value: this.model, label: this.modelLabel, endpointUrl: this.modelEndpointUrl};
+            localStorage.setItem("athena_default_model", JSON.stringify(this.defaultModel));
         },
 
         allAvailableModels() {
