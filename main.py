@@ -26,7 +26,11 @@ BASE_SYSTEM_PROMPT = (
 
 AGENT_SYSTEM_SUFFIX = (
     " You have access to tools listed below when relevant -- use them "
-    "rather than guessing when you need real information."
+    "rather than guessing when you need real information. When presenting "
+    "structured or tabular data (schedules, forecasts, comparisons, lists "
+    "of items with multiple fields each), format it as a real markdown "
+    "table with | column | headers | -- not a run-on list of colon-separated "
+    "values."
 )
 
 # Direct port of Odysseus's proven _pick_dynamic_ctx formula and step
@@ -70,6 +74,7 @@ class ChatIn(BaseModel):
     max_ctx: int = 0  # 0 = dynamic sizing; any other value is an explicit override
     workspace: str = ""  # empty = no workspace bound; file tools stay disabled
     endpoint_url: str = ""  # empty = use the default OLLAMA_URL
+    search_url: str = ""  # SearXNG base URL; empty = web_search/web_fetch tools unavailable
 
 
 class TtsIn(BaseModel):
@@ -131,6 +136,115 @@ def detect_models(req: DetectModelsIn):
     except Exception as e:
         return {"error": f"Could not reach endpoint: {e}"}
 
+WEB_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web and automatically fetch readable content from the top results -- returns full page text, not just snippets, so you usually don't need a separate web_fetch call after this. Use for anything current/external not already in context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch and extract readable text from a specific URL. Use after web_search to read a promising result, or when given a URL directly.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+def _web_search(search_url: str, query: str):
+    """Search then auto-fetch the top results concurrently, keeping only
+    the ones that actually parsed to real content -- ports Odysseus's
+    proven approach (services/search/core.py comprehensive_web_search):
+    the model never has to decide "try another URL", since failed/blocked
+    fetches are silently filtered out before it ever sees the response.
+    This is what fixed Odysseus's own indecisive-looping problem."""
+    try:
+        resp = httpx.get(f"{search_url.rstrip('/')}/search", params={"q": query, "format": "json"}, timeout=15)
+        if resp.status_code != 200:
+            return {"error": f"SearXNG responded with HTTP {resp.status_code}"}
+        results = resp.json().get("results", [])[:5]
+        if not results:
+            return {"error": "No search results found."}
+
+        import concurrent.futures
+        fetched = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_result = {
+                executor.submit(_web_fetch, r.get("url", "")): r
+                for r in results if r.get("url")
+            }
+            for future in concurrent.futures.as_completed(future_to_result):
+                r = future_to_result[future]
+                try:
+                    fetch_result = future.result()
+                    if "content" in fetch_result and fetch_result["content"]:
+                        fetched.append({
+                            "title": r.get("title"),
+                            "url": r.get("url"),
+                            "content": fetch_result["content"][:2500],
+                        })
+                except Exception:
+                    pass  # a single failed fetch shouldn't fail the whole search
+
+        if not fetched:
+            # Every candidate failed to fetch -- fall back to snippets alone
+            # rather than returning nothing at all.
+            return [{"title": r.get("title"), "url": r.get("url"), "snippet": r.get("content")} for r in results]
+
+        return fetched
+    except Exception as e:
+        return {"error": f"Search failed: {e}"}
+
+def _web_fetch(url: str):
+    """Fetch and extract clean readable text -- uses BeautifulSoup for
+    real HTML parsing (same technique Odysseus uses), not a regex
+    tag-strip. A regex-only approach leaves nav/ad/script text mixed
+    into the output, which was confusing local models into treating
+    real content as unreliable. Structural elements (lists, headings)
+    get separators so the model can still parse a readable shape."""
+    try:
+        from bs4 import BeautifulSoup
+        resp = httpx.get(url, timeout=15, follow_redirects=True, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; AthenaBot/1.0)"
+        })
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
+            tag.decompose()
+
+        title_tag = soup.find("title")
+        title = title_tag.get_text(strip=True) if title_tag else ""
+
+        text = soup.get_text(separator="\n", strip=True)
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        text = "\n".join(lines)
+
+        if not text:
+            return {"error": f"web_fetch: {url}: no readable text content (page may need JS)"}
+
+        header = f"# {title}\nSource: {url}\n\n" if title else f"Source: {url}\n\n"
+        output = header + text
+        return {"url": url, "content": output[:6000]}
+    except Exception as e:
+        return {"error": f"Fetch failed: {e}"}
+
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
     print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
@@ -145,6 +259,8 @@ def chat_stream(req: ChatIn):
     # bound to it, regardless of how it reads an ambiguous prompt.
     system_prompt = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
     tools = get_lcm_tools()
+    if req.search_url:
+        tools = tools + WEB_TOOL_SCHEMAS
     # TODO once Pi bridge exists: if req.workspace: tools += get_file_tools()
 
     _raw_messages = [{"role": "system", "content": system_prompt}] + context
@@ -176,6 +292,11 @@ def chat_stream(req: ChatIn):
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
+        if name == "web_search":
+            return _web_search(req.search_url, args.get("query", ""))
+        if name == "web_fetch":
+            return _web_fetch(args.get("url", ""))
+
         args["session_id"] = req.session_id
         try:
             resp = httpx.post(f"{LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
@@ -240,6 +361,9 @@ def chat_stream(req: ChatIn):
                 yield f"data: {json.dumps({'type': 'tool_output', 'tool': tool_name, 'output': result})}\n\n"
                 _messages.append({"role": "tool", "content": json.dumps(result)})
         else:
+            fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
+            full_reply = fallback_msg
+            yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
             yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'note': 'max tool rounds reached'})}\n\n"
 
         print(f"[DEBUG] full_reply length={len(full_reply)!r} content={full_reply[:200]!r}", flush=True)

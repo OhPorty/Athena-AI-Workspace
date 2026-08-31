@@ -313,6 +313,13 @@
                 </div>
 
                 <div>
+                    <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Tools</h3>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-1.5">SearXNG URL (enables web_search and web_fetch)</label>
+                    <input type="text" x-model="searchUrl" @change="saveSearchUrl()" placeholder="http://localhost:4444" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1.5" x-show="!searchUrl">Web search tools are unavailable until this is set.</div>
+                </div>
+
+                <div>
                     <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Data</h3>
                     <div class="flex items-center justify-between py-2">
                         <span class="text-sm">Export sessions &amp; notes</span>

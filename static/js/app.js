@@ -34,6 +34,7 @@ function athenaApp() {
         mediaRecorder: null,
         audioChunks: [],
         defaultModel: JSON.parse(localStorage.getItem("athena_default_model") || "null"),
+        searchUrl: localStorage.getItem("athena_search_url") || "",
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
@@ -179,6 +180,10 @@ function athenaApp() {
             this.modelLabel = m.label;
             this.modelEndpointUrl = m.endpointUrl || "";
             this.modelPopupOpen = false;
+        },
+
+        saveSearchUrl() {
+            localStorage.setItem("athena_search_url", this.searchUrl);
         },
 
         setAsDefaultModel() {
@@ -344,6 +349,7 @@ function athenaApp() {
                         max_ctx: this.maxCtx,
                         workspace: this.workspace,
                         endpoint_url: this.modelEndpointUrl,
+                        search_url: this.searchUrl,
                     }),
                 });
 
