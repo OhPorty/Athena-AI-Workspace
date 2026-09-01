@@ -652,14 +652,88 @@ def get_history(session_id: str):
 # with zero per-model Modelfile baking required.
 # ---------------------------------------------------------------------------
 
+def _normalize_message_content(messages: list) -> list:
+    """OpenAI-format clients (like Pi) may send content as an array of
+    blocks (e.g. [{"type": "text", "text": "..."}]) for multimodal
+    support. Ollama's native API only accepts a plain string -- passing
+    the array shape through unchanged causes a Go-side unmarshal error
+    on Ollama's end, which surfaces as a silent {'error': ...} chunk
+    with no finish_reason, confusing OpenAI-compat clients that expect
+    a clean stream end.
+
+    Real OpenAI spec also requires tool_calls[].function.arguments to
+    be a JSON-encoded STRING (which is what a spec-correct client like
+    Pi sends back in conversation history), but Ollama's native API
+    outputs -- and expects -- that same field as a real object/dict.
+    Forwarding the string form unchanged causes Ollama's Go parser to
+    choke trying to unmarshal a string where it expects an object,
+    surfacing as "Value looks like object, but can't find closing '}'
+    symbol". Convert it back to an object before forwarding."""
+    normalized = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                block.get("text", "") for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            m = {**m, "content": "\n".join(text_parts)}
+        elif content is None:
+            # Spec-correct OpenAI clients send content: null on an
+            # assistant message that only carries tool_calls. Ollama's
+            # Go struct expects content to always be a string; null
+            # produces the same confusing "can't find closing brace"
+            # class of parse error as the array-content case above.
+            m = {**m, "content": ""}
+
+        tool_calls = m.get("tool_calls")
+        if tool_calls:
+            fixed_calls = []
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                if not isinstance(args, dict):
+                    # A prior failed/malformed tool call can leave a
+                    # non-object value (e.g. []) recorded in history.
+                    # Ollama's Go struct requires an object here --
+                    # coerce anything else to empty rather than
+                    # crashing every subsequent request in the
+                    # conversation on a single bad historical entry.
+                    args = {}
+                fixed_calls.append({**tc, "function": {**fn, "arguments": args}})
+            m = {**m, "tool_calls": fixed_calls}
+
+        normalized.append(m)
+    return normalized
+
+
 @app.post("/v1/chat/completions")
 async def openai_compat_proxy(request: Request):
     body = await request.json()
     model = body.get("model", DEFAULT_MODEL)
-    messages = body.get("messages", [])
+    messages = _normalize_message_content(body.get("messages", []))
     tools = body.get("tools")
     stream = body.get("stream", False)
 
+    _summary = []
+    for i, m in enumerate(messages):
+        tc = m.get("tool_calls")
+        tc_info = ""
+        if tc:
+            for t in tc:
+                args = t.get("function", {}).get("arguments")
+                tc_info += f" tool_call_args_type={type(args).__name__}:{repr(args)[:80]}"
+        _summary.append(f"[{i}] role={m.get('role')} content_type={type(m.get('content')).__name__}{tc_info}")
+    print("[PROXY-DEBUG] message summary:\n" + "\n".join(_summary), flush=True)
+    if tools:
+        for t in tools:
+            if t.get("function", {}).get("name") == "read":
+                print(f"[PROXY-DEBUG] read tool schema={json.dumps(t, indent=2)}", flush=True)
     ctx_size = pick_dynamic_ctx(messages, tools)
 
     ollama_payload = {
@@ -695,15 +769,45 @@ async def openai_compat_proxy(request: Request):
                     chunk = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                print(f"[PROXY-DEBUG] chunk={chunk}", flush=True)
                 msg = chunk.get("message", {})
+
+                delta = {}
+                if msg.get("content"):
+                    delta = {"content": msg["content"]}
+                elif msg.get("tool_calls"):
+                    # Real OpenAI streaming format requires each tool call to
+                    # have a top-level "index" and function.arguments as a
+                    # JSON-encoded STRING (clients accumulate it as string
+                    # fragments across chunks). Ollama sends the whole call
+                    # complete in one chunk with arguments as a real object
+                    # and no top-level index -- forwarding that shape
+                    # unchanged silently breaks spec-compliant streaming
+                    # clients like Pi, which end up recording empty
+                    # arguments despite the real data having been sent.
+                    fixed_tool_calls = []
+                    for i, tc in enumerate(msg["tool_calls"]):
+                        fn = tc.get("function", {})
+                        args = fn.get("arguments", {})
+                        fixed_tool_calls.append({
+                            "index": i,
+                            "id": tc.get("id", f"call_{i}"),
+                            "type": "function",
+                            "function": {
+                                "name": fn.get("name", ""),
+                                "arguments": json.dumps(args) if isinstance(args, dict) else (args or ""),
+                            },
+                        })
+                    delta = {"tool_calls": fixed_tool_calls}
+
                 openai_chunk = {
                     "id": "athena-proxy",
                     "object": "chat.completion.chunk",
                     "model": model,
                     "choices": [{
                         "index": 0,
-                        "delta": {"content": msg.get("content", "")} if msg.get("content") else ({"tool_calls": msg["tool_calls"]} if msg.get("tool_calls") else {}),
-                        "finish_reason": "stop" if chunk.get("done") else None,
+                        "delta": delta,
+                        "finish_reason": ("tool_calls" if msg.get("tool_calls") else "stop") if chunk.get("done") else None,
                     }],
                 }
                 yield f"data: {json.dumps(openai_chunk)}\n\n"
