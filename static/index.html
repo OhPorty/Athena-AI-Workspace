@@ -163,6 +163,10 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                                 <span x-text="workspace || 'no workspace'"></span>
                             </button>
+                            <button @click="usePi = !usePi" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition disabled:opacity-30" :class="usePi ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-500/10' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'" :title="workspace ? 'Route through the Pi coding harness' : 'Set a workspace to enable Pi'">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                                <span x-text="usePi ? 'Pi: on' : 'Pi: off'"></span>
+                            </button>
                         </div>
                         <div class="flex items-end gap-2 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 p-2 shadow-sm focus-within:border-violet-400 dark:focus-within:border-violet-600 transition">
                             <button @click="toggleRecording()" class="p-2.5 rounded-xl transition" :class="isRecording ? 'text-red-500 bg-red-50 dark:bg-red-500/10' : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800'">

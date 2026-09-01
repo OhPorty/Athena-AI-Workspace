@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "network": {
+    "allowedDomains": ["*"],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": ["/home", "/root", "/etc/passwd", "/etc/shadow"],
+    "allowRead": [".", "~/.config", "~/.local"],
+    "allowWrite": [".", "/tmp"],
+    "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
+  }
+}

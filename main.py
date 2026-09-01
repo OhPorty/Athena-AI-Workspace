@@ -2,6 +2,7 @@
 Athena — a lean, LCM-backed chat/agent workspace with voice support.
 """
 import os
+import subprocess
 import io
 import json
 import tempfile
@@ -75,6 +76,7 @@ class ChatIn(BaseModel):
     workspace: str = ""  # empty = no workspace bound; file tools stay disabled
     endpoint_url: str = ""  # empty = use the default OLLAMA_URL
     search_url: str = ""  # SearXNG base URL; empty = web_search/web_fetch tools unavailable
+    use_pi: bool = False  # route through the Pi coding harness instead of Athena's own chat loop; requires workspace to be set
 
 
 class TtsIn(BaseModel):
@@ -422,8 +424,145 @@ def _edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
         return {"error": f"edit_file failed: {e}"}
 
 
+# Self-contained Pi config lives inside the Athena repo (not the user's
+# personal ~/.pi/agent, which may be shared with other unrelated Pi
+# projects) -- keeps the whole coding-harness setup portable: clone
+# Athena elsewhere and this directory comes with it.
+PI_AGENT_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pi-agent-config")
+PI_MODELS_JSON_PATH = os.path.join(PI_AGENT_CONFIG_DIR, "models.json")
+
+def _guess_thinking_format(model_name: str) -> dict:
+    """Heuristic mapping from model name to Pi's compat.thinkingFormat,
+    based on Pi's own documented format list (qwen, deepseek, zai, etc).
+    Only qwen is confirmed tested tonight -- others are best-effort so
+    a new model at least has a chance of getting real thinking output
+    instead of silently getting none."""
+    name = model_name.lower()
+    if "qwen" in name:
+        return {"thinkingFormat": "qwen"}
+    if "deepseek" in name:
+        return {"thinkingFormat": "deepseek"}
+    return {}
+
+def _ensure_pi_model_registered(model_name: str):
+    """Make sure Pi's models.json has an entry for whatever model is
+    currently selected in Athena, so Pi always works with 'whatever
+    model we have selected for that message' instead of requiring
+    every model to be manually pre-added to a static config file.
+    Runs before every Pi invocation -- cheap (small JSON file) and
+    keeps the two systems in sync automatically."""
+    try:
+        with open(PI_MODELS_JSON_PATH) as f:
+            config = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        config = {"providers": {}}
+
+    athena_provider = config.setdefault("providers", {}).setdefault("athena", {
+        "baseUrl": "http://localhost:9500/v1",
+        "api": "openai-completions",
+        "apiKey": "athena",
+        "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+        "models": [],
+    })
+    models = athena_provider.setdefault("models", [])
+
+    for m in models:
+        if m.get("id") == model_name:
+            return  # already registered
+
+    models.append({
+        "id": model_name,
+        "name": f"{model_name} (dynamic ctx via Athena)",
+        "reasoning": True,
+        "contextWindow": MAX_CTX_DEFAULT,
+        "maxTokens": 8192,
+        "compat": _guess_thinking_format(model_name),
+    })
+
+    with open(PI_MODELS_JSON_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def _run_pi_agent(req: "ChatIn"):
+    _ensure_pi_model_registered(req.model)
+    """Stream a response via the Pi coding harness instead of Athena's
+    own chat loop. Pi handles its own tool-calling and session memory
+    (via --session-id, matching Athena's session_id so history persists
+    across messages in the same chat) -- this function only translates
+    Pi's JSON event stream into the same SSE shapes Athena's frontend
+    already understands (delta/tool_start/tool_output/done), so the
+    existing thinking panel and tool cards work unmodified."""
+    pi_binary = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node_modules", ".bin", "pi")
+    cmd = [
+        pi_binary,
+        "--provider", "athena",
+        "--model", req.model,
+        "--mode", "json",
+        "--session-id", req.session_id,
+        "-p", req.message,
+    ]
+
+    def generate():
+        full_reply = ""
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=req.workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env={**os.environ, "PI_CODING_AGENT_DIR": PI_AGENT_CONFIG_DIR},
+            )
+        except FileNotFoundError:
+            yield f"data: {json.dumps({'delta': 'Pi binary not found -- check node_modules/.bin/pi exists.'})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            return
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type")
+
+            if etype == "message_update":
+                ame = event.get("assistantMessageEvent", {})
+                ame_type = ame.get("type")
+                if ame_type == "text_delta":
+                    delta = ame.get("delta", "")
+                    full_reply += delta
+                    yield f"data: {json.dumps({'delta': delta})}\n\n"
+                elif ame_type == "toolcall_start":
+                    yield f"data: {json.dumps({'type': 'tool_start', 'tool': ame.get('toolName', 'unknown')})}\n\n"
+
+            elif etype == "tool_execution_end":
+                yield f"data: {json.dumps({'type': 'tool_output', 'tool': event.get('toolName', 'unknown'), 'output': event.get('result')})}\n\n"
+
+            elif etype == "agent_settled":
+                yield f"data: {json.dumps({'done': True})}\n\n"
+
+        proc.wait()
+        send_to_lcm(req.session_id, "assistant", full_reply)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
+    if req.use_pi:
+        if not req.workspace:
+            def _no_workspace_error():
+                yield f"data: {json.dumps({'delta': 'Pi requires a workspace to be set -- pick one from the workspace pill first.'})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+            return StreamingResponse(_no_workspace_error(), media_type="text/event-stream")
+        send_to_lcm(req.session_id, "user", req.message)
+        return _run_pi_agent(req)
+
     print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
     send_to_lcm(req.session_id, "user", req.message)
 

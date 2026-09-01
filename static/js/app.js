@@ -35,6 +35,7 @@ function athenaApp() {
         audioChunks: [],
         defaultModel: JSON.parse(localStorage.getItem("athena_default_model") || "null"),
         searchUrl: localStorage.getItem("athena_search_url") || "",
+        usePi: false,
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
@@ -407,6 +408,7 @@ function athenaApp() {
                         workspace: this.workspace,
                         endpoint_url: this.modelEndpointUrl,
                         search_url: this.searchUrl,
+                        use_pi: this.usePi,
                     }),
                 });
 

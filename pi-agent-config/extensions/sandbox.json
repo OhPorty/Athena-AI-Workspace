@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "network": {
+    "allowedDomains": ["*"],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": ["~/.ssh", "~/.aws", "~/.pi/agent/auth.json", "~/.pi/agent/mcp-oauth"],
+    "allowWrite": [".", "/tmp"],
+    "denyWrite": [".env", ".git/config"]
+  }
+}
