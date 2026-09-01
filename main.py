@@ -537,6 +537,8 @@ def _run_pi_agent(req: "ChatIn"):
                     delta = ame.get("delta", "")
                     full_reply += delta
                     yield f"data: {json.dumps({'delta': delta})}\n\n"
+                elif ame_type == "thinking_delta":
+                    yield f"data: {json.dumps({'thinking': ame.get('delta', '')})}\n\n"
                 elif ame_type == "toolcall_start":
                     yield f"data: {json.dumps({'type': 'tool_start', 'tool': ame.get('toolName', 'unknown')})}\n\n"
 
@@ -912,7 +914,15 @@ async def openai_compat_proxy(request: Request):
                 msg = chunk.get("message", {})
 
                 delta = {}
-                if msg.get("content"):
+                if msg.get("thinking"):
+                    # De facto OpenAI-compat convention for reasoning
+                    # models (vLLM, LiteLLM, etc): delta.reasoning_content.
+                    # Without this, thinking tokens Ollama genuinely sends
+                    # were silently dropped in translation -- Pi never
+                    # even had a chance to surface them, regardless of
+                    # any --thinking level or models.json config.
+                    delta = {"reasoning_content": msg["thinking"]}
+                elif msg.get("content"):
                     delta = {"content": msg["content"]}
                 elif msg.get("tool_calls"):
                     # Real OpenAI streaming format requires each tool call to
