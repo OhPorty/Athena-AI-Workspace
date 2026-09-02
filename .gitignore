@@ -1,2 +1,8 @@
 node_modules/
 venv/
+__pycache__/
+athena_auth.json
+athena_sessions.json
+athena_settings.json
+lcm/lcm.db
+pi-agent-config/sessions/

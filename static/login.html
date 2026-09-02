@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Athena — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>tailwind.config = { darkMode: 'class' };</script>
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+</head>
+<body class="dark h-dvh w-screen flex items-center justify-center bg-neutral-900 text-neutral-100 font-[Inter] antialiased">
+  <div class="w-full max-w-sm p-6">
+    <div class="flex flex-col items-center mb-8">
+      <div class="relative flex items-center justify-center mb-2" style="width:7rem;height:7rem">
+        <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain opacity-80">
+        <span class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-4xl leading-none" style="color:#5eead4">𝓐𝓽𝓱𝓮𝓷𝓪</span>
+      </div>
+    </div>
+
+    <div id="setup-view" class="hidden space-y-3">
+      <h2 class="text-lg font-semibold text-center mb-1">Create your account</h2>
+      <p class="text-xs text-neutral-400 text-center mb-4">One-time setup — this account is the only way in.</p>
+      <input id="setup-username" type="text" placeholder="Username" autocomplete="username" class="w-full text-sm bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 outline-none focus:border-violet-500">
+      <input id="setup-password" type="password" placeholder="Password (min 8 characters)" autocomplete="new-password" class="w-full text-sm bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 outline-none focus:border-violet-500">
+      <input id="setup-password-confirm" type="password" placeholder="Confirm password" autocomplete="new-password" class="w-full text-sm bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 outline-none focus:border-violet-500">
+      <button id="setup-btn" class="w-full py-2.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium transition">Create Account</button>
+      <div id="setup-error" class="text-xs text-red-400 text-center hidden"></div>
+    </div>
+
+    <div id="login-view" class="hidden space-y-3">
+      <h2 class="text-lg font-semibold text-center mb-4">Sign in</h2>
+      <input id="login-username" type="text" placeholder="Username" autocomplete="username" class="w-full text-sm bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 outline-none focus:border-violet-500">
+      <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" class="w-full text-sm bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 outline-none focus:border-violet-500">
+      <button id="login-btn" class="w-full py-2.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium transition">Sign In</button>
+      <div id="login-error" class="text-xs text-red-400 text-center hidden"></div>
+    </div>
+
+    <div id="totp-view" class="hidden space-y-3">
+      <h2 class="text-lg font-semibold text-center mb-1">Two-factor code</h2>
+      <p class="text-xs text-neutral-400 text-center mb-4">Enter the code from your authenticator app.</p>
+      <input id="totp-code" type="text" inputmode="numeric" placeholder="123456" autocomplete="one-time-code" class="w-full text-sm bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 outline-none focus:border-violet-500 text-center tracking-widest">
+      <button id="totp-btn" class="w-full py-2.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium transition">Verify</button>
+      <div id="totp-error" class="text-xs text-red-400 text-center hidden"></div>
+    </div>
+  </div>
+
+<script>
+let pendingToken = null;
+
+function showView(id) {
+  ['setup-view', 'login-view', 'totp-view'].forEach(v => {
+    document.getElementById(v).classList.toggle('hidden', v !== id);
+  });
+}
+
+function showError(elId, msg) {
+  const el = document.getElementById(elId);
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+async function init() {
+  try {
+    const resp = await fetch('/api/auth/status');
+    const data = await resp.json();
+    if (data.authenticated) {
+      window.location.href = '/';
+      return;
+    }
+    showView(data.configured ? 'login-view' : 'setup-view');
+  } catch (e) {
+    showView('login-view');
+  }
+}
+
+document.getElementById('setup-btn').addEventListener('click', async () => {
+  const username = document.getElementById('setup-username').value.trim();
+  const password = document.getElementById('setup-password').value;
+  const confirm = document.getElementById('setup-password-confirm').value;
+  document.getElementById('setup-error').classList.add('hidden');
+  if (!username || !password) {
+    showError('setup-error', 'Username and password are required.');
+    return;
+  }
+  if (password !== confirm) {
+    showError('setup-error', 'Passwords do not match.');
+    return;
+  }
+  try {
+    const resp = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      showError('setup-error', data.error);
+      return;
+    }
+    window.location.href = '/';
+  } catch (e) {
+    showError('setup-error', 'Something went wrong: ' + e.message);
+  }
+});
+
+document.getElementById('login-btn').addEventListener('click', async () => {
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  document.getElementById('login-error').classList.add('hidden');
+  try {
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      showError('login-error', data.error);
+      return;
+    }
+    if (data.requires_totp) {
+      pendingToken = data.pending_token;
+      showView('totp-view');
+      return;
+    }
+    window.location.href = '/';
+  } catch (e) {
+    showError('login-error', 'Something went wrong: ' + e.message);
+  }
+});
+
+document.getElementById('totp-btn').addEventListener('click', async () => {
+  const code = document.getElementById('totp-code').value.trim();
+  document.getElementById('totp-error').classList.add('hidden');
+  try {
+    const resp = await fetch('/api/auth/verify-2fa', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pending_token: pendingToken, code}),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      showError('totp-error', data.error);
+      return;
+    }
+    window.location.href = '/';
+  } catch (e) {
+    showError('totp-error', 'Something went wrong: ' + e.message);
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  if (!document.getElementById('setup-view').classList.contains('hidden')) {
+    document.getElementById('setup-btn').click();
+  } else if (!document.getElementById('login-view').classList.contains('hidden')) {
+    document.getElementById('login-btn').click();
+  } else if (!document.getElementById('totp-view').classList.contains('hidden')) {
+    document.getElementById('totp-btn').click();
+  }
+});
+
+init();
+</script>
+</body>
+</html>

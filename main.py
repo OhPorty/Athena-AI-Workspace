@@ -6,14 +6,81 @@ import subprocess
 import sqlite3
 import io
 import json
+import sys
+import signal
+import atexit
+import ctypes
 import tempfile
+import time
 import httpx
-from fastapi import FastAPI, UploadFile, File, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+import psutil
+from fastapi import FastAPI, UploadFile, File, Request, Response
+from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from auth import AuthManager
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-LCM_URL = os.environ.get("ATHENA_LCM_URL", "http://localhost:8420")
+LCM_URL = os.environ.get("ATHENA_LCM_URL", "http://localhost:8421")
+
+# --- Bundled LCM (Lossless Context Management) service ---
+# Vendored as a project-local dependency (not a system-wide service) so
+# Athena is self-contained and portable if it's ever shared. Launched as
+# a subprocess on startup, on its own port (8421, distinct from the old
+# shared instance at 8420 which stays untouched for whatever else may
+# still use it), with a fresh, empty database -- no migration from any
+# prior LCM data.
+_LCM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcm")
+_lcm_process = None
+
+def _set_pdeathsig():
+    # Linux-only: asks the kernel to send SIGTERM to this child if its
+    # parent (Athena) dies for ANY reason, including a crash or kill -9,
+    # so the bundled LCM can never outlive Athena as an orphaned process.
+    PR_SET_PDEATHSIG = 1
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass
+
+def _stop_bundled_lcm():
+    global _lcm_process
+    if _lcm_process and _lcm_process.poll() is None:
+        print("[Athena] Stopping bundled LCM...", flush=True)
+        _lcm_process.terminate()
+        try:
+            _lcm_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _lcm_process.kill()
+
+def _handle_shutdown_signal(signum, frame):
+    _stop_bundled_lcm()
+    sys.exit(0)
+
+def _start_bundled_lcm():
+    global _lcm_process
+    lcm_port = os.environ.get("LCM_PORT", "8421")
+    env = os.environ.copy()
+    env["LCM_PORT"] = lcm_port
+    env["LCM_DB_PATH"] = os.path.join(_LCM_DIR, "lcm.db")
+    _lcm_process = subprocess.Popen(
+        [sys.executable, os.path.join(_LCM_DIR, "server.py")],
+        env=env,
+        cwd=_LCM_DIR,
+        preexec_fn=_set_pdeathsig,
+    )
+    atexit.register(_stop_bundled_lcm)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    for _ in range(30):
+        try:
+            httpx.get(f"http://localhost:{lcm_port}/messages/__athena_startup_check__", timeout=1)
+            print(f"[Athena] Bundled LCM ready on port {lcm_port}", flush=True)
+            return
+        except httpx.ConnectError:
+            time.sleep(0.3)
+    print("[Athena] WARNING: bundled LCM did not become reachable in time", flush=True)
 OLLAMA_URL = os.environ.get("ATHENA_OLLAMA_URL", "http://localhost:11434/api/chat")
 DEFAULT_MODEL = os.environ.get("ATHENA_DEFAULT_MODEL", "gpt-oss-20b-32k:latest")
 WHISPER_MODEL_SIZE = os.environ.get("ATHENA_WHISPER_MODEL", "large-v3-turbo")
@@ -21,6 +88,153 @@ PIPER_VOICE_PATH = os.environ.get("ATHENA_PIPER_VOICE_PATH", "/home/ohporty/athe
 
 app = FastAPI(title="Athena")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ---------------------------------------------------------------------------
+# Authentication -- single-user login gate. Adapted from Odysseus's proven
+# pattern: an outermost ASGI middleware rejects/redirects every request
+# except a small explicit exemption list, so nothing (no page, no API route)
+# is reachable without a valid session, matching Odysseus's own "0 UI access
+# without login" behavior.
+# ---------------------------------------------------------------------------
+auth_manager = AuthManager(os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_auth.json"))
+SESSION_COOKIE = "athena_auth_token"
+
+AUTH_EXEMPT_EXACT = {
+    "/login",
+    "/api/auth/setup",
+    "/api/auth/login",
+    "/api/auth/verify-2fa",
+    "/api/auth/status",
+    "/health",
+}
+AUTH_EXEMPT_PREFIXES = ["/static"]
+
+def _is_auth_exempt(path: str) -> bool:
+    if path in AUTH_EXEMPT_EXACT:
+        return True
+    return any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES)
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if _is_auth_exempt(path):
+            return await call_next(request)
+        if not auth_manager.is_configured:
+            if path.startswith("/api/"):
+                return JSONResponse(status_code=401, content={"error": "Setup required"})
+            return RedirectResponse(url="/login", status_code=302)
+        token = request.cookies.get(SESSION_COOKIE)
+        if not auth_manager.validate_token(token):
+            if path.startswith("/api/"):
+                return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+            return RedirectResponse(url="/login", status_code=302)
+        request.state.current_user = auth_manager.username
+        return await call_next(request)
+
+app.add_middleware(AuthMiddleware)
+
+class AuthSetupIn(BaseModel):
+    username: str
+    password: str
+
+class AuthLoginIn(BaseModel):
+    username: str
+    password: str
+
+class Auth2FAVerifyIn(BaseModel):
+    pending_token: str
+    code: str
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+class Totp2FAConfirmIn(BaseModel):
+    code: str
+
+class Totp2FADisableIn(BaseModel):
+    password: str
+
+def _set_session_cookie(response: Response, token: str):
+    response.set_cookie(
+        key=SESSION_COOKIE, value=token, max_age=60 * 60 * 24 * 30,
+        httponly=True, secure=True, samesite="lax",
+    )
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    with open(os.path.join("static", "login.html")) as f:
+        return f.read()
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    return auth_manager.status(token)
+
+@app.post("/api/auth/setup")
+def auth_setup(req: AuthSetupIn, response: Response):
+    if auth_manager.is_configured:
+        return JSONResponse(status_code=400, content={"error": "Already configured"})
+    if not auth_manager.setup(req.username, req.password):
+        return JSONResponse(status_code=400, content={"error": f"Setup failed -- username required, password must be at least {auth_manager.policy()['password_min_length']} characters"})
+    token = auth_manager.create_session()
+    _set_session_cookie(response, token)
+    return {"ok": True}
+
+@app.post("/api/auth/login")
+def auth_login(req: AuthLoginIn, response: Response):
+    if not auth_manager.verify_password(req.username, req.password):
+        return JSONResponse(status_code=401, content={"error": "Invalid credentials"})
+    if auth_manager.totp_enabled:
+        pending_token = auth_manager.create_pending_2fa()
+        return {"requires_totp": True, "pending_token": pending_token}
+    token = auth_manager.create_session()
+    _set_session_cookie(response, token)
+    return {"ok": True}
+
+@app.post("/api/auth/verify-2fa")
+def auth_verify_2fa(req: Auth2FAVerifyIn, response: Response):
+    if not auth_manager.consume_pending_2fa(req.pending_token):
+        return JSONResponse(status_code=401, content={"error": "Login expired -- please try again"})
+    if not auth_manager.totp_verify(req.code):
+        return JSONResponse(status_code=401, content={"error": "Invalid code"})
+    token = auth_manager.create_session()
+    _set_session_cookie(response, token)
+    return {"ok": True}
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        auth_manager.revoke_token(token)
+    response.delete_cookie(SESSION_COOKIE)
+    return {"ok": True}
+
+@app.post("/api/auth/change-password")
+def auth_change_password(req: ChangePasswordIn):
+    if not auth_manager.change_password(req.current_password, req.new_password):
+        return JSONResponse(status_code=400, content={"error": "Current password incorrect, or new password too short"})
+    return {"ok": True}
+
+@app.post("/api/auth/2fa/setup")
+def auth_2fa_setup():
+    secret = auth_manager.totp_generate_secret()
+    if not secret:
+        return JSONResponse(status_code=400, content={"error": "Account not configured"})
+    return {"secret": secret, "otpauth_uri": auth_manager.totp_provisioning_uri(secret)}
+
+@app.post("/api/auth/2fa/confirm")
+def auth_2fa_confirm(req: Totp2FAConfirmIn):
+    backup_codes = auth_manager.totp_confirm_enable(req.code)
+    if backup_codes is None:
+        return JSONResponse(status_code=400, content={"error": "Invalid code"})
+    return {"ok": True, "backup_codes": backup_codes}
+
+@app.post("/api/auth/2fa/disable")
+def auth_2fa_disable(req: Totp2FADisableIn):
+    if not auth_manager.totp_disable(req.password):
+        return JSONResponse(status_code=400, content={"error": "Incorrect password"})
+    return {"ok": True}
 
 BASE_SYSTEM_PROMPT = (
     "You are Athena, a helpful assistant. Be direct and concise."
@@ -78,6 +292,8 @@ class ChatIn(BaseModel):
     endpoint_url: str = ""  # empty = use the default OLLAMA_URL
     search_url: str = ""  # SearXNG base URL; empty = web_search/web_fetch tools unavailable
     use_pi: bool = False  # route through the Pi coding harness instead of Athena's own chat loop; requires workspace to be set
+    images: list = []  # base64-encoded image strings (no data: prefix), passed through to vision-capable models
+    attachments: list = []  # [{"name": str, "content": str}] text-file attachments, inlined into the prompt
 
 
 class TtsIn(BaseModel):
@@ -193,18 +409,26 @@ def send_to_lcm(session_id: str, role: str, content: str):
     the ID is what ratings attach to, since it's the one stable
     identifier that survives across page reloads and session history
     reloads (unlike a frontend array index, which is meaningless once
-    messages get re-fetched from LCM in a different order/subset)."""
+    messages get re-fetched from LCM in a different order/subset).
+
+    Timeout is deliberately generous (not the usual few seconds) because
+    LCM runs auto-compaction synchronously on every /message call, which
+    can call out to an LLM for summarization -- a short timeout here was
+    silently dropping the returned ID on longer messages, which broke
+    both rating-attachment and per-message model tracking without any
+    visible error."""
     try:
         resp = httpx.post(f"{LCM_URL}/message", json={
             "session_id": session_id,
             "role": role,
             "content": content,
             "service": "athena",
-        }, timeout=3)
+        }, timeout=30)
         if resp.status_code == 200:
             return resp.json().get("id")
-    except Exception:
-        pass
+        print(f"[Athena] send_to_lcm got HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+    except Exception as e:
+        print(f"[Athena] send_to_lcm failed: {e}", flush=True)
     return None
 
 
@@ -273,6 +497,46 @@ def mkdir_workspace(req: MkdirIn):
         return {"error": "A folder with that name already exists."}
     except Exception as e:
         return {"error": f"Could not create folder: {e}"}
+
+
+@app.get("/api/workspace/files")
+def list_workspace_files(workspace: str, path: str = ""):
+    """List files and directories (with sizes) at a path relative to the
+    given workspace root, for the file-browser panel. Reuses
+    _resolve_workspace_path so the UI browser shares the same confinement
+    boundary as the agent's list_files/read_file/write_file/edit_file tools."""
+    if not workspace:
+        return {"error": "No workspace set."}
+    try:
+        target = _resolve_workspace_path(workspace, path)
+    except ValueError as e:
+        return {"error": str(e)}
+    if not os.path.isdir(target):
+        return {"error": f"Not a directory: {path}"}
+    try:
+        entries = []
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            is_dir = os.path.isdir(full)
+            try:
+                size = None if is_dir else os.path.getsize(full)
+            except OSError:
+                size = None
+            entries.append({"name": name, "type": "dir" if is_dir else "file", "size": size})
+        return {"path": path, "entries": entries}
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+
+
+@app.get("/api/workspace/read")
+def read_workspace_file(workspace: str, path: str = ""):
+    """Read a file's content for the file-browser panel's preview,
+    reusing the same _read_file implementation the agent's read_file
+    tool uses."""
+    if not workspace:
+        return {"error": "No workspace set."}
+    return _read_file(workspace, path)
+
 
 WEB_TOOL_SCHEMAS = [
     {
@@ -645,8 +909,12 @@ def _run_pi_agent(req: "ChatIn"):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+_last_activity_ts = time.time()
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
+    global _last_activity_ts
+    _last_activity_ts = time.time()
     if req.use_pi:
         if not req.workspace:
             def _no_workspace_error():
@@ -657,7 +925,11 @@ def chat_stream(req: ChatIn):
         return _run_pi_agent(req)
 
     print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
-    send_to_lcm(req.session_id, "user", req.message)
+    effective_message = req.message
+    for att in req.attachments:
+        att_content = (att.get("content") or "")[:20000]
+        effective_message += f"\n\n[Attached file: {att.get('name', 'file')}]\n```\n{att_content}\n```"
+    _user_msg_id = send_to_lcm(req.session_id, "user", effective_message)
 
     context = get_lcm_context(req.session_id)
 
@@ -666,7 +938,7 @@ def chat_stream(req: ChatIn):
     # wired in) will only be included here when req.workspace is non-empty,
     # so the model can never edit files on a session with no workspace
     # bound to it, regardless of how it reads an ambiguous prompt.
-    system_prompt = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
+    system_prompt = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX + _get_memory_context()
     tools = get_lcm_tools()
     if req.search_url:
         tools = tools + WEB_TOOL_SCHEMAS
@@ -683,6 +955,11 @@ def chat_stream(req: ChatIn):
     _system_parts = [m["content"] for m in _raw_messages if m.get("role") == "system"]
     _non_system = [m for m in _raw_messages if m.get("role") != "system"]
     messages = [{"role": "system", "content": "\n\n".join(_system_parts)}] + _non_system
+    if req.images:
+        for _m in reversed(messages):
+            if _m.get("role") == "user":
+                _m["images"] = req.images
+                break
     effective_max = req.max_ctx if req.max_ctx > 0 else MAX_CTX_DEFAULT
     ctx_size = pick_dynamic_ctx(messages, tools, max_ctx=effective_max)
     if req.max_ctx > 0:
@@ -725,11 +1002,14 @@ def chat_stream(req: ChatIn):
             return {"error": f"Tool call failed: {e}"}
 
     def generate():
+        yield f"data: {json.dumps({'user_message_id': _user_msg_id})}\n\n"
         full_reply = ""
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
         _messages = list(messages)
         print(f"[DEBUG] _messages roles={[m.get("role") for m in _messages]!r}", flush=True)
         MAX_ROUNDS = 5
+        last_eval_count = None
+        last_eval_duration = None
 
         for _round in range(MAX_ROUNDS):
             round_reply = ""
@@ -762,11 +1042,14 @@ def chat_stream(req: ChatIn):
                     if msg.get("tool_calls"):
                         round_tool_calls.extend(msg["tool_calls"])
                     if chunk.get("done"):
+                        last_eval_count = chunk.get("eval_count")
+                        last_eval_duration = chunk.get("eval_duration")
                         break
 
             if not round_tool_calls:
                 _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
-                yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
+                tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
+                yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'assistant_message_id': _msg_id})}\n\n"
                 return
 
             # Model wants to call tool(s) -- execute each, tell the
@@ -784,7 +1067,8 @@ def chat_stream(req: ChatIn):
             full_reply = fallback_msg
             yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
             _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
-            yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
+            tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
+            yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -1056,12 +1340,352 @@ async def openai_compat_proxy(request: Request):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+class MemoryIn(BaseModel):
+    content: str
+
+@app.get("/api/memory")
+def list_memory():
+    try:
+        resp = httpx.get(f"{LCM_URL}/facts", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM error: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM error: {e}"}
+
+@app.post("/api/memory")
+def add_memory(req: MemoryIn):
+    try:
+        resp = httpx.post(f"{LCM_URL}/facts", json={"content": req.content, "manual": True}, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM error: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM error: {e}"}
+
+@app.delete("/api/memory/{fact_id}")
+def delete_memory(fact_id: int):
+    try:
+        resp = httpx.delete(f"{LCM_URL}/facts/{fact_id}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM error: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM error: {e}"}
+
+@app.delete("/api/messages/{message_id}")
+def delete_message(message_id: int):
+    try:
+        resp = httpx.delete(f"{LCM_URL}/messages/{message_id}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM error: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM error: {e}"}
+
+@app.delete("/api/history/{session_id}")
+def delete_history(session_id: str):
+    """Delete a chat session's messages and summary nodes from LCM --
+    real data deletion, not just removing it from the sidebar list."""
+    try:
+        resp = httpx.delete(f"{LCM_URL}/session/{session_id}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM delete failed: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM delete failed: {e}"}
+
+def _get_gpu_stats():
+    """Reads GPU utilization/memory straight from the driver via
+    nvidia-smi -- deliberately NOT from any inference engine's own API,
+    so this works the same whether the backend serving models is
+    Ollama, llama.cpp, vLLM, or anything else. Returns None (not an
+    error) on any non-NVIDIA machine so the UI can show 'No GPU
+    detected' instead of breaking."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0:
+            return None
+        gpus = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) == 3:
+                gpus.append({
+                    "utilization_percent": float(parts[0]),
+                    "memory_used_mb": float(parts[1]),
+                    "memory_total_mb": float(parts[2]),
+                })
+        return gpus if gpus else None
+    except Exception:
+        return None
+
+@app.get("/api/system/stats")
+def system_stats():
+    """Host-level resource stats -- RAM/CPU via psutil, GPU via
+    nvidia-smi -- deliberately engine-agnostic. Which model/session is
+    active is tracked client-side by Athena itself, not read from any
+    particular inference engine's API."""
+    vm = psutil.virtual_memory()
+    cpu_percent = psutil.cpu_percent(interval=0.3)
+    gpus = _get_gpu_stats()
+    return {
+        "ram": {"used_gb": round(vm.used / (1024 ** 3), 2), "total_gb": round(vm.total / (1024 ** 3), 2), "percent": vm.percent},
+        "cpu_percent": cpu_percent,
+        "gpus": gpus,
+    }
+
+_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_settings.json")
+
+def _load_settings():
+    try:
+        with open(_SETTINGS_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_settings(settings):
+    with open(_SETTINGS_PATH, "w") as f:
+        json.dump(settings, f)
+
+class MemoryModelIn(BaseModel):
+    model: str = None
+
+@app.get("/api/settings/memory-model")
+def get_memory_model():
+    return {"model": _load_settings().get("memory_extraction_model")}
+
+@app.post("/api/settings/memory-model")
+def set_memory_model(req: MemoryModelIn):
+    settings = _load_settings()
+    settings["memory_extraction_model"] = req.model
+    _save_settings(settings)
+    return {"model": req.model}
+
+def _get_memory_context() -> str:
+    """Formats current durable facts (from every session, not just this
+    one) into a system-prompt block. This is the actual payoff of the
+    whole memory-extraction pipeline -- without this, facts would just
+    sit in LCM's database having zero effect on any conversation.
+    Returns an empty string when there are no facts yet, so a fresh
+    install with nothing learned behaves identically to before this
+    feature existed."""
+    try:
+        resp = httpx.get(f"{LCM_URL}/facts", timeout=5)
+        if resp.status_code != 200:
+            return ""
+        facts = resp.json()
+    except Exception:
+        return ""
+    if not facts:
+        return ""
+    facts_list = "\n".join(f"- {f['content']}" for f in facts)
+    return (
+        "\n\nWhat you know about the user from PAST conversations "
+        "(not just this one) -- treat this as settled background, not "
+        "something to re-derive, question, or bring up unprompted "
+        "unless it's actually relevant to what they're asking right now:\n"
+        f"{facts_list}"
+    )
+
+_MEMORY_SCAN_INTERVAL_SECONDS = 60
+_MEMORY_IDLE_THRESHOLD_SECONDS = 600  # 10 minutes
+
+_MEMORY_EXTRACTION_SYSTEM_PROMPT = """You are a careful memory-extraction assistant. You are shown a chunk of recent conversation transcript, plus a list of facts already known about the user. Your ONLY job is to identify NEW, durable, genuinely important facts about the user that are NOT already covered by the existing facts list -- even if worded differently.
+
+Rules:
+- Only extract facts the user stated directly about themselves: identity, stated preferences, ongoing projects, explicit decisions. Never the assistant's own suggestions, and never a guess or inference the user didn't actually state.
+- Skip anything trivial, one-off, or already covered by an existing fact in meaning, not just exact wording.
+- When in doubt, extract NOTHING. A missed fact is cheap to catch later; a wrong or duplicate one is expensive since it pollutes every future conversation until someone notices and deletes it.
+- Never invent facts not actually present in the transcript.
+
+Respond with ONLY a JSON array of new fact strings, e.g. ["Works as a mechanical engineer", "Prefers dark roast coffee"]. If there is nothing new and genuinely worth keeping, respond with exactly: []"""
+
+def _run_memory_scan(model: str):
+    scan_state = httpx.get(f"{LCM_URL}/scan-state", timeout=10).json()
+    last_id = scan_state.get("last_scanned_message_id", 0)
+
+    new_messages = httpx.get(f"{LCM_URL}/messages/since/{last_id}", timeout=10).json()
+    if not new_messages:
+        return  # nothing new -- also naturally prevents re-scanning during a long idle stretch
+
+    existing_facts = httpx.get(f"{LCM_URL}/facts", timeout=10).json()
+    existing_facts_text = "\n".join(f"- {f['content']}" for f in existing_facts) or "(none yet)"
+    transcript_text = "\n".join(f"[{m['role']}] {m['content']}" for m in new_messages)
+
+    max_id_seen = max(m["id"] for m in new_messages)
+    last_session_id = new_messages[-1]["session_id"]
+
+    try:
+        resp = httpx.post(OLLAMA_URL, json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _MEMORY_EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Existing facts already known:\n{existing_facts_text}\n\nNew conversation since last scan:\n{transcript_text}"},
+            ],
+            "stream": False,
+            "think": False,
+        }, timeout=120)
+        raw = resp.json()["message"]["content"].strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`").lstrip("json").strip()
+        new_facts = json.loads(raw)
+    except Exception as e:
+        print(f"[Athena] Memory scan: extraction failed, will retry next cycle: {e}", flush=True)
+        return  # deliberately do NOT advance scan-state, so this batch gets retried
+
+    for fact_text in new_facts:
+        if isinstance(fact_text, str) and fact_text.strip():
+            httpx.post(f"{LCM_URL}/facts", json={
+                "content": fact_text.strip(),
+                "source_session_id": last_session_id,
+                "source_message_id": max_id_seen,
+                "manual": False,
+            }, timeout=10)
+
+    if new_facts:
+        print(f"[Athena] Memory scan: added {len(new_facts)} new fact(s)", flush=True)
+    httpx.post(f"{LCM_URL}/scan-state", json={"last_scanned_message_id": max_id_seen}, timeout=10)
+
+def _memory_scan_loop():
+    print("[Athena] Memory scan loop started (checks every 60s)", flush=True)
+    while True:
+        time.sleep(_MEMORY_SCAN_INTERVAL_SECONDS)
+        try:
+            model = _load_settings().get("memory_extraction_model")
+            if not model:
+                print("[Athena] Memory scan check: no model configured, skipping", flush=True)
+                continue  # no model configured -- do nothing, no error
+            idle_seconds = time.time() - _last_activity_ts
+            if idle_seconds < _MEMORY_IDLE_THRESHOLD_SECONDS:
+                remaining = int(_MEMORY_IDLE_THRESHOLD_SECONDS - idle_seconds)
+                print(f"[Athena] Memory scan check: still active, {remaining}s until idle threshold", flush=True)
+                continue  # still active, wait for a real idle window
+            print(f"[Athena] Memory scan check: idle threshold reached, scanning with {model}", flush=True)
+            _run_memory_scan(model)
+        except Exception as e:
+            print(f"[Athena] Memory scan loop error (will retry next cycle): {e}", flush=True)
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
+def _check_requirements():
+    """Verify every package pinned in requirements.txt is actually
+    installed before Athena tries to boot, so a missing dependency (e.g.
+    someone cloning this fresh without running pip install -r
+    requirements.txt) surfaces as one clear message here instead of a
+    confusing traceback the first time some unrelated route imports it."""
+    import importlib.metadata as _im
+    req_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
+    if not os.path.exists(req_path):
+        return
+    missing = []
+    mismatched = []
+    with open(req_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "==" not in line:
+                continue
+            name, pinned_version = line.split("==", 1)
+            try:
+                installed_version = _im.version(name)
+                if installed_version != pinned_version:
+                    mismatched.append(f"{name} (have {installed_version}, requirements.txt has {pinned_version})")
+            except _im.PackageNotFoundError:
+                missing.append(name)
+    if missing:
+        print("=" * 70, flush=True)
+        print("[Athena] Missing required packages:", ", ".join(missing), flush=True)
+        print("[Athena] Run: pip install -r requirements.txt", flush=True)
+        print("=" * 70, flush=True)
+        sys.exit(1)
+    if mismatched:
+        print("[Athena] WARNING: version mismatch (may still work fine):", flush=True)
+        for m in mismatched:
+            print(f"  - {m}", flush=True)
+
+def _check_pi_sandbox():
+    """Read-only diagnostic: on Ubuntu 24.04+ (and other distros with
+    AppArmor's unprivileged-userns restriction), Pi's bundled sandbox
+    helper needs a scoped AppArmor profile to create the user namespace
+    it sandboxes commands in -- without it, every Pi tool call fails
+    with a confusing 'No such file or directory' several layers deep
+    instead of the real cause. This never modifies anything or invokes
+    sudo itself (Athena's own process shouldn't self-escalate); it just
+    surfaces the real problem and the exact fix, computed fresh against
+    THIS machine's actual architecture and paths so it stays correct
+    wherever Athena is deployed, not just here. Prints a result either
+    way (not just on failure) so this is visibly confirmed working
+    rather than silently assumed."""
+    import platform
+
+    arch_map = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}
+    arch_dir = arch_map.get(platform.machine())
+    if not arch_dir:
+        print(f"[Athena] Pi sandbox check: skipped (unrecognized architecture {platform.machine()!r})", flush=True)
+        return
+
+    sandbox_root = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "pi-agent-config", "npm", "node_modules", "@carderne",
+        "sandbox-runtime", "vendor", "seccomp",
+    )
+    binary_path = os.path.join(sandbox_root, arch_dir, "apply-seccomp")
+    if not os.path.isfile(binary_path):
+        print("[Athena] Pi sandbox check: skipped (Pi's sandbox isn't set up on this machine)", flush=True)
+        return
+
+    try:
+        result = subprocess.run(
+            [binary_path, "true"], capture_output=True, text=True, timeout=5,
+        )
+    except Exception as e:
+        print(f"[Athena] WARNING: couldn't run Pi's sandbox helper to check it: {e}", flush=True)
+        return
+
+    if result.returncode == 0:
+        print("[Athena] Pi sandbox check: OK -- user namespace creation works, no fix needed.", flush=True)
+        return
+
+    stderr = (result.stderr or "").strip()
+    print("=" * 70, flush=True)
+    print("[Athena] WARNING: Pi's sandbox helper can't create its required", flush=True)
+    print("  user namespace on this system, so Pi tool calls will fail.", flush=True)
+    print(f"  Real error: {stderr}", flush=True)
+    if "userns" in stderr.lower() or "capability" in stderr.lower():
+        print("  This is Ubuntu 24.04+'s AppArmor unprivileged-userns", flush=True)
+        print("  restriction. Fix (requires sudo, run once):", flush=True)
+        print(flush=True)
+        profile_block = (
+            "    sudo tee /etc/apparmor.d/athena-apply-seccomp > /dev/null << 'EOF'\n"
+            "abi <abi/4.0>,\n"
+            "include <tunables/global>\n"
+            "\n"
+            "profile athena-apply-seccomp " + binary_path + " flags=(unconfined) {\n"
+            "  userns,\n"
+            "  include if exists <local/athena-apply-seccomp>\n"
+            "}\n"
+            "EOF\n"
+            "    sudo apparmor_parser -r /etc/apparmor.d/athena-apply-seccomp"
+        )
+        print(profile_block, flush=True)
+    else:
+        print("  Cause doesn't match the known AppArmor userns issue --", flush=True)
+        print("  the real error above will need its own investigation.", flush=True)
+    print("=" * 70, flush=True)
+
 if __name__ == "__main__":
     import uvicorn
+    import threading
+    _check_requirements()
+    _check_pi_sandbox()
+    _start_bundled_lcm()
+    threading.Thread(target=_memory_scan_loop, daemon=True).start()
     port = int(os.environ.get("ATHENA_PORT", "9500"))
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -5,12 +5,14 @@
     <meta name="color-scheme" content="light dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Athena</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <script src="https://cdn.tailwindcss.com/3.4.16"></script>
     <script>tailwind.config = { darkMode: 'class' };</script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Alex+Brush&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <script src="/static/js/vendor/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script defer src="/static/js/vendor/alpine.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
@@ -19,15 +21,21 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
-<body x-data="athenaApp()" x-init="init()" :class="theme === 'dark' ? 'dark' : ''" class="h-screen w-screen overflow-hidden font-[Inter] antialiased">
+<body x-data="athenaApp()" x-init="init()" :class="theme === 'dark' ? 'dark' : ''" class="h-dvh w-screen overflow-hidden font-[Inter] antialiased">
 <div class="flex h-full w-full bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
 
     <!-- ICON RAIL -->
-    <nav class="w-16 shrink-0 flex flex-col items-center py-4 gap-1 border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800">
-        <div class="h-8 w-8 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-sm font-bold mb-4">A</div>
+    <div x-show="mobileNavOpen" x-cloak @click="mobileNavOpen = false" class="fixed inset-0 bg-black/40 z-30 md:hidden"></div>
+    <button x-show="!mobileNavOpen" x-cloak @click="mobileNavOpen = true" title="Menu" class="md:hidden fixed top-2 left-3 z-20 flex items-center justify-center h-10 w-10 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400 shadow-md border border-neutral-200 dark:border-neutral-700">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <nav class="fixed md:static inset-y-0 left-0 z-40 w-16 shrink-0 flex flex-col items-center py-4 gap-1 border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 transition-transform duration-200 md:translate-x-0" :class="mobileNavOpen ? 'translate-x-0' : '-translate-x-full'">
+        <button @click="currentPage = 'chat'; newChat(); mobileNavOpen = false" title="Home" class="h-8 w-8 rounded-lg overflow-hidden mb-4 hover:opacity-80 transition">
+            <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain">
+        </button>
 
         <template x-for="p in pages" :key="p.id">
-            <div @click="currentPage = p.id"
+            <div @click="currentPage = p.id; mobileNavOpen = false"
                  class="icon-rail-btn w-12"
                  :class="currentPage === p.id ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-600 dark:hover:text-neutral-300'">
                 <span x-html="p.icon"></span>
@@ -45,10 +53,10 @@
 
     <!-- CHAT PAGE -->
     <template x-if="currentPage === 'chat'">
-        <div class="flex flex-1 min-w-0">
-            <aside class="w-60 shrink-0 flex flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800">
+        <div id="chat-page-root" class="flex flex-1 min-w-0">
+            <aside class="fixed md:static inset-y-0 left-0 md:left-auto z-40 w-60 shrink-0 flex flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 transition-transform duration-200 md:translate-x-0" :class="mobileNavOpen ? 'translate-x-16' : '-translate-x-full'">
                 <div class="p-3">
-                    <button @click="newChat()" class="w-full flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-2.5 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                    <button @click="newChat(); mobileNavOpen = false" class="w-full flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-2.5 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                         New chat
                     </button>
@@ -66,7 +74,7 @@
                                     <div class="group relative flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm cursor-pointer"
                                          :class="s.id === sessionId ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
                                         <svg x-show="s.pinned" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-amber-500"><path d="M12 2l1.5 5.5L19 9l-4 3.5L16 18l-4-3-4 3 1-5.5L5 9l5.5-1.5z"/></svg>
-                                        <span @click="switchSession(s.id)" class="truncate flex-1" x-text="s.label"></span>
+                                        <span @click="switchSession(s.id); mobileNavOpen = false" class="truncate flex-1" x-text="s.label"></span>
                                         <span class="text-[10px] text-neutral-400 dark:text-neutral-500 shrink-0 group-hover:hidden" x-text="relativeTime(s.createdAt)"></span>
                                         <div class="relative">
                                             <button @click.stop="sessionMenuOpen = sessionMenuOpen === s.id ? null : s.id" class="opacity-0 group-hover:opacity-100 p-1 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded">
@@ -88,28 +96,64 @@
             </aside>
 
             <main class="flex-1 flex flex-col min-w-0">
-                <div class="flex-1 overflow-y-auto" x-ref="chatBox">
+                <div class="h-14 md:h-11 shrink-0 flex items-center justify-between gap-3 pl-14 md:pl-4 pr-4 border-b border-neutral-200 dark:border-neutral-800">
+                    <div class="flex-1 min-w-0 overflow-x-auto">
+                        <template x-if="systemStatsOpen">
+                            <div class="flex items-center gap-2 md:gap-3 whitespace-nowrap text-[9px] md:text-[11px] text-neutral-500 dark:text-neutral-400">
+                                <span class="font-medium text-neutral-600 dark:text-neutral-300" x-text="modelLabel"></span>
+                                <template x-if="systemStats">
+                                    <div class="flex items-center gap-3">
+                                        <span x-text="'RAM ' + systemStats.ram.used_gb + '/' + systemStats.ram.total_gb + 'GB (' + systemStats.ram.percent + '%)'"></span>
+                                        <span x-text="'CPU ' + systemStats.cpu_percent + '%'"></span>
+                                        <template x-if="systemStats.gpus && systemStats.gpus.length">
+                                            <template x-for="(gpu, gIdx) in systemStats.gpus" :key="gIdx">
+                                                <span x-text="'GPU' + (systemStats.gpus.length > 1 ? (gIdx+1) : '') + ': ' + (gpu.memory_used_mb/1024).toFixed(1) + '/' + (gpu.memory_total_mb/1024).toFixed(1) + 'GB VRAM · ' + gpu.utilization_percent + '% compute'"></span>
+                                            </template>
+                                        </template>
+                                        <span x-show="!systemStats.gpus || !systemStats.gpus.length">No GPU</span>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="flex items-center shrink-0">
+                        <button @click="toggleSystemStats()" class="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg transition mr-1" :class="systemStatsOpen ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'" title="System status">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        </button>
+                        <button @click="toggleFileBrowser()" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg transition disabled:opacity-30" :class="fileBrowserOpen ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'" :title="workspace ? 'Toggle file browser' : 'Set a workspace to browse files'">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="flex-1 min-h-0 overflow-y-auto" x-ref="chatBox">
                     <template x-if="messages.length === 0">
-                        <div class="h-full flex flex-col items-center justify-center gap-3 text-neutral-400 dark:text-neutral-600">
-                            <div class="h-14 w-14 rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-violet-500/20">A</div>
-                            <div class="text-lg font-medium text-neutral-700 dark:text-neutral-300">Ask Athena anything</div>
-                            <div class="text-sm">Powered by local models, no cloud round-trip.</div>
+                        <div class="h-full flex flex-col items-center justify-center gap-4">
+                            <div class="relative flex items-center justify-center" style="width:12rem;height:12rem">
+                                <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain opacity-80" style="filter: hue-rotate(var(--athena-logo-hue, 0deg))">
+                                <span class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-6xl leading-none whitespace-nowrap" style="color:#5eead4">𝓐𝓽𝓱𝓮𝓷𝓪</span>
+                            </div>
+                            <div class="text-lg text-neutral-300">Ready to chat</div>
+                            <div class="text-xs text-neutral-500">Powered by local models, no cloud round-trip.</div>
                         </div>
                     </template>
                     <div class="max-w-3xl mx-auto px-6 py-8 space-y-8">
                         <template x-for="(msg, idx) in messages" :key="idx">
-                            <div class="flex gap-4" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
-                                <template x-if="msg.role === 'assistant'">
-                                    <div class="h-8 w-8 shrink-0 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold">A</div>
-                                </template>
+                            <div class="flex gap-4 group" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
                                 <div class="flex flex-col gap-1.5 max-w-[85%]" :class="msg.role === 'user' ? 'items-end' : 'items-start'">
+                                    <template x-if="msg.role === 'assistant'">
+                                        <div class="flex items-center gap-1.5 text-xs text-neutral-400 dark:text-neutral-500">
+                                            <span class="font-medium text-neutral-500 dark:text-neutral-400" x-text="msg.model || 'Unknown model'"></span>
+                                            <span x-show="msg.tokensPerSec" x-text="'· ' + msg.tokensPerSec + ' t/s'"></span>
+                                        </div>
+                                    </template>
                                     <template x-if="msg.role === 'assistant' && msg.thinking">
-                                        <div class="w-full border border-neutral-200 dark:border-neutral-700 rounded-xl overflow-hidden">
-                                            <div @click="msg.thinkingOpen = !msg.thinkingOpen" class="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-neutral-800 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400">
-                                                <span x-text="msg.content ? 'Thinking (done)' : 'Thinking...'"></span>
-                                                <span x-text="msg.thinkingOpen ? '▲' : '▼'"></span>
+                                        <div class="inline-flex flex-col max-w-full">
+                                            <div @click="msg.thinkingOpen = !msg.thinkingOpen" class="inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 rounded-full bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400 transition">
+                                                <span class="font-medium shrink-0" x-text="msg.content ? 'Thinking' : 'Thinking...'"></span>
+                                                <span x-show="msg.content" class="truncate min-w-0 max-w-[220px] text-neutral-400 dark:text-neutral-500" x-text="msg.thinking"></span>
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 transition-transform" :class="msg.thinkingOpen ? 'rotate-90' : ''"><polyline points="9 18 15 12 9 6"/></svg>
                                             </div>
-                                            <div x-show="msg.thinkingOpen" class="px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap max-h-48 overflow-y-auto" x-text="msg.thinking"></div>
+                                            <div x-show="msg.thinkingOpen" class="mt-1 px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap max-h-48 overflow-y-auto border border-neutral-200 dark:border-neutral-700 rounded-xl" x-text="msg.thinking"></div>
                                         </div>
                                     </template>
                                     <template x-if="msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length">
@@ -138,7 +182,13 @@
                                     </template>
                                     <div :class="msg.role === 'user' ? 'bg-violet-600 text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100'"
                                          class="text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(msg.content)"></div>
+                                    <button x-show="msg.role === 'user' && msg.messageId" @click="deleteMessagePair(msg)" title="Delete" class="p-1 rounded-lg text-neutral-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
+                                    </button>
                                     <div class="flex items-center gap-2" x-show="msg.role === 'assistant' && msg.content">
+                                        <button x-show="msg.messageId" @click="deleteMessagePair(msg)" title="Delete" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-red-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
+                                        </button>
                                         <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                                         </button>
@@ -172,7 +222,14 @@
 
                 <div class="px-6 pb-6 pt-2">
                     <div class="max-w-3xl mx-auto">
-                        <div class="flex items-center gap-2 mb-2 flex-wrap">
+                        <button @click="mobileSettingsSheetOpen = true" class="flex md:hidden items-center justify-between gap-2 text-xs font-medium px-3 py-2 rounded-full border border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 mb-2 w-full">
+                            <span class="flex items-center gap-1.5 truncate min-w-0">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                                <span class="truncate" x-text="modelLabel"></span>
+                            </span>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                        <div class="hidden md:flex items-center gap-2 mb-2 flex-wrap">
                             <button @click="modelPopupOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300 transition">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v1a3 3 0 0 0 1.5 2.6V16a4 4 0 0 0 4 4h5a4 4 0 0 0 4-4v-2.4A3 3 0 0 0 20 11v-1a3 3 0 0 0-3-3h-1V6a4 4 0 0 0-4-4z"/></svg>
                                 <span x-text="modelLabel"></span>
@@ -190,18 +247,75 @@
                                 <span x-text="usePi ? 'Pi: on' : 'Pi: off'"></span>
                             </button>
                         </div>
-                        <div class="flex items-end gap-2 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 p-2 shadow-sm focus-within:border-violet-400 dark:focus-within:border-violet-600 transition">
-                            <button @click="toggleRecording()" class="p-2.5 rounded-xl transition" :class="isRecording ? 'text-red-500 bg-red-50 dark:bg-red-500/10' : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800'">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>
-                            </button>
-                            <textarea x-model="inputText" rows="1" @keydown.enter.prevent="send()" @input="autoGrow($event)" placeholder="Message Athena..." class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"></textarea>
-                            <button onclick="alert('CLICKED')" @click="send()" :disabled="sending" class="p-2.5 rounded-xl bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40 transition">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                            </button>
+                        <div class="rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 shadow-sm focus-within:border-violet-400 dark:focus-within:border-violet-600 transition">
+                            <div x-show="pendingImages.length || pendingAttachments.length" class="flex flex-wrap gap-1.5 px-2 pt-2">
+                                <template x-for="(img, imgIdx) in pendingImages" :key="'img'+imgIdx">
+                                    <div class="relative group">
+                                        <img :src="img.previewUrl" class="h-12 w-12 object-cover rounded-lg border border-neutral-200 dark:border-neutral-700">
+                                        <button @click="removeImage(imgIdx)" class="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-neutral-700 text-white flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition">&times;</button>
+                                    </div>
+                                </template>
+                                <template x-for="(att, attIdx) in pendingAttachments" :key="'att'+attIdx">
+                                    <div class="relative group flex items-center gap-1.5 pl-2 pr-6 py-1.5 rounded-lg bg-neutral-200 dark:bg-neutral-700 text-xs text-neutral-600 dark:text-neutral-300 max-w-[10rem]">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                        <span class="truncate" x-text="att.name"></span>
+                                        <button @click="removeAttachment(attIdx)" class="absolute top-1 right-1 h-3.5 w-3.5 rounded-full bg-neutral-500 text-white flex items-center justify-center text-[9px] opacity-0 group-hover:opacity-100 transition">&times;</button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="flex items-end gap-2 p-2">
+                                <div class="relative">
+                                    <button @click="attachMenuOpen = !attachMenuOpen" class="p-2.5 rounded-xl text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                    </button>
+                                    <div x-show="attachMenuOpen" @click.outside="attachMenuOpen = false" x-cloak class="absolute bottom-12 left-0 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg py-1 w-40 text-xs">
+                                        <div @click="attachMenuOpen = false; $refs.imageInput.click()" class="flex items-center gap-2 px-3 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-600 cursor-pointer">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                                            Image
+                                        </div>
+                                        <div @click="attachMenuOpen = false; $refs.fileInput.click()" class="flex items-center gap-2 px-3 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-600 cursor-pointer">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                            File
+                                        </div>
+                                    </div>
+                                    <input type="file" x-ref="imageInput" accept="image/*" class="hidden" @change="handleImageSelected($event)">
+                                    <input type="file" x-ref="fileInput" accept=".txt,.md,.py,.js,.ts,.json,.csv,.log,.yaml,.yml,.html,.css,.sh,.c,.cpp,.java,.go,.rs" class="hidden" @change="handleFileSelected($event)">
+                                </div>
+                                <button @click="toggleRecording()" class="p-2.5 rounded-xl transition" :class="isRecording ? 'text-red-500 bg-red-50 dark:bg-red-500/10' : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800'">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>
+                                </button>
+                                <textarea x-ref="textareaEl" x-model="inputText" rows="1" @keydown.enter.prevent="send()" @input="autoGrow($event)" placeholder="Message Athena..." class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"></textarea>
+                                <button @click="send()" :disabled="sending" class="p-2.5 rounded-xl bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40 transition">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
             </main>
+
+            <aside x-show="fileBrowserOpen && workspace" x-cloak class="w-72 shrink-0 flex flex-col border-l border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800">
+                <div class="h-11 shrink-0 flex items-center justify-between px-3 border-b border-neutral-200 dark:border-neutral-800">
+                    <span class="text-xs font-mono text-neutral-500 dark:text-neutral-400 truncate" x-text="fileBrowserPath || '.'"></span>
+                    <button @click="fileBrowserOpen = false" class="p-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-400 shrink-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+                <div class="px-2 py-1.5 border-b border-neutral-200 dark:border-neutral-800">
+                    <button @click="fileBrowserUp()" :disabled="fileBrowserParent === null" class="text-xs px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-700 disabled:opacity-30 text-neutral-500 dark:text-neutral-400">&uarr; Up</button>
+                </div>
+                <div class="flex-1 overflow-y-auto py-1">
+                    <template x-for="entry in fileBrowserEntries" :key="entry.name">
+                        <div @click="entry.type === 'dir' ? fileBrowserInto(entry.name) : previewFile(entry.name)" class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700">
+                            <svg x-show="entry.type === 'dir'" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-500"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                            <svg x-show="entry.type !== 'dir'" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-neutral-400"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                            <span class="truncate flex-1 text-neutral-700 dark:text-neutral-300" x-text="entry.name"></span>
+                            <span x-show="entry.size !== null && entry.size !== undefined" class="text-neutral-400 dark:text-neutral-500 shrink-0" x-text="formatFileSize(entry.size)"></span>
+                        </div>
+                    </template>
+                    <div x-show="fileBrowserEntries.length === 0" class="px-3 py-3 text-xs text-neutral-400 dark:text-neutral-500">Empty directory.</div>
+                </div>
+            </aside>
         </div>
     </template>
 
@@ -217,12 +331,50 @@
 
     <!-- MEMORY PAGE -->
     <template x-if="currentPage === 'memory'">
-        <div class="flex-1 flex flex-col items-center justify-center gap-3 text-neutral-400 dark:text-neutral-600 p-8">
-            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H8m4-11A2.5 2.5 0 0 1 14.5 2h.01A2.5 2.5 0 0 1 17 4.5v15a2.5 2.5 0 0 1-4.96.5"/></svg>
-            <div class="text-lg font-medium text-neutral-700 dark:text-neutral-300">Memory viewer coming soon</div>
-            <div class="text-sm text-center max-w-sm">Will show what Athena has learned across sessions once wired to the recall service.</div>
+        <div class="flex-1 overflow-y-auto p-8" x-init="loadMemories()">
+            <div class="max-w-lg mx-auto">
+                <div class="flex items-center justify-between mb-1">
+                    <h2 class="text-xl font-semibold">Memory</h2>
+                    <button @click="newMemoryText = ''; addMemoryModalOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                        Add
+                    </button>
+                </div>
+                <div class="text-xs text-neutral-400 dark:text-neutral-500 mb-6">What Athena has learned about you, carried across every chat -- not just this one.</div>
+
+                <div x-show="memories.length === 0" class="flex flex-col items-center justify-center gap-3 text-neutral-400 dark:text-neutral-600 py-16">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H8m4-11A2.5 2.5 0 0 1 14.5 2h.01A2.5 2.5 0 0 1 17 4.5v15a2.5 2.5 0 0 1-4.96.5"/></svg>
+                    <div class="text-sm text-center max-w-sm">Nothing yet. Set an extraction model in Settings and it'll fill in automatically, or add one yourself.</div>
+                </div>
+
+                <div class="space-y-2">
+                    <template x-for="mem in memories" :key="mem.id">
+                        <div class="group flex items-start justify-between gap-3 p-3 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800">
+                            <div class="min-w-0">
+                                <div class="text-sm text-neutral-800 dark:text-neutral-100" x-text="mem.content"></div>
+                                <div class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1" x-text="(mem.manual ? 'Added manually' : 'Auto-detected') + ' · ' + relativeTime(mem.created_at * 1000)"></div>
+                            </div>
+                            <button @click="deleteMemory(mem.id)" class="shrink-0 p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
+                            </button>
+                        </div>
+                    </template>
+                </div>
+            </div>
         </div>
     </template>
+
+    <!-- ADD MEMORY MODAL -->
+    <div x-show="addMemoryModalOpen" x-cloak @click.self="addMemoryModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-96 p-5">
+            <h3 class="font-semibold text-sm mb-3">Add a memory</h3>
+            <textarea x-model="newMemoryText" rows="3" placeholder="e.g. Prefers responses without emoji" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-violet-400 dark:focus:border-violet-600 resize-none"></textarea>
+            <div class="flex gap-2 mt-4">
+                <button @click="addMemoryModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="addMemory()" :disabled="!newMemoryText.trim()" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700 disabled:opacity-40">Add</button>
+            </div>
+        </div>
+    </div>
 
     <!-- SKILLS PAGE -->
     <template x-if="currentPage === 'skills'">
@@ -336,6 +488,17 @@
                         <span class="text-sm text-neutral-500 dark:text-neutral-400" x-text="defaultModel ? defaultModel.label : 'Not set'"></span>
                     </div>
                     <div class="text-xs text-neutral-400 dark:text-neutral-500">Set from the model picker in Chat (open it, pick a model, then "Set current as default").</div>
+
+                    <div class="flex items-center justify-between py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm">Memory extraction model</span>
+                        <select x-model="memoryExtractionModel" @change="saveMemoryModel()" class="text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
+                            <option value="">Off (no automatic memory)</option>
+                            <template x-for="m in allAvailableModels()" :key="m.value">
+                                <option :value="m.value" x-text="m.label"></option>
+                            </template>
+                        </select>
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">Runs automatically after 10 minutes of inactivity, scanning everything said since the last scan across all chats for genuinely durable facts worth remembering. Off by default.</div>
                 </div>
 
                 <div>
@@ -343,6 +506,34 @@
                     <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-1.5">SearXNG URL (enables web_search and web_fetch)</label>
                     <input type="text" x-model="searchUrl" @change="saveSearchUrl()" placeholder="http://localhost:4444" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                     <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1.5" x-show="!searchUrl">Web search tools are unavailable until this is set.</div>
+                </div>
+
+                <div>
+                    <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Security</h3>
+
+                    <div class="py-2">
+                        <div class="text-sm mb-2">Change password</div>
+                        <div class="space-y-2">
+                            <input type="password" x-model="currentPasswordInput" placeholder="Current password" autocomplete="current-password" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
+                            <input type="password" x-model="newPasswordInput" placeholder="New password" autocomplete="new-password" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
+                            <button @click="changePassword()" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">Update Password</button>
+                            <div x-show="passwordChangeMessage" class="text-xs" :class="passwordChangeSuccess ? 'text-green-500' : 'text-red-400'" x-text="passwordChangeMessage"></div>
+                        </div>
+                    </div>
+
+                    <div class="py-2 border-t border-neutral-100 dark:border-neutral-800 mt-2 pt-3">
+                        <div class="flex items-center justify-between">
+                            <div class="text-sm">Two-factor authentication</div>
+                            <span class="text-xs font-medium" :class="totpEnabled ? 'text-green-500' : 'text-neutral-400 dark:text-neutral-500'" x-text="totpEnabled ? 'Enabled' : 'Disabled'"></span>
+                        </div>
+                        <button x-show="!totpEnabled" @click="start2FASetup()" class="mt-2 text-xs font-medium px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">Enable 2FA</button>
+                        <button x-show="totpEnabled" @click="disable2FAPasswordInput = ''; disable2FAError = ''; disable2FAModalOpen = true" class="mt-2 text-xs font-medium px-3 py-1.5 rounded-lg border border-red-200 dark:border-red-900 text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10">Disable 2FA</button>
+                    </div>
+
+                    <div class="py-2 border-t border-neutral-100 dark:border-neutral-800 mt-2 pt-3 flex items-center justify-between">
+                        <span class="text-sm">Log out</span>
+                        <button @click="logout()" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">Log Out</button>
+                    </div>
                 </div>
 
                 <div>
@@ -449,5 +640,122 @@
 </div>
 
 <script src="/static/js/app.js"></script>
+    <!-- FILE PREVIEW MODAL -->
+    <div x-show="filePreviewOpen" x-cloak @click.self="filePreviewOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-[36rem] max-w-[90vw] max-h-[80vh] flex flex-col p-4">
+            <div class="flex items-center justify-between mb-2 gap-2">
+                <span class="text-xs font-mono truncate text-neutral-600 dark:text-neutral-300" x-text="filePreviewPath"></span>
+                <button @click="filePreviewOpen = false" class="p-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-400 shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <pre class="flex-1 overflow-auto text-xs bg-neutral-50 dark:bg-neutral-900 rounded-lg p-3 whitespace-pre-wrap" x-text="filePreviewContent"></pre>
+        </div>
+    </div>
+    <!-- DELETE CHAT CONFIRM MODAL -->
+    <div x-show="deleteConfirmSessionId" x-cloak @click.self="deleteConfirmSessionId = null" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-2">Delete this chat?</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">This permanently removes its messages from memory. This can't be undone.</div>
+            <div class="flex gap-2">
+                <button @click="deleteConfirmSessionId = null" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="confirmDelete()" class="flex-1 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- RENAME CHAT MODAL -->
+    <div x-show="renameModalOpen" x-cloak @click.self="renameModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3">Rename chat</div>
+            <input x-model="renameModalValue" @keydown.enter="confirmRename()" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-violet-400 dark:focus:border-violet-600 mb-4" placeholder="Chat name">
+            <div class="flex gap-2">
+                <button @click="renameModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="confirmRename()" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Save</button>
+            </div>
+        </div>
+    </div>
+    <!-- MOBILE SETTINGS BOTTOM SHEET -->
+    <div x-show="mobileSettingsSheetOpen" x-cloak @click.self="mobileSettingsSheetOpen = false" class="md:hidden fixed inset-0 bg-black/40 flex items-end justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-t-2xl shadow-xl w-full p-4 pb-6">
+            <div class="w-10 h-1 rounded-full bg-neutral-300 dark:bg-neutral-600 mx-auto mb-4"></div>
+            <div class="space-y-1">
+                <button @click="mobileSettingsSheetOpen = false; modelPopupOpen = true" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left">
+                    <span class="flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v1a3 3 0 0 0 1.5 2.6V16a4 4 0 0 0 4 4h5a4 4 0 0 0 4-4v-2.4A3 3 0 0 0 20 11v-1a3 3 0 0 0-3-3h-1V6a4 4 0 0 0-4-4z"/></svg>
+                        Model
+                    </span>
+                    <span class="text-xs text-neutral-400 dark:text-neutral-500 truncate max-w-[9rem]" x-text="modelLabel"></span>
+                </button>
+                <button @click="mobileSettingsSheetOpen = false; modelPopupOpen = true" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left">
+                    <span class="flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+                        Context size
+                    </span>
+                    <span class="text-xs text-neutral-400 dark:text-neutral-500" x-text="maxCtx === 0 ? 'auto' : maxCtx"></span>
+                </button>
+                <button @click="mobileSettingsSheetOpen = false; openWorkspacePopup()" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left">
+                    <span class="flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        Workspace
+                    </span>
+                    <span class="text-xs truncate max-w-[9rem]" :class="workspace ? 'text-violet-500' : 'text-neutral-400 dark:text-neutral-500'" x-text="workspace || 'none'"></span>
+                </button>
+                <button @click="toggleUsePi()" :disabled="!workspace" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left disabled:opacity-40">
+                    <span class="flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                        Pi coding harness
+                    </span>
+                    <span class="text-xs font-medium" :class="usePi ? 'text-violet-500' : 'text-neutral-400 dark:text-neutral-500'" x-text="usePi ? 'On' : 'Off'"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+    <!-- 2FA SETUP MODAL -->
+    <div x-show="totp2FASetupModalOpen" x-cloak @click.self="totp2FASetupModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-96 p-5">
+            <template x-if="!totp2FABackupCodes.length">
+                <div>
+                    <h3 class="font-semibold text-sm mb-3">Set up two-factor authentication</h3>
+                    <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-3">Scan this with an authenticator app (Google Authenticator, Authy, etc.):</div>
+                    <div class="flex justify-center mb-3">
+                        <div class="flex justify-center"><div id="totp-qr-canvas" class="bg-white p-4 rounded-lg"></div></div>
+                    </div>
+                    <div class="text-[11px] text-neutral-400 dark:text-neutral-500 text-center mb-4 break-all" x-text="totp2FASecret"></div>
+                    <input x-model="totp2FACode" type="text" inputmode="numeric" placeholder="Enter 6-digit code" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 text-center tracking-widest mb-2">
+                    <div x-show="totp2FAError" class="text-xs text-red-400 mb-2" x-text="totp2FAError"></div>
+                    <div class="flex gap-2">
+                        <button @click="totp2FASetupModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                        <button @click="confirm2FA()" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Verify &amp; Enable</button>
+                    </div>
+                </div>
+            </template>
+            <template x-if="totp2FABackupCodes.length">
+                <div>
+                    <h3 class="font-semibold text-sm mb-3">2FA enabled — save your backup codes</h3>
+                    <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-3">Each can be used once if you lose access to your authenticator app. Store these somewhere safe — they won't be shown again.</div>
+                    <div class="grid grid-cols-2 gap-2 mb-4 font-mono text-xs">
+                        <template x-for="code in totp2FABackupCodes" :key="code">
+                            <div class="bg-neutral-100 dark:bg-neutral-700 rounded-lg px-2 py-1.5 text-center" x-text="code"></div>
+                        </template>
+                    </div>
+                    <button @click="totp2FASetupModalOpen = false; totp2FABackupCodes = []" class="w-full py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Done</button>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <!-- 2FA DISABLE MODAL -->
+    <div x-show="disable2FAModalOpen" x-cloak @click.self="disable2FAModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
+            <h3 class="font-semibold text-sm mb-3">Disable two-factor authentication</h3>
+            <input x-model="disable2FAPasswordInput" type="password" placeholder="Confirm your password" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 mb-2">
+            <div x-show="disable2FAError" class="text-xs text-red-400 mb-2" x-text="disable2FAError"></div>
+            <div class="flex gap-2">
+                <button @click="disable2FAModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="disable2FA()" class="flex-1 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">Disable</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

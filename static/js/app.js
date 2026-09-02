@@ -55,6 +55,42 @@ function athenaApp() {
         workspaceBrowseParent: null,
         workspaceBrowseDirs: [],
         newFolderName: "",
+        fileBrowserOpen: false,
+        fileBrowserPath: "",
+        fileBrowserParent: null,
+        fileBrowserEntries: [],
+        filePreviewOpen: false,
+        filePreviewPath: "",
+        filePreviewContent: "",
+        pendingImages: [],
+        pendingAttachments: [],
+        attachMenuOpen: false,
+        mobileNavOpen: false,
+        mobileSettingsSheetOpen: false,
+        memoryExtractionModel: "",
+        currentPasswordInput: "",
+        newPasswordInput: "",
+        passwordChangeMessage: "",
+        passwordChangeSuccess: false,
+        totpEnabled: false,
+        totp2FASetupModalOpen: false,
+        totp2FASecret: "",
+        totp2FACode: "",
+        totp2FAError: "",
+        totp2FABackupCodes: [],
+        disable2FAModalOpen: false,
+        disable2FAPasswordInput: "",
+        disable2FAError: "",
+        memories: [],
+        addMemoryModalOpen: false,
+        newMemoryText: "",
+        deleteConfirmSessionId: null,
+        renameModalOpen: false,
+        renameModalSessionId: null,
+        renameModalValue: "",
+        systemStatsOpen: false,
+        systemStats: null,
+        systemStatsTimer: null,
 
         // --- notes ---
         notes: JSON.parse(localStorage.getItem("athena_notes") || "[]"),
@@ -70,6 +106,9 @@ function athenaApp() {
                 this.modelLabel = this.defaultModel.label;
                 this.modelEndpointUrl = this.defaultModel.endpointUrl || "";
             }
+
+            this.loadMemoryModel();
+            this.loadAuthStatus();
 
             // URL hash reflects state as #page/sessionId, e.g.
             // #chat/9f2e... or #settings -- lets refresh/back-button/
@@ -103,12 +142,34 @@ function athenaApp() {
             try {
                 const resp = await fetch(`/api/history/${id}`);
                 const history = await resp.json();
-                this.messages = history.map(m => ({...m, ttsLabel: "Play", rating: null}));
+                this.messages = history.map(m => ({
+                    ...m,
+                    ttsLabel: "Play",
+                    rating: null,
+                    model: m.role === "assistant" ? this.getStoredMsgModel(m.messageId) : undefined,
+                }));
                 await this.loadRatingsForSession(id);
                 this.scrollToBottom();
             } catch (e) {
                 console.error("Failed to load session history:", e);
             }
+        },
+        getStoredMsgModel(id) {
+            if (id === null || id === undefined) return undefined;
+            try {
+                const map = JSON.parse(localStorage.getItem("athena_msg_models") || "{}");
+                return map[id];
+            } catch (e) {
+                return undefined;
+            }
+        },
+        setStoredMsgModel(id, model) {
+            if (id === null || id === undefined || !model) return;
+            try {
+                const map = JSON.parse(localStorage.getItem("athena_msg_models") || "{}");
+                map[id] = model;
+                localStorage.setItem("athena_msg_models", JSON.stringify(map));
+            } catch (e) {}
         },
 
         updateHash() {
@@ -173,8 +234,6 @@ function athenaApp() {
         newChat() {
             this.sessionId = generateUUID();
             localStorage.setItem("athena_session", this.sessionId);
-            this.sessions.unshift({id: this.sessionId, label: "New chat", createdAt: Date.now(), pinned: false});
-            this.saveSessions();
             this.messages = [];
         },
 
@@ -196,18 +255,68 @@ function athenaApp() {
         renameSession(id) {
             const s = this.sessions.find(x => x.id === id);
             if (!s) return;
-            const newName = prompt("Rename chat", s.label);
-            if (newName && newName.trim()) s.label = newName.trim();
-            this.saveSessions();
+            this.renameModalSessionId = id;
+            this.renameModalValue = s.label;
+            this.renameModalOpen = true;
             this.sessionMenuOpen = null;
         },
 
+        confirmRename() {
+            const s = this.sessions.find(x => x.id === this.renameModalSessionId);
+            if (s && this.renameModalValue.trim()) s.label = this.renameModalValue.trim();
+            this.saveSessions();
+            this.renameModalOpen = false;
+        },
+
         deleteSession(id) {
-            if (!confirm("Delete this chat?")) return;
+            this.deleteConfirmSessionId = id;
+            this.sessionMenuOpen = null;
+        },
+
+        async deleteMessagePair(msg) {
+            if (!msg.messageId) return;
+            try {
+                const resp = await fetch(`/api/messages/${msg.messageId}`, {method: "DELETE"});
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Failed to delete message: " + data.error);
+                    return;
+                }
+                const deletedIds = new Set(data.deleted_ids || [msg.messageId]);
+                this.messages = this.messages.filter(m => !m.messageId || !deletedIds.has(m.messageId));
+            } catch (e) {
+                alert("Failed to delete message: " + e.message);
+            }
+        },
+        async confirmDelete() {
+            const id = this.deleteConfirmSessionId;
+            this.deleteConfirmSessionId = null;
             this.sessions = this.sessions.filter(x => x.id !== id);
             this.saveSessions();
+            try {
+                await fetch(`/api/history/${id}`, {method: "DELETE"});
+            } catch (e) {
+                console.error("Failed to delete session from LCM:", e);
+            }
             if (id === this.sessionId) this.newChat();
-            this.sessionMenuOpen = null;
+        },
+        toggleSystemStats() {
+            this.systemStatsOpen = !this.systemStatsOpen;
+            if (this.systemStatsOpen) {
+                this.fetchSystemStats();
+                this.systemStatsTimer = setInterval(() => this.fetchSystemStats(), 2000);
+            } else if (this.systemStatsTimer) {
+                clearInterval(this.systemStatsTimer);
+                this.systemStatsTimer = null;
+            }
+        },
+        async fetchSystemStats() {
+            try {
+                const resp = await fetch("/api/system/stats");
+                this.systemStats = await resp.json();
+            } catch (e) {
+                console.error("Failed to fetch system stats:", e);
+            }
         },
 
         selectModel(m) {
@@ -280,6 +389,167 @@ function athenaApp() {
             localStorage.setItem("athena_default_model", JSON.stringify(this.defaultModel));
         },
 
+        async loadMemories() {
+            try {
+                const resp = await fetch("/api/memory");
+                const data = await resp.json();
+                if (data.error) {
+                    console.error("Failed to load memories:", data.error);
+                    return;
+                }
+                this.memories = data;
+            } catch (e) {
+                console.error("Failed to load memories:", e);
+            }
+        },
+        async addMemory() {
+            const text = this.newMemoryText.trim();
+            if (!text) return;
+            try {
+                const resp = await fetch("/api/memory", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({content: text}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Failed to add memory: " + data.error);
+                    return;
+                }
+                this.addMemoryModalOpen = false;
+                await this.loadMemories();
+            } catch (e) {
+                alert("Failed to add memory: " + e.message);
+            }
+        },
+        async deleteMemory(id) {
+            try {
+                await fetch(`/api/memory/${id}`, {method: "DELETE"});
+                this.memories = this.memories.filter(m => m.id !== id);
+            } catch (e) {
+                console.error("Failed to delete memory:", e);
+            }
+        },
+        async loadAuthStatus() {
+            try {
+                const resp = await fetch("/api/auth/status");
+                const data = await resp.json();
+                this.totpEnabled = !!data.totp_enabled;
+            } catch (e) {
+                console.error("Failed to load auth status:", e);
+            }
+        },
+        async changePassword() {
+            this.passwordChangeMessage = "";
+            try {
+                const resp = await fetch("/api/auth/change-password", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({current_password: this.currentPasswordInput, new_password: this.newPasswordInput}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    this.passwordChangeSuccess = false;
+                    this.passwordChangeMessage = data.error;
+                    return;
+                }
+                this.passwordChangeSuccess = true;
+                this.passwordChangeMessage = "Password updated.";
+                this.currentPasswordInput = "";
+                this.newPasswordInput = "";
+            } catch (e) {
+                this.passwordChangeSuccess = false;
+                this.passwordChangeMessage = "Failed: " + e.message;
+            }
+        },
+        async start2FASetup() {
+            this.totp2FACode = "";
+            this.totp2FAError = "";
+            this.totp2FABackupCodes = [];
+            try {
+                const resp = await fetch("/api/auth/2fa/setup", {method: "POST"});
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Failed to start 2FA setup: " + data.error);
+                    return;
+                }
+                this.totp2FASecret = data.secret;
+                this.totp2FASetupModalOpen = true;
+                this.$nextTick(() => {
+                    const el = document.getElementById("totp-qr-canvas");
+                    if (window.QRCode && el) {
+                        el.innerHTML = "";
+                        new QRCode(el, {text: data.otpauth_uri, width: 256, height: 256});
+                    }
+                });
+            } catch (e) {
+                alert("Failed to start 2FA setup: " + e.message);
+            }
+        },
+        async confirm2FA() {
+            this.totp2FAError = "";
+            try {
+                const resp = await fetch("/api/auth/2fa/confirm", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({code: this.totp2FACode}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    this.totp2FAError = data.error;
+                    return;
+                }
+                this.totpEnabled = true;
+                this.totp2FABackupCodes = data.backup_codes;
+            } catch (e) {
+                this.totp2FAError = "Failed: " + e.message;
+            }
+        },
+        async disable2FA() {
+            this.disable2FAError = "";
+            try {
+                const resp = await fetch("/api/auth/2fa/disable", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({password: this.disable2FAPasswordInput}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    this.disable2FAError = data.error;
+                    return;
+                }
+                this.totpEnabled = false;
+                this.disable2FAModalOpen = false;
+            } catch (e) {
+                this.disable2FAError = "Failed: " + e.message;
+            }
+        },
+        async logout() {
+            try {
+                await fetch("/api/auth/logout", {method: "POST"});
+            } catch (e) {}
+            window.location.href = "/login";
+        },
+        async loadMemoryModel() {
+            try {
+                const resp = await fetch("/api/settings/memory-model");
+                const data = await resp.json();
+                this.memoryExtractionModel = data.model || "";
+            } catch (e) {
+                console.error("Failed to load memory model setting:", e);
+            }
+        },
+        async saveMemoryModel() {
+            try {
+                await fetch("/api/settings/memory-model", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({model: this.memoryExtractionModel || null}),
+                });
+            } catch (e) {
+                console.error("Failed to save memory model setting:", e);
+            }
+        },
         allAvailableModels() {
             const list = [];
             for (const ep of this.endpoints) {
@@ -410,19 +680,30 @@ function athenaApp() {
 
         async send() {
             const text = this.inputText.trim();
-            if (!text || this.sending) return;
+            if ((!text && !this.pendingImages.length && !this.pendingAttachments.length) || this.sending) return;
             this.inputText = "";
+            this.$nextTick(() => {
+                if (this.$refs.textareaEl) this.$refs.textareaEl.style.height = "auto";
+            });
+            const imagesToSend = this.pendingImages.map(img => img.base64);
+            const attachmentsToSend = this.pendingAttachments.map(att => ({name: att.name, content: att.content}));
+            this.pendingImages = [];
+            this.pendingAttachments = [];
             this.sending = true;
 
             this.messages.push({role: "user", content: text});
-            const activeSession = this.sessions.find(s => s.id === this.sessionId);
-            if (activeSession && activeSession.label === "New chat") {
+            let activeSession = this.sessions.find(s => s.id === this.sessionId);
+            if (!activeSession) {
+                activeSession = {id: this.sessionId, label: text.slice(0, 40), createdAt: Date.now(), pinned: false};
+                this.sessions.unshift(activeSession);
+                this.saveSessions();
+            } else if (activeSession.label === "New chat") {
                 activeSession.label = text.slice(0, 40);
                 this.saveSessions();
             }
             this.scrollToBottom();
 
-            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null};
+            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, tokensPerSec: null, model: this.modelLabel, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null};
             this.messages.push(assistantMsg);
             const msgIndex = this.messages.length - 1;
 
@@ -439,6 +720,8 @@ function athenaApp() {
                         endpoint_url: this.modelEndpointUrl,
                         search_url: this.searchUrl,
                         use_pi: this.usePi,
+                        images: imagesToSend,
+                        attachments: attachmentsToSend,
                     }),
                 });
 
@@ -455,6 +738,11 @@ function athenaApp() {
                     for (const line of lines) {
                         if (!line.startsWith("data: ")) continue;
                         const data = JSON.parse(line.slice(6));
+                        if (data.user_message_id !== undefined) {
+                            if (this.messages[msgIndex - 1]) {
+                                this.messages[msgIndex - 1].messageId = data.user_message_id;
+                            }
+                        }
                         if (data.thinking) {
                             this.messages[msgIndex].thinking += data.thinking;
                             this.scrollToBottom();
@@ -480,9 +768,11 @@ function athenaApp() {
                         if (data.done) {
                             this.messages[msgIndex].ctxUsed = data.ctx_used;
                             this.messages[msgIndex].promptTokens = data.prompt_tokens;
+                            this.messages[msgIndex].tokensPerSec = data.tokens_per_sec;
                         }
                         if (data.assistant_message_id !== undefined) {
                             this.messages[msgIndex].messageId = data.assistant_message_id;
+                            this.setStoredMsgModel(data.assistant_message_id, this.messages[msgIndex].model);
                         }
                     }
                 }
@@ -502,6 +792,98 @@ function athenaApp() {
             this.workspace = path;
             localStorage.setItem("athena_workspace", path);
             this.workspacePopupOpen = false;
+            if (this.fileBrowserOpen) {
+                this.loadFileBrowser("");
+            }
+        },
+        toggleFileBrowser() {
+            if (!this.workspace) return;
+            this.fileBrowserOpen = !this.fileBrowserOpen;
+            if (this.fileBrowserOpen) {
+                this.loadFileBrowser("");
+            }
+        },
+        async loadFileBrowser(path) {
+            try {
+                const resp = await fetch(`/api/workspace/files?workspace=${encodeURIComponent(this.workspace)}&path=${encodeURIComponent(path)}`);
+                const data = await resp.json();
+                if (data.error) {
+                    alert("File browser error: " + data.error);
+                    return;
+                }
+                this.fileBrowserPath = data.path;
+                if (!this.fileBrowserPath) {
+                    this.fileBrowserParent = null;
+                } else {
+                    const parts = this.fileBrowserPath.split("/");
+                    parts.pop();
+                    this.fileBrowserParent = parts.join("/");
+                }
+                this.fileBrowserEntries = data.entries;
+            } catch (e) {
+                alert("File browser failed: " + e.message);
+            }
+        },
+        fileBrowserUp() {
+            if (this.fileBrowserParent !== null) {
+                this.loadFileBrowser(this.fileBrowserParent);
+            }
+        },
+        fileBrowserInto(name) {
+            const next = this.fileBrowserPath ? this.fileBrowserPath + "/" + name : name;
+            this.loadFileBrowser(next);
+        },
+        async previewFile(name) {
+            const relPath = this.fileBrowserPath ? this.fileBrowserPath + "/" + name : name;
+            try {
+                const resp = await fetch(`/api/workspace/read?workspace=${encodeURIComponent(this.workspace)}&path=${encodeURIComponent(relPath)}`);
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Preview error: " + data.error);
+                    return;
+                }
+                this.filePreviewPath = data.path;
+                this.filePreviewContent = data.content;
+                this.filePreviewOpen = true;
+            } catch (e) {
+                alert("Preview failed: " + e.message);
+            }
+        },
+        formatFileSize(bytes) {
+            if (bytes === null || bytes === undefined) return "";
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+            return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+        },
+        handleImageSelected(event) {
+            const files = Array.from(event.target.files || []);
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const dataUrl = reader.result;
+                    const base64 = dataUrl.split(",")[1];
+                    this.pendingImages.push({name: file.name, base64: base64, previewUrl: dataUrl});
+                };
+                reader.readAsDataURL(file);
+            });
+            event.target.value = "";
+        },
+        handleFileSelected(event) {
+            const files = Array.from(event.target.files || []);
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    this.pendingAttachments.push({name: file.name, content: reader.result});
+                };
+                reader.readAsText(file);
+            });
+            event.target.value = "";
+        },
+        removeImage(idx) {
+            this.pendingImages.splice(idx, 1);
+        },
+        removeAttachment(idx) {
+            this.pendingAttachments.splice(idx, 1);
         },
 
         copyMessage(text, event) {

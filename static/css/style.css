@@ -84,3 +84,14 @@
 }
 .icon-rail-btn svg { width: 20px; height: 20px; }
 .icon-rail-btn .rail-label { font-size: 9.5px; font-weight: 500; }
+
+/* Mobile: every page's actual content renders as the sibling right
+   after its own <template x-if> tag. This single rule reserves space
+   for the floating menu button at the top-left on every page at once,
+   without needing per-page markup changes -- and it's scoped to mobile
+   widths only, so desktop is completely unaffected. */
+@media (max-width: 767px) {
+    body > div.flex > template + div:not(#chat-page-root) {
+        padding-top: 3.5rem;
+    }
+}
