@@ -52,6 +52,10 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                         New chat
                     </button>
+                    <div class="mt-2 relative">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                        <input type="text" x-model="sessionSearch" placeholder="Search chats..." class="w-full text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg pl-8 pr-2 py-1.5 outline-none focus:border-violet-400 dark:focus:border-violet-600">
+                    </div>
                 </div>
                 <div class="flex-1 overflow-y-auto px-3 py-2 space-y-4">
                     <template x-for="group in groupedSessions()" :key="group.label">
@@ -63,6 +67,7 @@
                                          :class="s.id === sessionId ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
                                         <svg x-show="s.pinned" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-amber-500"><path d="M12 2l1.5 5.5L19 9l-4 3.5L16 18l-4-3-4 3 1-5.5L5 9l5.5-1.5z"/></svg>
                                         <span @click="switchSession(s.id)" class="truncate flex-1" x-text="s.label"></span>
+                                        <span class="text-[10px] text-neutral-400 dark:text-neutral-500 shrink-0 group-hover:hidden" x-text="relativeTime(s.createdAt)"></span>
                                         <div class="relative">
                                             <button @click.stop="sessionMenuOpen = sessionMenuOpen === s.id ? null : s.id" class="opacity-0 group-hover:opacity-100 p-1 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
@@ -108,29 +113,46 @@
                                         </div>
                                     </template>
                                     <template x-if="msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length">
-                                        <div class="w-full space-y-1.5">
-                                            <template x-for="(tc, tcIdx) in msg.toolCalls" :key="tcIdx">
-                                                <div class="border border-neutral-200 dark:border-neutral-700 rounded-xl overflow-hidden">
-                                                    <div @click="tc.open = !tc.open" class="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-neutral-800 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400">
-                                                        <span class="flex items-center gap-2">
-                                                            <span x-show="tc.status === 'running'" class="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse"></span>
-                                                            <span x-show="tc.status === 'done'" class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
-                                                            <span class="font-mono" x-text="tc.tool"></span>
-                                                            <span x-text="tc.status === 'running' ? '(running...)' : '(done)'"></span>
-                                                        </span>
-                                                        <span x-text="tc.open ? '▲' : '▼'"></span>
+                                        <div class="w-full border border-neutral-200 dark:border-neutral-700 rounded-xl overflow-hidden">
+                                            <div @click="msg.toolsOpen = !msg.toolsOpen" class="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-neutral-800 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400">
+                                                <span class="flex items-center gap-1.5 flex-wrap">
+                                                    <span x-show="msg.toolCalls.some(t => t.status === 'running')" class="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+                                                    <span x-show="!msg.toolCalls.some(t => t.status === 'running')" class="inline-block h-2 w-2 rounded-full bg-green-500 shrink-0"></span>
+                                                    <span>Explored</span>
+                                                    <template x-for="(tc, tcIdx) in msg.toolCalls.slice(0, 2)" :key="tcIdx">
+                                                        <span class="font-mono bg-neutral-200 dark:bg-neutral-700 rounded px-1.5 py-0.5" x-text="tc.tool"></span>
+                                                    </template>
+                                                    <span x-show="msg.toolCalls.length > 2" x-text="(msg.toolCalls.length - 2) + ' more'"></span>
+                                                </span>
+                                                <span x-text="msg.toolsOpen ? '▲' : '▼'"></span>
+                                            </div>
+                                            <div x-show="msg.toolsOpen" class="divide-y divide-neutral-200 dark:divide-neutral-700">
+                                                <template x-for="(tc, tcIdx) in msg.toolCalls" :key="tcIdx">
+                                                    <div class="px-3 py-2 text-xs">
+                                                        <div class="font-mono text-neutral-500 dark:text-neutral-400 mb-1" x-text="tc.tool"></div>
+                                                        <div class="text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
                                                     </div>
-                                                    <div x-show="tc.open" class="px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
-                                                </div>
-                                            </template>
+                                                </template>
+                                            </div>
                                         </div>
                                     </template>
                                     <div :class="msg.role === 'user' ? 'bg-violet-600 text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100'"
                                          class="text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(msg.content)"></div>
-                                    <div class="flex items-center gap-3" x-show="msg.role === 'assistant' && msg.content">
-                                        <button @click="playTTS(msg.content, $event)" class="flex items-center gap-1 text-xs text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 transition">
+                                    <div class="flex items-center gap-2" x-show="msg.role === 'assistant' && msg.content">
+                                        <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                        </button>
+                                        <button @click="retryMessage(idx)" title="Retry" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                        </button>
+                                        <button @click="rateMessage(idx, 'up')" title="Good response" class="p-1.5 rounded-lg transition" :class="msg.rating === 'up' ? 'text-green-500' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+                                        </button>
+                                        <button @click="rateMessage(idx, 'down')" title="Bad response" class="p-1.5 rounded-lg transition" :class="msg.rating === 'down' ? 'text-red-500' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg>
+                                        </button>
+                                        <button @click="playTTS(msg.content, $event)" title="Play" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-                                            <span x-text="msg.ttsLabel || 'Play'"></span>
                                         </button>
                                         <template x-if="msg.ctxUsed">
                                             <div class="flex items-center gap-1.5" :title="msg.promptTokens + ' / ' + msg.ctxUsed + ' tokens'">
@@ -163,7 +185,7 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                                 <span x-text="workspace || 'no workspace'"></span>
                             </button>
-                            <button @click="usePi = !usePi" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition disabled:opacity-30" :class="usePi ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-500/10' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'" :title="workspace ? 'Route through the Pi coding harness' : 'Set a workspace to enable Pi'">
+                            <button @click="toggleUsePi()" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition disabled:opacity-30" :class="usePi ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-500/10' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'" :title="workspace ? 'Route through the Pi coding harness' : 'Set a workspace to enable Pi'">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                                 <span x-text="usePi ? 'Pi: on' : 'Pi: off'"></span>
                             </button>
@@ -391,8 +413,8 @@
         </div>
 
         <div class="flex gap-2">
-            <button @click="workspace = ''; workspacePopupOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">None</button>
-            <button @click="workspace = workspaceBrowsePath; workspacePopupOpen = false" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Select This Folder</button>
+            <button @click="selectWorkspace('')" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">None</button>
+            <button @click="selectWorkspace(workspaceBrowsePath)" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Select This Folder</button>
         </div>
     </div>
 </div>

@@ -3,6 +3,7 @@ Athena — a lean, LCM-backed chat/agent workspace with voice support.
 """
 import os
 import subprocess
+import sqlite3
 import io
 import json
 import tempfile
@@ -104,16 +105,107 @@ def get_lcm_tools() -> list:
     return []
 
 
-def send_to_lcm(session_id: str, role: str, content: str):
+RATINGS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratings.db")
+
+def _ratings_conn():
+    conn = sqlite3.connect(RATINGS_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ratings (
+            message_id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            rating TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    return conn
+
+class RatingIn(BaseModel):
+    message_id: int
+    session_id: str
+    model: str
+    rating: str = ""  # "up", "down", or "" to remove the rating entirely
+    reason: str = ""
+
+@app.post("/api/rate")
+def rate_message(req: RatingIn):
+    """Upsert-or-delete semantics: re-rating or removing a vote always
+    recomputes cleanly from current state, since /api/model-stats
+    aggregates directly from whatever rows currently exist -- a changed
+    or removed vote is automatically reflected with no separate
+    increment/decrement bookkeeping to get wrong."""
+    conn = _ratings_conn()
     try:
-        httpx.post(f"{LCM_URL}/message", json={
+        if not req.rating:
+            conn.execute("DELETE FROM ratings WHERE message_id = ?", (req.message_id,))
+        else:
+            conn.execute("""
+                INSERT INTO ratings (message_id, session_id, model, rating, reason, updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(message_id) DO UPDATE SET
+                    rating = excluded.rating,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at
+            """, (req.message_id, req.session_id, req.model, req.rating, req.reason))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/api/ratings/{session_id}")
+def get_ratings(session_id: str):
+    """Returns {message_id: {rating, reason}} for a session, so the
+    frontend can re-apply which button should show as selected after
+    a reload -- ratings live in this DB, not in the message history
+    LCM returns, since LCM has no concept of a 'rating' field."""
+    conn = _ratings_conn()
+    try:
+        rows = conn.execute(
+            "SELECT message_id, rating, reason FROM ratings WHERE session_id = ?",
+            (session_id,)
+        ).fetchall()
+        return {str(r[0]): {"rating": r[1], "reason": r[2]} for r in rows}
+    finally:
+        conn.close()
+
+@app.get("/api/model-stats")
+def get_model_stats():
+    """Aggregate up/down counts per model, for showing real quality
+    signal on the Models page -- computed fresh from current rows every
+    call, so it's always correct even after votes change or get removed."""
+    conn = _ratings_conn()
+    try:
+        rows = conn.execute("""
+            SELECT model,
+                   SUM(CASE WHEN rating = 'up' THEN 1 ELSE 0 END) as up_count,
+                   SUM(CASE WHEN rating = 'down' THEN 1 ELSE 0 END) as down_count
+            FROM ratings
+            GROUP BY model
+        """).fetchall()
+        return {r[0]: {"up": r[1], "down": r[2]} for r in rows}
+    finally:
+        conn.close()
+
+
+def send_to_lcm(session_id: str, role: str, content: str):
+    """Returns the real LCM message ID on success, or None on failure --
+    the ID is what ratings attach to, since it's the one stable
+    identifier that survives across page reloads and session history
+    reloads (unlike a frontend array index, which is meaningless once
+    messages get re-fetched from LCM in a different order/subset)."""
+    try:
+        resp = httpx.post(f"{LCM_URL}/message", json={
             "session_id": session_id,
             "role": role,
             "content": content,
             "service": "athena",
         }, timeout=3)
+        if resp.status_code == 200:
+            return resp.json().get("id")
     except Exception:
         pass
+    return None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -546,10 +638,9 @@ def _run_pi_agent(req: "ChatIn"):
                 yield f"data: {json.dumps({'type': 'tool_output', 'tool': event.get('toolName', 'unknown'), 'output': event.get('result')})}\n\n"
 
             elif etype == "agent_settled":
-                yield f"data: {json.dumps({'done': True})}\n\n"
-
-        proc.wait()
-        send_to_lcm(req.session_id, "assistant", full_reply)
+                proc.wait()
+                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
+                yield f"data: {json.dumps({'done': True, 'assistant_message_id': _msg_id})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -674,8 +765,9 @@ def chat_stream(req: ChatIn):
                         break
 
             if not round_tool_calls:
-                yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens})}\n\n"
-                break
+                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
+                yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
+                return
 
             # Model wants to call tool(s) -- execute each, tell the
             # frontend what's happening, then loop back with results
@@ -691,10 +783,8 @@ def chat_stream(req: ChatIn):
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
             full_reply = fallback_msg
             yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'note': 'max tool rounds reached'})}\n\n"
-
-        print(f"[DEBUG] full_reply length={len(full_reply)!r} content={full_reply[:200]!r}", flush=True)
-        send_to_lcm(req.session_id, "assistant", full_reply)
+            _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
+            yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -773,7 +863,7 @@ def get_history(session_id: str):
         resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=3)
         if resp.status_code == 200:
             msgs = resp.json()
-            return [{"role": m["role"], "content": m["content"]} for m in msgs]
+            return [{"role": m["role"], "content": m["content"], "messageId": m["id"]} for m in msgs]
     except Exception:
         pass
     return []

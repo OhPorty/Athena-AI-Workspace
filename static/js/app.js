@@ -35,7 +35,7 @@ function athenaApp() {
         audioChunks: [],
         defaultModel: JSON.parse(localStorage.getItem("athena_default_model") || "null"),
         searchUrl: localStorage.getItem("athena_search_url") || "",
-        usePi: false,
+        usePi: localStorage.getItem("athena_use_pi") === "true",
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
@@ -49,7 +49,7 @@ function athenaApp() {
         maxCtx: 0,
         maxCtxText: "0",
         modelPopupOpen: false,
-        workspace: "",
+        workspace: localStorage.getItem("athena_workspace") || "",
         workspacePopupOpen: false,
         workspaceBrowsePath: "",
         workspaceBrowseParent: null,
@@ -91,6 +91,24 @@ function athenaApp() {
             this.updateHash();
             this.$watch("currentPage", () => this.updateHash());
             this.$watch("sessionId", () => this.updateHash());
+
+            // Load the actual conversation for whatever session we
+            // landed on -- without this, a fresh page load/reload
+            // shows a blank chat with no history until the user
+            // manually clicks a session in the sidebar.
+            this.loadSessionHistory(this.sessionId);
+        },
+
+        async loadSessionHistory(id) {
+            try {
+                const resp = await fetch(`/api/history/${id}`);
+                const history = await resp.json();
+                this.messages = history.map(m => ({...m, ttsLabel: "Play", rating: null}));
+                await this.loadRatingsForSession(id);
+                this.scrollToBottom();
+            } catch (e) {
+                console.error("Failed to load session history:", e);
+            }
         },
 
         updateHash() {
@@ -115,12 +133,31 @@ function athenaApp() {
             localStorage.setItem("athena_sessions", JSON.stringify(this.sessions));
         },
 
+        sessionSearch: "",
+
+        relativeTime(timestamp) {
+            if (!timestamp) return "";
+            const diffMs = Date.now() - timestamp;
+            const mins = Math.floor(diffMs / 60000);
+            if (mins < 1) return "now";
+            if (mins < 60) return mins + "m";
+            const hours = Math.floor(mins / 60);
+            if (hours < 24) return hours + "h";
+            const days = Math.floor(hours / 24);
+            if (days < 7) return days + "d";
+            return new Date(timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+        },
+
         groupedSessions() {
             const now = new Date();
             const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
             const yesterday = today - 86400000;
-            const pinned = this.sessions.filter(s => s.pinned);
-            const rest = this.sessions.filter(s => !s.pinned);
+            const query = this.sessionSearch.trim().toLowerCase();
+            const filtered = query
+                ? this.sessions.filter(s => (s.label || "").toLowerCase().includes(query))
+                : this.sessions;
+            const pinned = filtered.filter(s => s.pinned);
+            const rest = filtered.filter(s => !s.pinned);
             const groups = {Pinned: pinned, Today: [], Yesterday: [], Earlier: []};
             for (const s of rest) {
                 const t = s.createdAt || 0;
@@ -146,14 +183,7 @@ function athenaApp() {
             localStorage.setItem("athena_session", id);
             this.messages = [];
             this.sessionMenuOpen = null;
-            try {
-                const resp = await fetch(`/api/history/${id}`);
-                const history = await resp.json();
-                this.messages = history.map(m => ({...m, ttsLabel: "Play"}));
-                this.scrollToBottom();
-            } catch (e) {
-                console.error("Failed to load session history:", e);
-            }
+            await this.loadSessionHistory(id);
         },
 
         togglePin(id) {
@@ -392,7 +422,7 @@ function athenaApp() {
             }
             this.scrollToBottom();
 
-            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, ttsLabel: "Play", toolCalls: []};
+            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null};
             this.messages.push(assistantMsg);
             const msgIndex = this.messages.length - 1;
 
@@ -451,12 +481,101 @@ function athenaApp() {
                             this.messages[msgIndex].ctxUsed = data.ctx_used;
                             this.messages[msgIndex].promptTokens = data.prompt_tokens;
                         }
+                        if (data.assistant_message_id !== undefined) {
+                            this.messages[msgIndex].messageId = data.assistant_message_id;
+                        }
                     }
                 }
             } catch (e) {
                 this.messages[msgIndex].content = "⚠️ Error: " + e.message;
             } finally {
                 this.sending = false;
+            }
+        },
+
+        toggleUsePi() {
+            this.usePi = !this.usePi;
+            localStorage.setItem("athena_use_pi", this.usePi);
+        },
+
+        selectWorkspace(path) {
+            this.workspace = path;
+            localStorage.setItem("athena_workspace", path);
+            this.workspacePopupOpen = false;
+        },
+
+        copyMessage(text, event) {
+            navigator.clipboard.writeText(text);
+            const btn = event.currentTarget;
+            const original = btn.innerHTML;
+            btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+            setTimeout(() => btn.innerHTML = original, 1200);
+        },
+
+        async retryMessage(msgIndex) {
+            // Find the user message that preceded this assistant response,
+            // remove everything from there onward, and resend it -- same
+            // effect as if you'd typed it again.
+            let userIdx = msgIndex - 1;
+            while (userIdx >= 0 && this.messages[userIdx].role !== "user") userIdx--;
+            if (userIdx < 0) return;
+            const text = this.messages[userIdx].content;
+            this.messages = this.messages.slice(0, userIdx);
+            this.inputText = text;
+            await this.send();
+        },
+
+        async rateMessage(msgIndex, rating) {
+            const msg = this.messages[msgIndex];
+            if (!msg.messageId) {
+                alert("Can't rate this message yet -- it hasn't finished saving.");
+                return;
+            }
+
+            // Clicking the already-selected rating removes it entirely.
+            const newRating = msg.rating === rating ? "" : rating;
+            let reason = "";
+            if (newRating === "down") {
+                reason = prompt("What was wrong with this response? (optional)") || "";
+            }
+
+            const previousRating = msg.rating;
+            msg.rating = newRating || null; // update immediately, revert on failure
+
+            try {
+                const resp = await fetch("/api/rate", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        message_id: msg.messageId,
+                        session_id: this.sessionId,
+                        model: this.model,
+                        rating: newRating,
+                        reason: reason,
+                    }),
+                });
+                if (!resp.ok) throw new Error("Request failed");
+            } catch (e) {
+                msg.rating = previousRating; // real failure -- don't show a rating that didn't actually save
+                alert("Couldn't save rating: " + e.message);
+            }
+        },
+
+        async loadRatingsForSession(sessionId) {
+            // Re-applies which rating button should show as selected
+            // after a reload -- ratings live server-side, not in the
+            // message content LCM returns, so this has to run as a
+            // separate fetch whenever a session's history loads.
+            try {
+                const resp = await fetch(`/api/ratings/${sessionId}`);
+                const ratings = await resp.json();
+                for (const msg of this.messages) {
+                    if (msg.messageId && ratings[msg.messageId]) {
+                        msg.rating = ratings[msg.messageId].rating || null;
+                    }
+                }
+            } catch (e) {
+                // Non-critical -- ratings just won't show as pre-selected.
             }
         },
 
