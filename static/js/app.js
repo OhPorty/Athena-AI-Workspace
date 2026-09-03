@@ -25,7 +25,7 @@ function athenaApp() {
 
         // --- chat / sessions ---
         sessionId: localStorage.getItem("athena_session") || generateUUID(),
-        sessions: JSON.parse(localStorage.getItem("athena_sessions") || "[]"),
+        sessions: [],
         sessionMenuOpen: null,
         messages: [],
         inputText: "",
@@ -33,13 +33,13 @@ function athenaApp() {
         isRecording: false,
         mediaRecorder: null,
         audioChunks: [],
-        defaultModel: JSON.parse(localStorage.getItem("athena_default_model") || "null"),
-        searchUrl: localStorage.getItem("athena_search_url") || "",
-        usePi: localStorage.getItem("athena_use_pi") === "true",
+        defaultModel: null,
+        searchUrl: "",
+        usePi: false,
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
-        endpoints: JSON.parse(localStorage.getItem("athena_endpoints") || "[]"),
+        endpoints: [],
         addEndpointOpen: false,
         newEndpointType: "local",
         newEndpointName: "",
@@ -49,7 +49,7 @@ function athenaApp() {
         maxCtx: 0,
         maxCtxText: "0",
         modelPopupOpen: false,
-        workspace: localStorage.getItem("athena_workspace") || "",
+        workspace: "",
         workspacePopupOpen: false,
         workspaceBrowsePath: "",
         workspaceBrowseParent: null,
@@ -68,6 +68,30 @@ function athenaApp() {
         mobileNavOpen: false,
         mobileSettingsSheetOpen: false,
         memoryExtractionModel: "",
+        customTheme: null,
+        themeSeedColor: "#7c3aed",
+        colorPickerOpen: false,
+        pickerTarget: null,
+        manualThemeModalOpen: false,
+        themeRoles: [
+            {key: 'accent', label: 'Accent (buttons)'},
+            {key: 'accentHover', label: 'Accent hover'},
+            {key: 'accentIcon', label: 'Icon accent'},
+            {key: 'accentSoft', label: 'Soft highlight'},
+            {key: 'accentText', label: 'Accent text'},
+            {key: 'accentTextStrong', label: 'Accent text (strong)'},
+            {key: 'accentBorder', label: 'Border'},
+            {key: 'accentBorderFocus', label: 'Border (focus)'},
+            {key: 'wordmark', label: 'Wordmark'},
+            {key: 'logoColor', label: 'Logo'},
+        ],
+        themeDraft: {
+            light: {accent:'#7c3aed', accentHover:'#6d28d9', accentIcon:'#8b5cf6', accentSoft:'#f5f3ff', accentText:'#7c3aed', accentTextStrong:'#6d28d9', accentBorder:'#c4b5fd', accentBorderFocus:'#a78bfa', wordmark:'#5eead4', logoColor:'#265152'},
+            dark: {accent:'#7c3aed', accentHover:'#8b5cf6', accentIcon:'#8b5cf6', accentSoft:'#8b5cf6', accentText:'#a78bfa', accentTextStrong:'#c4b5fd', accentBorder:'#6d28d9', accentBorderFocus:'#7c3aed', wordmark:'#5eead4', logoColor:'#265152'},
+        },
+        pickerHue: 258,
+        pickerSat: 90,
+        pickerVal: 90,
         currentPasswordInput: "",
         newPasswordInput: "",
         passwordChangeMessage: "",
@@ -96,7 +120,9 @@ function athenaApp() {
         notes: JSON.parse(localStorage.getItem("athena_notes") || "[]"),
         activeNoteId: null,
 
-        init() {
+        async init() {
+            await this.loadSettings();
+
             // Load the saved default model, if one was ever set in
             // Settings. This is separate from `model` (the active
             // model for the current chat) so switching models mid-chat
@@ -122,10 +148,7 @@ function athenaApp() {
             }
 
             localStorage.setItem("athena_session", this.sessionId);
-            if (!this.sessions.find(s => s.id === this.sessionId)) {
-                this.sessions.unshift({id: this.sessionId, label: "New chat", createdAt: Date.now(), pinned: false});
-                this.saveSessions();
-            }
+            await this.loadSessions();
 
             this.updateHash();
             this.$watch("currentPage", () => this.updateHash());
@@ -146,10 +169,10 @@ function athenaApp() {
                     ...m,
                     ttsLabel: "Play",
                     rating: null,
-                    model: m.role === "assistant" ? this.getStoredMsgModel(m.messageId) : undefined,
+                    model: m.role === "assistant" ? (m.model || this.getStoredMsgModel(m.messageId)) : undefined,
                 }));
                 await this.loadRatingsForSession(id);
-                this.scrollToBottom();
+                this.forceScrollToBottom();
             } catch (e) {
                 console.error("Failed to load session history:", e);
             }
@@ -190,8 +213,34 @@ function athenaApp() {
         },
 
         // --- session helpers ---
-        saveSessions() {
-            localStorage.setItem("athena_sessions", JSON.stringify(this.sessions));
+        async loadSessions() {
+            try {
+                const resp = await fetch("/api/sessions");
+                const data = await resp.json();
+                if (data.error) {
+                    console.error("Failed to load sessions:", data.error);
+                    return;
+                }
+                this.sessions = data.map(s => ({id: s.id, label: s.label, pinned: s.pinned, createdAt: s.created_at}));
+            } catch (e) {
+                console.error("Failed to load sessions:", e);
+            }
+        },
+        async syncSession(session) {
+            try {
+                await fetch("/api/sessions", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        id: session.id,
+                        label: session.label,
+                        pinned: !!session.pinned,
+                        created_at: session.createdAt,
+                    }),
+                });
+            } catch (e) {
+                console.error("Failed to sync session:", e);
+            }
         },
 
         sessionSearch: "",
@@ -247,8 +296,10 @@ function athenaApp() {
 
         togglePin(id) {
             const s = this.sessions.find(x => x.id === id);
-            if (s) s.pinned = !s.pinned;
-            this.saveSessions();
+            if (s) {
+                s.pinned = !s.pinned;
+                this.syncSession(s);
+            }
             this.sessionMenuOpen = null;
         },
 
@@ -263,8 +314,10 @@ function athenaApp() {
 
         confirmRename() {
             const s = this.sessions.find(x => x.id === this.renameModalSessionId);
-            if (s && this.renameModalValue.trim()) s.label = this.renameModalValue.trim();
-            this.saveSessions();
+            if (s && this.renameModalValue.trim()) {
+                s.label = this.renameModalValue.trim();
+                this.syncSession(s);
+            }
             this.renameModalOpen = false;
         },
 
@@ -292,7 +345,6 @@ function athenaApp() {
             const id = this.deleteConfirmSessionId;
             this.deleteConfirmSessionId = null;
             this.sessions = this.sessions.filter(x => x.id !== id);
-            this.saveSessions();
             try {
                 await fetch(`/api/history/${id}`, {method: "DELETE"});
             } catch (e) {
@@ -327,7 +379,7 @@ function athenaApp() {
         },
 
         saveSearchUrl() {
-            localStorage.setItem("athena_search_url", this.searchUrl);
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({search_url: this.searchUrl})}).catch(e => console.error("Failed to save search URL:", e));
         },
 
         openWorkspacePopup() {
@@ -386,7 +438,7 @@ function athenaApp() {
         setAsDefaultModel() {
             if (!this.model) return;
             this.defaultModel = {value: this.model, label: this.modelLabel, endpointUrl: this.modelEndpointUrl};
-            localStorage.setItem("athena_default_model", JSON.stringify(this.defaultModel));
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: this.defaultModel})}).catch(e => console.error("Failed to save default model:", e));
         },
 
         async loadMemories() {
@@ -530,6 +582,310 @@ function athenaApp() {
             } catch (e) {}
             window.location.href = "/login";
         },
+        async loadSettings() {
+            try {
+                const resp = await fetch("/api/settings");
+                const data = await resp.json();
+                if (data.workspace !== undefined) this.workspace = data.workspace;
+                if (data.use_pi !== undefined) this.usePi = data.use_pi;
+                if (data.endpoints !== undefined) this.endpoints = data.endpoints;
+                if (data.search_url !== undefined) this.searchUrl = data.search_url;
+                if (data.default_model !== undefined) this.defaultModel = data.default_model;
+                if (data.theme) {
+                    this.customTheme = data.theme;
+                    this.applyCustomTheme(data.theme);
+                    if (data.theme.seedColor) this.themeSeedColor = data.theme.seedColor;
+                }
+            } catch (e) {
+                console.error("Failed to load settings:", e);
+            }
+        },
+        _hexToRgbaFaded(hex, alpha) {
+            hex = hex.replace('#', '');
+            const r = parseInt(hex.substring(0,2), 16);
+            const g = parseInt(hex.substring(2,4), 16);
+            const b = parseInt(hex.substring(4,6), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        },
+        openManualThemeModal() {
+            const LOGO_BASE_HUE = 181;
+            const t = this.customTheme;
+            const reconstructLogo = (hueDeg) => this._hslToHex(LOGO_BASE_HUE + (hueDeg || 0), 37, 24);
+            const reconstructSoft = (val) => {
+                if (!val) return '#8b5cf6';
+                if (val.startsWith('#')) return val;
+                const m = val.match(/hsla?\(([\d.]+)/);
+                if (m) return this._hslToHex(parseFloat(m[1]), 70, 60);
+                return '#8b5cf6';
+            };
+            if (t) {
+                this.themeDraft = {
+                    light: {
+                        accent: t.light.accent, accentHover: t.light.accentHover, accentIcon: t.light.accentIcon,
+                        accentSoft: reconstructSoft(t.light.accentSoft), accentText: t.light.accentText,
+                        accentTextStrong: t.light.accentTextStrong, accentBorder: t.light.accentBorder,
+                        accentBorderFocus: t.light.accentBorderFocus, wordmark: t.light.wordmark,
+                        logoColor: reconstructLogo(t.light.logoHue),
+                    },
+                    dark: {
+                        accent: t.dark.accent || t.light.accent, accentHover: t.dark.accentHover || t.light.accentHover,
+                        accentIcon: t.dark.accentIcon || t.light.accentIcon, accentSoft: reconstructSoft(t.dark.accentSoft),
+                        accentText: t.dark.accentText, accentTextStrong: t.dark.accentTextStrong,
+                        accentBorder: t.dark.accentBorder, accentBorderFocus: t.dark.accentBorderFocus,
+                        wordmark: t.dark.wordmark, logoColor: reconstructLogo(t.dark.logoHue),
+                    },
+                };
+            }
+            this.manualThemeModalOpen = true;
+        },
+        applyManualTheme() {
+            const LOGO_BASE_HUE = 181;
+            const buildMode = (draft) => {
+                const logoHsl = this._hexToHsl(draft.logoColor);
+                const logoHue = Math.round(((logoHsl.h - LOGO_BASE_HUE) % 360 + 360) % 360);
+                return {
+                    accent: draft.accent, accentHover: draft.accentHover, accentIcon: draft.accentIcon,
+                    accentText: draft.accentText, accentTextStrong: draft.accentTextStrong,
+                    accentBorder: draft.accentBorder, accentBorderFocus: draft.accentBorderFocus,
+                    wordmark: draft.wordmark, logoHue: logoHue, accentSoft: draft.accentSoft,
+                };
+            };
+            const light = buildMode(this.themeDraft.light);
+            const dark = buildMode(this.themeDraft.dark);
+            dark.accentSoft = this._hexToRgbaFaded(this.themeDraft.dark.accentSoft, 0.1);
+            this.saveTheme({light, dark, seedColor: this.themeSeedColor});
+            this.manualThemeModalOpen = false;
+        },
+        _getPickerColor() {
+            if (!this.pickerTarget) return this.themeSeedColor;
+            return this.themeDraft[this.pickerTarget.scope][this.pickerTarget.key];
+        },
+        _setPickerColor(hex) {
+            if (!this.pickerTarget) {
+                this.themeSeedColor = hex;
+            } else {
+                this.themeDraft[this.pickerTarget.scope][this.pickerTarget.key] = hex;
+            }
+        },
+        openColorPicker() {
+            this.pickerTarget = null;
+            const hsv = this._hexToHsv(this._getPickerColor());
+            this.pickerHue = hsv.h;
+            this.pickerSat = hsv.s;
+            this.pickerVal = hsv.v;
+            this.colorPickerOpen = true;
+        },
+        openManualPicker(scope, key) {
+            this.pickerTarget = {scope, key};
+            const hsv = this._hexToHsv(this._getPickerColor());
+            this.pickerHue = hsv.h;
+            this.pickerSat = hsv.s;
+            this.pickerVal = hsv.v;
+            this.colorPickerOpen = true;
+        },
+        syncPickerFromHex() {
+            const hsv = this._hexToHsv(this._getPickerColor());
+            this.pickerHue = hsv.h;
+            this.pickerSat = hsv.s;
+            this.pickerVal = hsv.v;
+        },
+        _updateFromPicker() {
+            this._setPickerColor(this._hsvToHex(this.pickerHue, this.pickerSat, this.pickerVal));
+        },
+        _dragSL(e, rect) {
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            let x = (clientX - rect.left) / rect.width;
+            let y = (clientY - rect.top) / rect.height;
+            x = Math.max(0, Math.min(1, x));
+            y = Math.max(0, Math.min(1, y));
+            this.pickerSat = x * 100;
+            this.pickerVal = (1 - y) * 100;
+            this._updateFromPicker();
+        },
+        startDragSL(e) {
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            this._dragSL(e, rect);
+            const move = (ev) => this._dragSL(ev, rect);
+            const up = () => {
+                document.removeEventListener('mousemove', move);
+                document.removeEventListener('mouseup', up);
+                document.removeEventListener('touchmove', move);
+                document.removeEventListener('touchend', up);
+            };
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, {passive: false});
+            document.addEventListener('touchend', up);
+        },
+        _dragHue(e, rect) {
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            let x = (clientX - rect.left) / rect.width;
+            x = Math.max(0, Math.min(1, x));
+            this.pickerHue = x * 360;
+            this._updateFromPicker();
+        },
+        startDragHue(e) {
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            this._dragHue(e, rect);
+            const move = (ev) => this._dragHue(ev, rect);
+            const up = () => {
+                document.removeEventListener('mousemove', move);
+                document.removeEventListener('mouseup', up);
+                document.removeEventListener('touchmove', move);
+                document.removeEventListener('touchend', up);
+            };
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, {passive: false});
+            document.addEventListener('touchend', up);
+        },
+        _hexToHsv(hex) {
+            hex = hex.replace('#', '');
+            const r = parseInt(hex.substring(0,2), 16) / 255;
+            const g = parseInt(hex.substring(2,4), 16) / 255;
+            const b = parseInt(hex.substring(4,6), 16) / 255;
+            const max = Math.max(r,g,b), min = Math.min(r,g,b);
+            const d = max - min;
+            let h = 0;
+            if (d !== 0) {
+                switch (max) {
+                    case r: h = ((g-b)/d) % 6; break;
+                    case g: h = (b-r)/d + 2; break;
+                    default: h = (r-g)/d + 4; break;
+                }
+                h *= 60;
+                if (h < 0) h += 360;
+            }
+            const v = max;
+            const s = max === 0 ? 0 : d / max;
+            return {h, s: s*100, v: v*100};
+        },
+        _hsvToHex(h, s, v) {
+            s = Math.max(0, Math.min(100, s)) / 100;
+            v = Math.max(0, Math.min(100, v)) / 100;
+            h = ((h % 360) + 360) % 360;
+            const c = v * s;
+            const x = c * (1 - Math.abs((h/60) % 2 - 1));
+            const m = v - c;
+            let r, g, b;
+            if (h < 60) { r=c; g=x; b=0; }
+            else if (h < 120) { r=x; g=c; b=0; }
+            else if (h < 180) { r=0; g=c; b=x; }
+            else if (h < 240) { r=0; g=x; b=c; }
+            else if (h < 300) { r=x; g=0; b=c; }
+            else { r=c; g=0; b=x; }
+            const toHex = v => Math.round((v+m)*255).toString(16).padStart(2, '0');
+            return '#' + toHex(r) + toHex(g) + toHex(b);
+        },
+        _hexToHsl(hex) {
+            hex = hex.replace('#', '');
+            const r = parseInt(hex.substring(0,2), 16) / 255;
+            const g = parseInt(hex.substring(2,4), 16) / 255;
+            const b = parseInt(hex.substring(4,6), 16) / 255;
+            const max = Math.max(r,g,b), min = Math.min(r,g,b);
+            let h, s, l = (max+min)/2;
+            if (max === min) { h = s = 0; }
+            else {
+                const d = max - min;
+                s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                switch (max) {
+                    case r: h = (g-b)/d + (g < b ? 6 : 0); break;
+                    case g: h = (b-r)/d + 2; break;
+                    default: h = (r-g)/d + 4; break;
+                }
+                h /= 6;
+            }
+            return {h: h*360, s: s*100, l: l*100};
+        },
+        _hslToHex(h, s, l) {
+            h = ((h % 360) + 360) % 360;
+            s = Math.max(0, Math.min(100, s)) / 100;
+            l = Math.max(0, Math.min(100, l)) / 100;
+            const c = (1 - Math.abs(2*l - 1)) * s;
+            const x = c * (1 - Math.abs((h/60) % 2 - 1));
+            const m = l - c/2;
+            let r, g, b;
+            if (h < 60) { r=c; g=x; b=0; }
+            else if (h < 120) { r=x; g=c; b=0; }
+            else if (h < 180) { r=0; g=c; b=x; }
+            else if (h < 240) { r=0; g=x; b=c; }
+            else if (h < 300) { r=x; g=0; b=c; }
+            else { r=c; g=0; b=x; }
+            const toHex = v => Math.round((v+m)*255).toString(16).padStart(2, '0');
+            return '#' + toHex(r) + toHex(g) + toHex(b);
+        },
+        generateThemeFromColor(seedHex) {
+            // Base hue of the ORIGINAL logo teal (rgb 38,81,82), needed
+            // because hue-rotate() shifts by a DELTA, not an absolute
+            // value -- so the logo's rotation must be computed relative
+            // to its own real starting hue, not the picked color alone.
+            const LOGO_BASE_HUE = 181;
+            const hsl = this._hexToHsl(seedHex);
+            const h = hsl.h;
+            const s = Math.min(hsl.s, 90);
+            const logoHue = Math.round(((h - LOGO_BASE_HUE) % 360 + 360) % 360);
+            const light = {
+                accent: this._hslToHex(h, s, 50),
+                accentHover: this._hslToHex(h, s, 42),
+                accentIcon: this._hslToHex(h, s, 60),
+                accentSoft: this._hslToHex(h, Math.min(s, 60), 96),
+                accentText: this._hslToHex(h, s, 50),
+                accentTextStrong: this._hslToHex(h, s, 42),
+                accentBorder: this._hslToHex(h, Math.min(s, 65), 80),
+                accentBorderFocus: this._hslToHex(h, s, 70),
+                wordmark: this._hslToHex(h, Math.min(s + 10, 80), 55),
+                logoHue: logoHue,
+            };
+            const dark = {
+                accentSoft: `hsla(${h.toFixed(0)}, ${s.toFixed(0)}%, 60%, 0.1)`,
+                accentText: this._hslToHex(h, s, 70),
+                accentTextStrong: this._hslToHex(h, s, 80),
+                accentBorder: this._hslToHex(h, s, 42),
+                accentBorderFocus: this._hslToHex(h, s, 50),
+                wordmark: this._hslToHex(h, Math.min(s + 10, 80), 65),
+                logoHue: logoHue,
+            };
+            return {light, dark, seedColor: seedHex};
+        },
+        applyCustomTheme(theme) {
+            const CSS_VAR_MAP = {
+                accent: '--accent', accentHover: '--accent-hover', accentIcon: '--accent-icon',
+                accentSoft: '--accent-soft', accentText: '--accent-text', accentTextStrong: '--accent-text-strong',
+                accentBorder: '--accent-border', accentBorderFocus: '--accent-border-focus',
+                wordmark: '--wordmark-color',
+            };
+            let styleEl = document.getElementById('custom-theme-vars');
+            if (!styleEl) {
+                styleEl = document.createElement('style');
+                styleEl.id = 'custom-theme-vars';
+                document.head.appendChild(styleEl);
+            }
+            const buildBlock = (colors) => {
+                if (!colors) return '';
+                return Object.entries(colors).map(([key, val]) => {
+                    if (key === 'logoHue') return `--athena-logo-hue: ${val}deg;`;
+                    const varName = CSS_VAR_MAP[key];
+                    return varName ? `${varName}: ${val};` : '';
+                }).join(' ');
+            };
+            styleEl.textContent = `:root { ${buildBlock(theme.light)} } .dark { ${buildBlock(theme.dark)} }`;
+        },
+        async saveTheme(theme) {
+            this.customTheme = theme;
+            this.applyCustomTheme(theme);
+            try {
+                await fetch("/api/settings", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({theme: theme}),
+                });
+            } catch (e) {
+                console.error("Failed to save theme:", e);
+            }
+        },
         async loadMemoryModel() {
             try {
                 const resp = await fetch("/api/settings/memory-model");
@@ -562,7 +918,7 @@ function athenaApp() {
         },
 
         saveEndpoints() {
-            localStorage.setItem("athena_endpoints", JSON.stringify(this.endpoints));
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({endpoints: this.endpoints})}).catch(e => console.error("Failed to save endpoints:", e));
         },
 
         addEndpoint() {
@@ -670,10 +1026,32 @@ function athenaApp() {
             e.target.style.height = e.target.scrollHeight + "px";
         },
 
+        _scrollThinkingToBottom() {
+            this.$nextTick(() => {
+                const boxes = document.querySelectorAll('.thinking-scroll-target');
+                if (boxes.length) {
+                    const last = boxes[boxes.length - 1];
+                    last.scrollTop = last.scrollHeight;
+                }
+            });
+        },
+        forceScrollToBottom() {
+            this.$nextTick(() => {
+                const el = this.$refs.chatBox;
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+        },
         scrollToBottom() {
             this.$nextTick(() => {
-                if (this.$refs.chatBox) {
-                    this.$refs.chatBox.scrollTop = this.$refs.chatBox.scrollHeight;
+                const el = this.$refs.chatBox;
+                if (!el) return;
+                // Only auto-follow if already near the bottom -- otherwise
+                // this fights a deliberate scroll-up during generation,
+                // snapping the view back down before the user can read
+                // anything.
+                const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+                if (distanceFromBottom < 150) {
+                    el.scrollTop = el.scrollHeight;
                 }
             });
         },
@@ -691,17 +1069,17 @@ function athenaApp() {
             this.pendingAttachments = [];
             this.sending = true;
 
-            this.messages.push({role: "user", content: text});
+            this.messages.push({role: "user", content: text, hasImage: imagesToSend.length > 0});
             let activeSession = this.sessions.find(s => s.id === this.sessionId);
             if (!activeSession) {
                 activeSession = {id: this.sessionId, label: text.slice(0, 40), createdAt: Date.now(), pinned: false};
                 this.sessions.unshift(activeSession);
-                this.saveSessions();
+                this.syncSession(activeSession);
             } else if (activeSession.label === "New chat") {
                 activeSession.label = text.slice(0, 40);
-                this.saveSessions();
+                this.syncSession(activeSession);
             }
-            this.scrollToBottom();
+            this.forceScrollToBottom();
 
             const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, tokensPerSec: null, model: this.modelLabel, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null};
             this.messages.push(assistantMsg);
@@ -746,6 +1124,7 @@ function athenaApp() {
                         if (data.thinking) {
                             this.messages[msgIndex].thinking += data.thinking;
                             this.scrollToBottom();
+                            this._scrollThinkingToBottom();
                         }
                         if (data.delta) {
                             this.messages[msgIndex].content += data.delta;
@@ -785,12 +1164,16 @@ function athenaApp() {
 
         toggleUsePi() {
             this.usePi = !this.usePi;
-            localStorage.setItem("athena_use_pi", this.usePi);
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({use_pi: this.usePi})}).catch(e => console.error("Failed to save Pi setting:", e));
         },
 
         selectWorkspace(path) {
             this.workspace = path;
-            localStorage.setItem("athena_workspace", path);
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({workspace: path})}).catch(e => console.error("Failed to save workspace:", e));
+            if (!path && this.usePi) {
+                this.usePi = false;
+                fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({use_pi: false})}).catch(e => console.error("Failed to save Pi setting:", e));
+            }
             this.workspacePopupOpen = false;
             if (this.fileBrowserOpen) {
                 this.loadFileBrowser("");

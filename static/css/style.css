@@ -5,6 +5,7 @@
 .ctx-ring .ring-bg { stroke: currentColor; opacity: 0.15; }
 .ctx-ring .ring-fg { stroke: #7c3aed; stroke-linecap: round; transition: stroke-dashoffset 0.3s; }
 
+.prose-msg { overflow-wrap: break-word; word-break: break-word; }
 .prose-msg p { margin: 0 0 0.75em 0; }
 .prose-msg p:last-child { margin-bottom: 0; }
 .prose-msg table {
@@ -94,4 +95,31 @@
     body > div.flex > template + div:not(#chat-page-root) {
         padding-top: 3.5rem;
     }
+}
+
+/* Accent color system -- CSS variables so the accent can be regenerated
+   from one picked color at runtime, without touching every Tailwind
+   class. Values below are Tailwind's actual violet-* palette, chosen
+   so this conversion is a pure behind-the-scenes swap with zero visual
+   change until a new accent is actually picked. */
+:root {
+    --accent: #7c3aed;              /* violet-600 */
+    --accent-hover: #6d28d9;        /* violet-700 */
+    --accent-icon: #8b5cf6;         /* violet-500 */
+    --accent-soft: #f5f3ff;         /* violet-50 */
+    --accent-text: #7c3aed;         /* violet-600 */
+    --accent-text-strong: #6d28d9;  /* violet-700 */
+    --accent-border: #c4b5fd;       /* violet-300 */
+    --accent-border-focus: #a78bfa; /* violet-400 */
+    --wordmark-color: #5eead4;      /* mint teal, matches current hardcoded value */
+    --athena-logo-hue: 0deg;        /* no rotation = original logo teal */
+}
+.dark {
+    --accent-soft: rgba(139, 92, 246, 0.1);  /* violet-500/10 */
+    --accent-text: #a78bfa;         /* violet-400 */
+    --accent-text-strong: #c4b5fd;  /* violet-300 */
+    --accent-border: #6d28d9;       /* violet-700 */
+    --accent-border-focus: #7c3aed; /* violet-600 */
+    --wordmark-color: #5eead4;      /* same as light -- current design has no dark variant */
+    --athena-logo-hue: 0deg;
 }

@@ -31,13 +31,13 @@
     </button>
     <nav class="fixed md:static inset-y-0 left-0 z-40 w-16 shrink-0 flex flex-col items-center py-4 gap-1 border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 transition-transform duration-200 md:translate-x-0" :class="mobileNavOpen ? 'translate-x-0' : '-translate-x-full'">
         <button @click="currentPage = 'chat'; newChat(); mobileNavOpen = false" title="Home" class="h-8 w-8 rounded-lg overflow-hidden mb-4 hover:opacity-80 transition">
-            <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain">
+            <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain" style="filter: hue-rotate(var(--athena-logo-hue, 0deg))">
         </button>
 
         <template x-for="p in pages" :key="p.id">
             <div @click="currentPage = p.id; mobileNavOpen = false"
                  class="icon-rail-btn w-12"
-                 :class="currentPage === p.id ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-600 dark:hover:text-neutral-300'">
+                 :class="currentPage === p.id ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'text-neutral-400 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-600 dark:hover:text-neutral-300'">
                 <span x-html="p.icon"></span>
                 <span class="rail-label" x-text="p.label"></span>
             </div>
@@ -62,7 +62,7 @@
                     </button>
                     <div class="mt-2 relative">
                         <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-                        <input type="text" x-model="sessionSearch" placeholder="Search chats..." class="w-full text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg pl-8 pr-2 py-1.5 outline-none focus:border-violet-400 dark:focus:border-violet-600">
+                        <input type="text" x-model="sessionSearch" placeholder="Search chats..." class="w-full text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg pl-8 pr-2 py-1.5 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]">
                     </div>
                 </div>
                 <div class="flex-1 overflow-y-auto px-3 py-2 space-y-4">
@@ -72,7 +72,7 @@
                             <div class="space-y-0.5">
                                 <template x-for="s in group.items" :key="s.id">
                                     <div class="group relative flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm cursor-pointer"
-                                         :class="s.id === sessionId ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                         :class="s.id === sessionId ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
                                         <svg x-show="s.pinned" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-amber-500"><path d="M12 2l1.5 5.5L19 9l-4 3.5L16 18l-4-3-4 3 1-5.5L5 9l5.5-1.5z"/></svg>
                                         <span @click="switchSession(s.id); mobileNavOpen = false" class="truncate flex-1" x-text="s.label"></span>
                                         <span class="text-[10px] text-neutral-400 dark:text-neutral-500 shrink-0 group-hover:hidden" x-text="relativeTime(s.createdAt)"></span>
@@ -117,10 +117,10 @@
                         </template>
                     </div>
                     <div class="flex items-center shrink-0">
-                        <button @click="toggleSystemStats()" class="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg transition mr-1" :class="systemStatsOpen ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'" title="System status">
+                        <button @click="toggleSystemStats()" class="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg transition mr-1" :class="systemStatsOpen ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'" title="System status">
                             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
                         </button>
-                        <button @click="toggleFileBrowser()" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg transition disabled:opacity-30" :class="fileBrowserOpen ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'" :title="workspace ? 'Toggle file browser' : 'Set a workspace to browse files'">
+                        <button @click="toggleFileBrowser()" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg transition disabled:opacity-30" :class="fileBrowserOpen ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'" :title="workspace ? 'Toggle file browser' : 'Set a workspace to browse files'">
                             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>
                         </button>
                     </div>
@@ -130,7 +130,7 @@
                         <div class="h-full flex flex-col items-center justify-center gap-4">
                             <div class="relative flex items-center justify-center" style="width:12rem;height:12rem">
                                 <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain opacity-80" style="filter: hue-rotate(var(--athena-logo-hue, 0deg))">
-                                <span class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-6xl leading-none whitespace-nowrap" style="color:#5eead4">𝓐𝓽𝓱𝓮𝓷𝓪</span>
+                                <span class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-6xl leading-none whitespace-nowrap" style="color:var(--wordmark-color, #5eead4)">𝓐𝓽𝓱𝓮𝓷𝓪</span>
                             </div>
                             <div class="text-lg text-neutral-300">Ready to chat</div>
                             <div class="text-xs text-neutral-500">Powered by local models, no cloud round-trip.</div>
@@ -153,7 +153,7 @@
                                                 <span x-show="msg.content" class="truncate min-w-0 max-w-[220px] text-neutral-400 dark:text-neutral-500" x-text="msg.thinking"></span>
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 transition-transform" :class="msg.thinkingOpen ? 'rotate-90' : ''"><polyline points="9 18 15 12 9 6"/></svg>
                                             </div>
-                                            <div x-show="msg.thinkingOpen" class="mt-1 px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap max-h-48 overflow-y-auto border border-neutral-200 dark:border-neutral-700 rounded-xl" x-text="msg.thinking"></div>
+                                            <div x-show="msg.thinkingOpen" class="thinking-scroll-target mt-1 px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap max-h-48 overflow-y-auto border border-neutral-200 dark:border-neutral-700 rounded-xl" x-text="msg.thinking"></div>
                                         </div>
                                     </template>
                                     <template x-if="msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length">
@@ -180,7 +180,11 @@
                                             </div>
                                         </div>
                                     </template>
-                                    <div :class="msg.role === 'user' ? 'bg-violet-600 text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100'"
+                                    <div x-show="msg.role === 'user' && msg.hasImage" class="flex items-center gap-1 text-[11px] text-neutral-400 dark:text-neutral-500">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                                        <span>Image attached</span>
+                                    </div>
+                                    <div :class="msg.role === 'user' ? 'bg-[var(--accent)] text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100'"
                                          class="text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(msg.content)"></div>
                                     <button x-show="msg.role === 'user' && msg.messageId" @click="deleteMessagePair(msg)" title="Delete" class="p-1 rounded-lg text-neutral-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
@@ -227,6 +231,10 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                                 <span class="truncate" x-text="modelLabel"></span>
                             </span>
+                            <span class="flex items-center gap-1 shrink-0">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :class="workspace ? 'text-[var(--accent)]' : 'text-neutral-300 dark:text-neutral-600'" title="Workspace"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :class="usePi ? 'text-[var(--accent)]' : 'text-neutral-300 dark:text-neutral-600'" title="Pi coding harness"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                            </span>
                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="9 18 15 12 9 6"/></svg>
                         </button>
                         <div class="hidden md:flex items-center gap-2 mb-2 flex-wrap">
@@ -238,16 +246,16 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
                                 <span x-text="maxCtx === 0 ? 'ctx: auto' : 'ctx: ' + maxCtx"></span>
                             </button>
-                            <button @click="openWorkspacePopup()" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition" :class="workspace ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'">
+                            <button @click="openWorkspacePopup()" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition" :class="workspace ? 'border-[var(--accent-border)] dark:border-[var(--accent-border)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                                 <span x-text="workspace || 'no workspace'"></span>
                             </button>
-                            <button @click="toggleUsePi()" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition disabled:opacity-30" :class="usePi ? 'border-violet-300 dark:border-violet-700 text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-500/10' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'" :title="workspace ? 'Route through the Pi coding harness' : 'Set a workspace to enable Pi'">
+                            <button @click="toggleUsePi()" :disabled="!workspace" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition disabled:opacity-30" :class="usePi ? 'border-[var(--accent-border)] dark:border-[var(--accent-border)] text-[var(--accent-text)] dark:text-[var(--accent-text)] bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)]' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'" :title="workspace ? 'Route through the Pi coding harness' : 'Set a workspace to enable Pi'">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                                 <span x-text="usePi ? 'Pi: on' : 'Pi: off'"></span>
                             </button>
                         </div>
-                        <div class="rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 shadow-sm focus-within:border-violet-400 dark:focus-within:border-violet-600 transition">
+                        <div class="rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 shadow-sm focus-within:border-[var(--accent-border-focus)] dark:focus-within:border-[var(--accent-border-focus)] transition">
                             <div x-show="pendingImages.length || pendingAttachments.length" class="flex flex-wrap gap-1.5 px-2 pt-2">
                                 <template x-for="(img, imgIdx) in pendingImages" :key="'img'+imgIdx">
                                     <div class="relative group">
@@ -285,7 +293,7 @@
                                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>
                                 </button>
                                 <textarea x-ref="textareaEl" x-model="inputText" rows="1" @keydown.enter.prevent="send()" @input="autoGrow($event)" placeholder="Message Athena..." class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"></textarea>
-                                <button @click="send()" :disabled="sending" class="p-2.5 rounded-xl bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40 transition">
+                                <button @click="send()" :disabled="sending" class="p-2.5 rounded-xl bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] disabled:opacity-40 transition">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                                 </button>
                             </div>
@@ -307,7 +315,7 @@
                 <div class="flex-1 overflow-y-auto py-1">
                     <template x-for="entry in fileBrowserEntries" :key="entry.name">
                         <div @click="entry.type === 'dir' ? fileBrowserInto(entry.name) : previewFile(entry.name)" class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700">
-                            <svg x-show="entry.type === 'dir'" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-500"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                            <svg x-show="entry.type === 'dir'" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-[var(--accent-icon)]"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                             <svg x-show="entry.type !== 'dir'" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-neutral-400"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                             <span class="truncate flex-1 text-neutral-700 dark:text-neutral-300" x-text="entry.name"></span>
                             <span x-show="entry.size !== null && entry.size !== undefined" class="text-neutral-400 dark:text-neutral-500 shrink-0" x-text="formatFileSize(entry.size)"></span>
@@ -325,7 +333,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             <div class="text-lg font-medium text-neutral-700 dark:text-neutral-300">No workspace connected</div>
             <div class="text-sm text-center max-w-sm">Set a workspace path in a chat's workspace pill to browse and edit files here. File tools stay off until you do.</div>
-            <button @click="currentPage = 'chat'; openWorkspacePopup()" class="mt-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Set a workspace</button>
+            <button @click="currentPage = 'chat'; openWorkspacePopup()" class="mt-2 px-4 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Set a workspace</button>
         </div>
     </template>
 
@@ -335,7 +343,7 @@
             <div class="max-w-lg mx-auto">
                 <div class="flex items-center justify-between mb-1">
                     <h2 class="text-xl font-semibold">Memory</h2>
-                    <button @click="newMemoryText = ''; addMemoryModalOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700">
+                    <button @click="newMemoryText = ''; addMemoryModalOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]">
                         <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                         Add
                     </button>
@@ -368,10 +376,10 @@
     <div x-show="addMemoryModalOpen" x-cloak @click.self="addMemoryModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
         <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-96 p-5">
             <h3 class="font-semibold text-sm mb-3">Add a memory</h3>
-            <textarea x-model="newMemoryText" rows="3" placeholder="e.g. Prefers responses without emoji" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-violet-400 dark:focus:border-violet-600 resize-none"></textarea>
+            <textarea x-model="newMemoryText" rows="3" placeholder="e.g. Prefers responses without emoji" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] resize-none"></textarea>
             <div class="flex gap-2 mt-4">
                 <button @click="addMemoryModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
-                <button @click="addMemory()" :disabled="!newMemoryText.trim()" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700 disabled:opacity-40">Add</button>
+                <button @click="addMemory()" :disabled="!newMemoryText.trim()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40">Add</button>
             </div>
         </div>
     </div>
@@ -407,7 +415,7 @@
                 <div class="flex-1 overflow-y-auto px-3 space-y-0.5">
                     <template x-for="n in notes" :key="n.id">
                         <div @click="activeNoteId = n.id" class="group flex items-center justify-between px-2.5 py-2 rounded-lg text-sm cursor-pointer"
-                             :class="n.id === activeNoteId ? 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                             :class="n.id === activeNoteId ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
                             <span class="truncate" x-text="n.title || 'Untitled'"></span>
                             <svg @click.stop="deleteNote(n.id)" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="opacity-0 group-hover:opacity-100 shrink-0 hover:text-red-500"><path d="M18 6L6 18M6 6l12 12"/></svg>
                         </div>
@@ -430,7 +438,7 @@
             <div class="max-w-2xl mx-auto space-y-8">
                 <div class="flex items-center justify-between">
                     <h2 class="text-xl font-semibold">Models &amp; Endpoints</h2>
-                    <button @click="addEndpointOpen = true" class="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">+ Add Endpoint</button>
+                    <button @click="addEndpointOpen = true" class="px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">+ Add Endpoint</button>
                 </div>
 
                 <template x-for="ep in endpoints" :key="ep.id">
@@ -449,7 +457,7 @@
                         <div class="space-y-1" x-show="ep.detectedModels && ep.detectedModels.length">
                             <template x-for="m in ep.detectedModels" :key="m">
                                 <label class="flex items-center gap-2 text-sm py-1 cursor-pointer">
-                                    <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-violet-600 checked:border-violet-600 dark:checked:bg-violet-600 dark:checked:border-violet-600 cursor-pointer">
+                                    <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] dark:checked:bg-[var(--accent)] dark:checked:border-[var(--accent)] cursor-pointer">
                                     <span x-text="m"></span>
                                 </label>
                             </template>
@@ -479,6 +487,29 @@
                             <button @click="theme = 'dark'; localStorage.setItem('athena_theme','dark')" class="px-3 py-1 rounded-md text-xs font-medium" :class="theme === 'dark' ? 'bg-white dark:bg-neutral-700 shadow-sm' : 'text-neutral-500'">Dark</button>
                         </div>
                     </div>
+                    <div class="flex items-center justify-between py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm">Theme color</span>
+                        <div class="flex items-center gap-2 relative">
+                            <button @click="openColorPicker()" class="h-9 w-9 rounded-xl border-2 border-neutral-200 dark:border-neutral-700 shadow-sm cursor-pointer shrink-0" :style="'background:' + themeSeedColor"></button>
+                            <div x-show="colorPickerOpen" x-cloak @click.self="colorPickerOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-[60] p-4">
+                            <div class="p-3 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-2xl w-64">
+                                <div class="relative w-full h-40 rounded-lg cursor-crosshair select-none" :style="'background: linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(' + pickerHue + ',100%,50%))'" @mousedown="startDragSL($event)" @touchstart="startDragSL($event)">
+                                    <div class="absolute w-4 h-4 rounded-full border-2 border-white shadow -translate-x-1/2 -translate-y-1/2 pointer-events-none" :style="'left:' + pickerSat + '%; top:' + (100 - pickerVal) + '%'"></div>
+                                </div>
+                                <div class="relative w-full h-3 rounded-full mt-3 cursor-pointer select-none" style="background: linear-gradient(to right, red, yellow, lime, cyan, blue, magenta, red)" @mousedown="startDragHue($event)" @touchstart="startDragHue($event)">
+                                    <div class="absolute w-4 h-4 rounded-full border-2 border-white shadow top-1/2 -translate-y-1/2 -translate-x-1/2 pointer-events-none" :style="'left:' + (pickerHue/360*100) + '%'"></div>
+                                </div>
+                                <div class="flex items-center gap-2 mt-3">
+                                    <div class="h-8 w-8 rounded-lg border border-neutral-200 dark:border-neutral-700 shrink-0" :style="'background:' + _getPickerColor()"></div>
+                                    <input type="text" :value="_getPickerColor()" @change="_setPickerColor($event.target.value); syncPickerFromHex()" class="flex-1 text-xs font-mono bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
+                                </div>
+                            </div>
+                            </div>
+                            <button @click="saveTheme(generateThemeFromColor(themeSeedColor))" class="text-xs font-medium px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]">Generate</button>
+                            <button @click="openManualThemeModal()" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">Customize</button>
+                        </div>
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">Regenerates the accent color, borders, highlights, logo, and wordmark from one picked color, for both light and dark mode.</div>
                 </div>
 
                 <div>
@@ -489,8 +520,12 @@
                     </div>
                     <div class="text-xs text-neutral-400 dark:text-neutral-500">Set from the model picker in Chat (open it, pick a model, then "Set current as default").</div>
 
-                    <div class="flex items-center justify-between py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
-                        <span class="text-sm">Memory extraction model</span>
+                </div>
+
+                <div>
+                    <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Memory</h3>
+                    <div class="flex items-center justify-between py-2">
+                        <span class="text-sm">Extraction model</span>
                         <select x-model="memoryExtractionModel" @change="saveMemoryModel()" class="text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
                             <option value="">Off (no automatic memory)</option>
                             <template x-for="m in allAvailableModels()" :key="m.value">
@@ -558,7 +593,7 @@
         <h3 class="font-semibold text-sm mb-3">Model &amp; Context</h3>
         <div class="space-y-1">
             <template x-for="m in allAvailableModels()" :key="m.value">
-                <div @click="selectModel(m)" class="px-3 py-2 rounded-lg text-sm cursor-pointer" :class="m.value === model ? 'bg-violet-600 text-white' : 'text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800'" x-text="m.label"></div>
+                <div @click="selectModel(m)" class="px-3 py-2 rounded-lg text-sm cursor-pointer" :class="m.value === model ? 'bg-[var(--accent)] text-white' : 'text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800'" x-text="m.label"></div>
             </template>
             <div x-show="allAvailableModels().length === 0" class="text-xs text-neutral-400 dark:text-neutral-500 px-3 py-2">No models yet -- add an endpoint and detect models on the Models page.</div>
         </div>
@@ -570,7 +605,7 @@
         <div class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800">
             <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-2">Context window (0 = dynamic, auto-sized per message)</label>
             <div class="flex items-center gap-2">
-                <input type="range" min="0" max="131072" step="1024" x-model.number="maxCtx" class="flex-1 accent-violet-600">
+                <input type="range" min="0" max="131072" step="1024" x-model.number="maxCtx" class="flex-1 accent-[var(--accent)]">
                 <input type="text" x-model="maxCtxText" @input="syncCtxFromText()" class="w-20 text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
             </div>
             <div class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-2">Slider caps at 131072 — type a larger number if needed.</div>
@@ -605,7 +640,7 @@
 
         <div class="flex gap-2">
             <button @click="selectWorkspace('')" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700">None</button>
-            <button @click="selectWorkspace(workspaceBrowsePath)" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Select This Folder</button>
+            <button @click="selectWorkspace(workspaceBrowsePath)" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Select This Folder</button>
         </div>
     </div>
 </div>
@@ -635,7 +670,7 @@
             <input x-show="newEndpointProvider === 'custom'" type="text" x-model="newEndpointUrl" placeholder="Base URL" class="w-full text-sm bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
         </div>
 
-        <button @click="addEndpoint()" class="w-full mt-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Add</button>
+        <button @click="addEndpoint()" class="w-full mt-4 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Add</button>
     </div>
 </div>
 
@@ -668,10 +703,10 @@
     <div x-show="renameModalOpen" x-cloak @click.self="renameModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
         <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
             <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3">Rename chat</div>
-            <input x-model="renameModalValue" @keydown.enter="confirmRename()" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-violet-400 dark:focus:border-violet-600 mb-4" placeholder="Chat name">
+            <input x-model="renameModalValue" @keydown.enter="confirmRename()" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] mb-4" placeholder="Chat name">
             <div class="flex gap-2">
                 <button @click="renameModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
-                <button @click="confirmRename()" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Save</button>
+                <button @click="confirmRename()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Save</button>
             </div>
         </div>
     </div>
@@ -699,14 +734,14 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                         Workspace
                     </span>
-                    <span class="text-xs truncate max-w-[9rem]" :class="workspace ? 'text-violet-500' : 'text-neutral-400 dark:text-neutral-500'" x-text="workspace || 'none'"></span>
+                    <span class="text-xs truncate max-w-[9rem]" :class="workspace ? 'text-[var(--accent-icon)]' : 'text-neutral-400 dark:text-neutral-500'" x-text="workspace || 'none'"></span>
                 </button>
                 <button @click="toggleUsePi()" :disabled="!workspace" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left disabled:opacity-40">
                     <span class="flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                         Pi coding harness
                     </span>
-                    <span class="text-xs font-medium" :class="usePi ? 'text-violet-500' : 'text-neutral-400 dark:text-neutral-500'" x-text="usePi ? 'On' : 'Off'"></span>
+                    <span class="text-xs font-medium" :class="usePi ? 'text-[var(--accent-icon)]' : 'text-neutral-400 dark:text-neutral-500'" x-text="usePi ? 'On' : 'Off'"></span>
                 </button>
             </div>
         </div>
@@ -726,7 +761,7 @@
                     <div x-show="totp2FAError" class="text-xs text-red-400 mb-2" x-text="totp2FAError"></div>
                     <div class="flex gap-2">
                         <button @click="totp2FASetupModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
-                        <button @click="confirm2FA()" class="flex-1 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Verify &amp; Enable</button>
+                        <button @click="confirm2FA()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Verify &amp; Enable</button>
                     </div>
                 </div>
             </template>
@@ -739,7 +774,7 @@
                             <div class="bg-neutral-100 dark:bg-neutral-700 rounded-lg px-2 py-1.5 text-center" x-text="code"></div>
                         </template>
                     </div>
-                    <button @click="totp2FASetupModalOpen = false; totp2FABackupCodes = []" class="w-full py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">Done</button>
+                    <button @click="totp2FASetupModalOpen = false; totp2FABackupCodes = []" class="w-full py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Done</button>
                 </div>
             </template>
         </div>
@@ -754,6 +789,29 @@
             <div class="flex gap-2">
                 <button @click="disable2FAModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
                 <button @click="disable2FA()" class="flex-1 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">Disable</button>
+            </div>
+        </div>
+    </div>
+    <!-- MANUAL THEME MODAL -->
+    <div x-show="manualThemeModalOpen" x-cloak @click.self="manualThemeModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-2xl w-full max-w-md max-h-[85vh] overflow-y-auto p-5">
+            <h3 class="font-semibold text-sm mb-1">Customize theme colors</h3>
+            <div class="text-xs text-neutral-400 dark:text-neutral-500 mb-1">Fine-tune every color individually, for light and dark mode separately.</div>
+            <div class="flex items-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 mb-2 justify-end">
+                <span class="mr-8">Light</span><span>Dark</span>
+            </div>
+            <div class="space-y-3">
+                <template x-for="role in themeRoles" :key="role.key">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-xs text-neutral-600 dark:text-neutral-300 flex-1" x-text="role.label"></span>
+                        <button @click="openManualPicker('light', role.key)" class="h-7 w-7 rounded-lg border border-neutral-200 dark:border-neutral-700 cursor-pointer" :style="'background:' + themeDraft.light[role.key]"></button>
+                        <button @click="openManualPicker('dark', role.key)" class="h-7 w-7 rounded-lg border border-neutral-200 dark:border-neutral-700 cursor-pointer" :style="'background:' + themeDraft.dark[role.key]"></button>
+                    </div>
+                </template>
+            </div>
+            <div class="flex gap-2 mt-5">
+                <button @click="manualThemeModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="applyManualTheme()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Save</button>
             </div>
         </div>
     </div>

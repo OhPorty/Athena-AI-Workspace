@@ -4,7 +4,7 @@ import time
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from lcm_core import LCM
 
 LCM_SUMMARY_MODEL = os.environ.get("LCM_SUMMARY_MODEL", "qwen2.5:0.5b-instruct")
@@ -43,6 +43,8 @@ class MessageIn(BaseModel):
     role: str
     content: str
     service: str = "unknown"
+    model: Optional[str] = None
+    has_image: bool = False
 
 class SummarizeIn(BaseModel):
     session_id: str
@@ -64,7 +66,7 @@ AUTO_COMPACT_FOLD_THRESHOLD = int(os.environ.get("LCM_AUTO_COMPACT_FOLD_THRESHOL
 
 @app.post("/message")
 def add_message(msg: MessageIn):
-    row_id = lcm.add_message(msg.session_id, msg.role, msg.content, msg.service)
+    row_id = lcm.add_message(msg.session_id, msg.role, msg.content, msg.service, msg.model, msg.has_image)
     # Auto-compact after every write so callers never have to remember
     # to call /compact themselves -- mirrors how a real compactor runs
     # transparently as part of normal request handling.
@@ -80,24 +82,58 @@ def add_message(msg: MessageIn):
 def get_messages(session_id: str):
     conn = lcm._conn()
     rows = conn.execute(
-        "SELECT id, role, content, covered_by_node FROM messages WHERE session_id = ? ORDER BY id",
+        "SELECT id, role, content, covered_by_node, model, has_image FROM messages WHERE session_id = ? ORDER BY id",
         (session_id,)
     ).fetchall()
     conn.close()
-    return [{"id": r[0], "role": r[1], "content": r[2], "covered_by_node": r[3]} for r in rows]
+    return [{"id": r[0], "role": r[1], "content": r[2], "covered_by_node": r[3], "model": r[4], "has_image": bool(r[5])} for r in rows]
 
 @app.delete("/session/{session_id}")
 def delete_session(session_id: str):
-    """Permanently remove every message and summary node for this
-    session -- the actual data-deletion counterpart to a UI 'delete
-    chat' action, not just hiding it from a list."""
+    """Permanently remove every message, summary node, AND metadata
+    row for this session -- the actual data-deletion counterpart to a
+    UI 'delete chat' action, not just hiding it from a list. Also
+    cleans up the sessions metadata table so a deleted chat doesn't
+    linger as a stale entry in another device's session list."""
     conn = lcm._conn()
     msg_count = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM nodes WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     conn.commit()
     conn.close()
     return {"session_id": session_id, "messages_deleted": msg_count}
+
+class SessionMetaIn(BaseModel):
+    id: str
+    label: str
+    pinned: bool = False
+    created_at: float
+
+@app.get("/sessions")
+def list_sessions():
+    """All session metadata (label, pinned, created_at) -- the
+    server-side source of truth for the chat list, so every logged-in
+    device sees the same sessions regardless of which one created
+    them."""
+    conn = lcm._conn()
+    rows = conn.execute("SELECT id, label, pinned, created_at FROM sessions").fetchall()
+    conn.close()
+    return [{"id": r[0], "label": r[1], "pinned": bool(r[2]), "created_at": r[3]} for r in rows]
+
+@app.post("/sessions")
+def upsert_session(req: SessionMetaIn):
+    """Create or update one session's metadata -- called on first
+    message (creation), rename, and pin/unpin."""
+    conn = lcm._conn()
+    conn.execute(
+        """INSERT INTO sessions (id, label, pinned, created_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET label = excluded.label, pinned = excluded.pinned""",
+        (req.id, req.label, 1 if req.pinned else 0, req.created_at)
+    )
+    conn.commit()
+    conn.close()
+    return {"id": req.id}
 
 @app.post("/summarize")
 def summarize(req: SummarizeIn):
@@ -638,8 +674,8 @@ def call_tool(req: ToolCallIn):
 
 class FactIn(BaseModel):
     content: str
-    source_session_id: str = None
-    source_message_id: int = None
+    source_session_id: Optional[str] = None
+    source_message_id: Optional[int] = None
     manual: bool = False
 
 class ScanStateIn(BaseModel):

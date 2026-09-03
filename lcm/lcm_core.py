@@ -21,9 +21,19 @@ class LCM:
                 content TEXT NOT NULL,
                 created_at REAL NOT NULL,
                 covered_by_node INTEGER DEFAULT NULL,
-                service TEXT DEFAULT 'unknown'
+                service TEXT DEFAULT 'unknown',
+                model TEXT DEFAULT NULL,
+                has_image INTEGER DEFAULT 0
             )
         """)
+        # Migration for databases created before per-message model
+        # attribution existed -- CREATE TABLE IF NOT EXISTS above only
+        # covers a fresh install, not an upgrade of an existing one.
+        existing_cols = [row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()]
+        if "model" not in existing_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN model TEXT DEFAULT NULL")
+        if "has_image" not in existing_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN has_image INTEGER DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,14 +76,27 @@ class LCM:
         conn.execute("""
             INSERT OR IGNORE INTO scan_state (id, last_scanned_message_id) VALUES (1, 0)
         """)
+        # Session metadata (label, pinned) -- distinct from the messages
+        # table's per-turn content. Without this, a session's human-
+        # readable identity only ever existed in whichever browser's
+        # localStorage created it, invisible to every other device even
+        # though the actual message content already lived centrally here.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            )
+        """)
         conn.commit()
         conn.close()
 
-    def add_message(self, session_id, role, content, service="unknown"):
+    def add_message(self, session_id, role, content, service="unknown", model=None, has_image=False):
         conn = self._conn()
         cur = conn.execute(
-            "INSERT INTO messages (session_id, role, content, created_at, service) VALUES (?, ?, ?, ?, ?)",
-            (session_id, role, content, time.time(), service)
+            "INSERT INTO messages (session_id, role, content, created_at, service, model, has_image) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, role, content, time.time(), service, model, 1 if has_image else 0)
         )
         conn.commit()
         row_id = cur.lastrowid

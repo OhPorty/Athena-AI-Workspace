@@ -12,6 +12,8 @@ import atexit
 import ctypes
 import tempfile
 import time
+import threading
+from typing import Optional
 import httpx
 import psutil
 from fastapi import FastAPI, UploadFile, File, Request, Response
@@ -114,10 +116,40 @@ def _is_auth_exempt(path: str) -> bool:
         return True
     return any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES)
 
+_PROXY_FWD_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "forwarded")
+
+def _is_trusted_loopback(request: Request) -> bool:
+    """True only for a DIRECT loopback connection with no proxy/tunnel
+    forwarding headers -- a bare client.host check alone is unsafe
+    behind Caddy's reverse_proxy (which also connects from 127.0.0.1),
+    since that would let an external request routed through Caddy
+    inherit the same trust as Pi's own genuine direct-loopback calls.
+    Caddy adds X-Forwarded-* headers automatically; Pi's own in-process
+    HTTP calls to Athena never do."""
+    host = request.client.host if request.client else None
+    if host not in ("127.0.0.1", "::1"):
+        return False
+    for h in _PROXY_FWD_HEADERS:
+        if request.headers.get(h):
+            return False
+    return True
+
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if _is_auth_exempt(path):
+            return await call_next(request)
+        # Internal-service bypass: lets Pi's own coding-agent process
+        # call back into Athena (e.g. /v1/chat/completions, which Pi
+        # uses for its own model completions) without a browser
+        # session -- Pi has no way to hold one. Pi already sends this
+        # exact bearer token automatically via its own models.json
+        # config (apiKey: "athena"), so nothing on Pi's side needs to
+        # change. Gated on genuine direct loopback, not just the token,
+        # since the token alone (the app's own name) isn't a strong
+        # secret on its own.
+        auth_header = request.headers.get("authorization", "")
+        if auth_header == "Bearer athena" and _is_trusted_loopback(request):
             return await call_next(request)
         if not auth_manager.is_configured:
             if path.startswith("/api/"):
@@ -404,7 +436,7 @@ def get_model_stats():
         conn.close()
 
 
-def send_to_lcm(session_id: str, role: str, content: str):
+def send_to_lcm(session_id: str, role: str, content: str, model: str = None, has_image: bool = False):
     """Returns the real LCM message ID on success, or None on failure --
     the ID is what ratings attach to, since it's the one stable
     identifier that survives across page reloads and session history
@@ -423,6 +455,8 @@ def send_to_lcm(session_id: str, role: str, content: str):
             "role": role,
             "content": content,
             "service": "athena",
+            "model": model,
+            "has_image": has_image,
         }, timeout=30)
         if resp.status_code == 200:
             return resp.json().get("id")
@@ -822,6 +856,20 @@ def _ensure_pi_model_registered(model_name: str):
     })
     models = athena_provider.setdefault("models", [])
 
+    # Prune entries for models that no longer actually exist in Ollama.
+    # The old version of this function only ever appended -- it never
+    # removed anything -- so every model ever used stayed listed
+    # forever, even long after being deleted from Ollama, silently
+    # looking like a hardcoded/stale list even though it was
+    # technically auto-updating the whole time.
+    try:
+        ollama_base = OLLAMA_URL.rsplit("/api/", 1)[0]
+        tags_resp = httpx.get(f"{ollama_base}/api/tags", timeout=3)
+        live_model_names = {m["name"] for m in tags_resp.json().get("models", [])}
+        models[:] = [m for m in models if m.get("id") in live_model_names or m.get("id") == model_name]
+    except Exception as e:
+        print(f"[Athena] Couldn't verify live Ollama models for Pi sync, leaving list as-is: {e}", flush=True)
+
     for m in models:
         if m.get("id") == model_name:
             return  # already registered
@@ -903,7 +951,7 @@ def _run_pi_agent(req: "ChatIn"):
 
             elif etype == "agent_settled":
                 proc.wait()
-                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
+                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
                 yield f"data: {json.dumps({'done': True, 'assistant_message_id': _msg_id})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -929,7 +977,17 @@ def chat_stream(req: ChatIn):
     for att in req.attachments:
         att_content = (att.get("content") or "")[:20000]
         effective_message += f"\n\n[Attached file: {att.get('name', 'file')}]\n```\n{att_content}\n```"
-    _user_msg_id = send_to_lcm(req.session_id, "user", effective_message)
+    _user_msg_id = send_to_lcm(req.session_id, "user", effective_message, has_image=bool(req.images))
+    if _user_msg_id is None:
+        # Don't silently generate a response for a message that was
+        # never actually persisted -- that's exactly the confusing
+        # failure mode where the user gets a real-looking reply in the
+        # moment, then it vanishes on the next reload with no
+        # indication anything went wrong.
+        def _save_failed_error():
+            yield f"data: {json.dumps({'delta': 'Your message could not be saved -- Athena\'s memory service is unreachable right now. Please try again in a moment.'})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        return StreamingResponse(_save_failed_error(), media_type="text/event-stream")
 
     context = get_lcm_context(req.session_id)
 
@@ -1047,7 +1105,7 @@ def chat_stream(req: ChatIn):
                         break
 
             if not round_tool_calls:
-                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
+                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
                 tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'assistant_message_id': _msg_id})}\n\n"
                 return
@@ -1066,7 +1124,7 @@ def chat_stream(req: ChatIn):
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
             full_reply = fallback_msg
             yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
-            _msg_id = send_to_lcm(req.session_id, "assistant", full_reply)
+            _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
             tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
             yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
 
@@ -1147,7 +1205,7 @@ def get_history(session_id: str):
         resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=3)
         if resp.status_code == 200:
             msgs = resp.json()
-            return [{"role": m["role"], "content": m["content"], "messageId": m["id"]} for m in msgs]
+            return [{"role": m["role"], "content": m["content"], "messageId": m["id"], "model": m.get("model"), "hasImage": m.get("has_image", False)} for m in msgs]
     except Exception:
         pass
     return []
@@ -1383,6 +1441,32 @@ def delete_message(message_id: int):
     except Exception as e:
         return {"error": f"LCM error: {e}"}
 
+class SessionMetaIn(BaseModel):
+    id: str
+    label: str
+    pinned: bool = False
+    created_at: float
+
+@app.get("/api/sessions")
+def list_sessions_proxy():
+    try:
+        resp = httpx.get(f"{LCM_URL}/sessions", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM error: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM error: {e}"}
+
+@app.post("/api/sessions")
+def upsert_session_proxy(req: SessionMetaIn):
+    try:
+        resp = httpx.post(f"{LCM_URL}/sessions", json=req.model_dump(), timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"LCM error: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"LCM error: {e}"}
+
 @app.delete("/api/history/{session_id}")
 def delete_history(session_id: str):
     """Delete a chat session's messages and summary nodes from LCM --
@@ -1440,6 +1524,7 @@ def system_stats():
     }
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_settings.json")
+_settings_lock = threading.Lock()
 
 def _load_settings():
     try:
@@ -1449,11 +1534,45 @@ def _load_settings():
         return {}
 
 def _save_settings(settings):
-    with open(_SETTINGS_PATH, "w") as f:
+    """Atomic write (temp file + os.replace) so a crash or a
+    concurrent write from another device mid-write can never leave
+    behind a half-written, corrupted JSON file -- which previously
+    silently made _load_settings() return {} (an unparseable file is
+    caught by its broad except and treated as 'no settings yet'),
+    making real saved data look like it had vanished entirely."""
+    tmp_path = _SETTINGS_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(settings, f)
+    os.replace(tmp_path, _SETTINGS_PATH)
 
 class MemoryModelIn(BaseModel):
-    model: str = None
+    model: Optional[str] = None
+
+class SettingsIn(BaseModel):
+    workspace: Optional[str] = None
+    use_pi: Optional[bool] = None
+    endpoints: Optional[list] = None
+    search_url: Optional[str] = None
+    default_model: Optional[dict] = None
+    theme: Optional[dict] = None
+
+@app.get("/api/settings")
+def get_settings():
+    return _load_settings()
+
+@app.post("/api/settings")
+def update_settings(req: SettingsIn):
+    """Partial update -- only fields actually present in the request
+    body get merged in, so one device saving just its workspace change
+    can never accidentally wipe out another device's endpoints list or
+    default model. Lock-guarded end to end (read, merge, write) so two
+    devices saving at nearly the same moment serialize safely instead
+    of one's update silently clobbering the other's."""
+    with _settings_lock:
+        settings = _load_settings()
+        settings.update(req.model_dump(exclude_unset=True))
+        _save_settings(settings)
+        return settings
 
 @app.get("/api/settings/memory-model")
 def get_memory_model():
