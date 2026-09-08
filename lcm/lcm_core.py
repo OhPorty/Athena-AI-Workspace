@@ -86,9 +86,13 @@ class LCM:
                 id TEXT PRIMARY KEY,
                 label TEXT NOT NULL,
                 pinned INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                last_active REAL
             )
         """)
+        existing_session_cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "last_active" not in existing_session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN last_active REAL")
         conn.commit()
         conn.close()
 

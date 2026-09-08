@@ -109,6 +109,7 @@ class SessionMetaIn(BaseModel):
     label: str
     pinned: bool = False
     created_at: float
+    last_active: Optional[float] = None
 
 @app.get("/sessions")
 def list_sessions():
@@ -117,9 +118,9 @@ def list_sessions():
     device sees the same sessions regardless of which one created
     them."""
     conn = lcm._conn()
-    rows = conn.execute("SELECT id, label, pinned, created_at FROM sessions").fetchall()
+    rows = conn.execute("SELECT id, label, pinned, created_at, last_active FROM sessions").fetchall()
     conn.close()
-    return [{"id": r[0], "label": r[1], "pinned": bool(r[2]), "created_at": r[3]} for r in rows]
+    return [{"id": r[0], "label": r[1], "pinned": bool(r[2]), "created_at": r[3], "last_active": r[4]} for r in rows]
 
 @app.post("/sessions")
 def upsert_session(req: SessionMetaIn):
@@ -127,9 +128,9 @@ def upsert_session(req: SessionMetaIn):
     message (creation), rename, and pin/unpin."""
     conn = lcm._conn()
     conn.execute(
-        """INSERT INTO sessions (id, label, pinned, created_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET label = excluded.label, pinned = excluded.pinned""",
-        (req.id, req.label, 1 if req.pinned else 0, req.created_at)
+        """INSERT INTO sessions (id, label, pinned, created_at, last_active) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET label = excluded.label, pinned = excluded.pinned, last_active = excluded.last_active""",
+        (req.id, req.label, 1 if req.pinned else 0, req.created_at, req.last_active)
     )
     conn.commit()
     conn.close()

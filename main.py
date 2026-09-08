@@ -13,11 +13,12 @@ import ctypes
 import tempfile
 import time
 import threading
+import queue
 from typing import Optional
 import httpx
 import psutil
 from fastapi import FastAPI, UploadFile, File, Request, Response
-from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse, JSONResponse, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from auth import AuthManager
 from fastapi.staticfiles import StaticFiles
@@ -116,40 +117,10 @@ def _is_auth_exempt(path: str) -> bool:
         return True
     return any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES)
 
-_PROXY_FWD_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "forwarded")
-
-def _is_trusted_loopback(request: Request) -> bool:
-    """True only for a DIRECT loopback connection with no proxy/tunnel
-    forwarding headers -- a bare client.host check alone is unsafe
-    behind Caddy's reverse_proxy (which also connects from 127.0.0.1),
-    since that would let an external request routed through Caddy
-    inherit the same trust as Pi's own genuine direct-loopback calls.
-    Caddy adds X-Forwarded-* headers automatically; Pi's own in-process
-    HTTP calls to Athena never do."""
-    host = request.client.host if request.client else None
-    if host not in ("127.0.0.1", "::1"):
-        return False
-    for h in _PROXY_FWD_HEADERS:
-        if request.headers.get(h):
-            return False
-    return True
-
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if _is_auth_exempt(path):
-            return await call_next(request)
-        # Internal-service bypass: lets Pi's own coding-agent process
-        # call back into Athena (e.g. /v1/chat/completions, which Pi
-        # uses for its own model completions) without a browser
-        # session -- Pi has no way to hold one. Pi already sends this
-        # exact bearer token automatically via its own models.json
-        # config (apiKey: "athena"), so nothing on Pi's side needs to
-        # change. Gated on genuine direct loopback, not just the token,
-        # since the token alone (the app's own name) isn't a strong
-        # secret on its own.
-        auth_header = request.headers.get("authorization", "")
-        if auth_header == "Bearer athena" and _is_trusted_loopback(request):
             return await call_next(request)
         if not auth_manager.is_configured:
             if path.startswith("/api/"):
@@ -278,7 +249,80 @@ AGENT_SYSTEM_SUFFIX = (
     "structured or tabular data (schedules, forecasts, comparisons, lists "
     "of items with multiple fields each), format it as a real markdown "
     "table with | column | headers | -- not a run-on list of colon-separated "
-    "values."
+    "values. When you are asked to research a specific, named software "
+    "library, SDK, or API -- not a general topic -- do not rely on a broad "
+    "web search alone: that returns scattered blog posts and tutorials of "
+    "unknown age that get blended together into answers matching no real "
+    "version. Instead, fetch that project's own official repository or "
+    "documentation site directly (e.g. its GitHub README, its docs site) "
+    "and base your answer on that source. If the library has multiple "
+    "language SDKs for the same protocol or spec (e.g. Python, TypeScript, "
+    "Go), never mix a convention from one language's SDK into another "
+    "language's example -- python-style decorators on bare functions are "
+    "not valid syntax in JavaScript or TypeScript, and vice versa; verify "
+    "each language's example separately against that language's own SDK "
+    "docs. For every specific API claim you state as fact -- an import "
+    "path, a class name, a function signature -- name which source you "
+    "got it from, so a person reading your answer can verify it "
+    "themselves rather than trusting it blindly. When you generate a "
+    "dependency declaration for an external library -- requirements.txt, "
+    "pyproject.toml, package.json, go.mod, or any similar file -- always "
+    "pin to a specific version or a bounded range (e.g. mcp>=1.28,<2), "
+    "never an open-ended minimum like mcp>=1.0.0. An unbounded dependency "
+    "silently resolves to whatever is newest at install time, which may "
+    "be a different major version than whatever API you actually "
+    "researched and wrote code against -- exactly the kind of breaking "
+    "change that makes generated code fail long after you wrote it. When "
+    "you research a library's current API, note which version that API "
+    "belongs to, and pin your generated dependency file to that version. "
+    "When research is about building something that creates, writes, "
+    "or generates files or other output, it must explicitly name the "
+    "specific API, method, or function that performs that write (for "
+    "example fs.writeFile, or a library's own save/create method) and "
+    "show it actually being called in at least one real example -- "
+    "never leave the actual creation step implied, described only in "
+    "prose, or absent from every example while only reading, analyzing, "
+    "or reacting to things gets demonstrated. And when you are not "
+    "certain whether a capability is available or restricted in some "
+    "environment or API, say that uncertainty plainly -- never state a "
+    "confident-sounding restriction you have not actually confirmed "
+    "from a real source, since a plausible but invented rule is often "
+    "followed just as strictly as a true one, and is much harder to "
+    "catch. When a task asks you to review, verify, check, or update "
+    "something against 'the documentation' or another external source, "
+    "and you notice you only have a summary, a compacted account, or a "
+    "secondhand description of that source in your current context -- "
+    "not the source itself -- you must actually fetch the real source "
+    "before proceeding. Noticing that gap in your own reasoning and then "
+    "continuing anyway with the lossy version defeats the entire point "
+    "of checking. This applies even when the summary comes from earlier "
+    "in this same conversation, including your own memory system's "
+    "compacted context, since compaction can silently drop the exact "
+    "specific detail that turns out to matter most. When something is "
+    "built as a string or text blob representing some OTHER artifact -- "
+    "generated code in a different language, a JSON or YAML config "
+    "assembled via string concatenation, an HTML template, a SQL query "
+    "built by interpolation, a shell script written out as text, "
+    "anything where the actual product lives inside a string rather "
+    "than being written directly as its own native syntax that gets "
+    "parsed and checked as such -- the correctness of the code doing "
+    "the building is a separate question from the correctness of what "
+    "it actually produces. Validate both independently. Code that "
+    "assembles such an artifact can be flawless in its own language "
+    "while the artifact it produces is still broken, since that "
+    "artifact lives inside strings, invisible to normal review, rather "
+    "than as code your own tooling would ever check directly. STRICT RULE: for "
+    "any task about a specific location within a file -- finding a word "
+    "or pattern, identifying which line something is on, or viewing a "
+    "particular line or range -- always use bash's grep -n or sed -n "
+    "first, never read_file. read_file returns raw text with no line "
+    "numbers at all, which forces you to manually count lines to answer "
+    "any 'which line' question, and that counting is genuinely easy to "
+    "get wrong. grep -n labels every match with its real line number "
+    "directly, so no counting is ever needed and the answer can't be "
+    "off by one. Only use read_file as a last resort, when you "
+    "genuinely need a small file's full contents and grep/sed truly "
+    "can't answer the question."
 )
 
 # Direct port of Odysseus's proven _pick_dynamic_ctx formula and step
@@ -308,7 +352,7 @@ def pick_dynamic_ctx(messages: list, tools: list = None, max_ctx: int = MAX_CTX_
             combined_text += content
     if tools:
         combined_text += json.dumps(tools)
-    needed = len(combined_text) // 3 + 16000
+    needed = len(combined_text) // 3 + 48000
     for step in _CTX_STEPS:
         if step >= needed and step <= max_ctx:
             return step
@@ -323,7 +367,6 @@ class ChatIn(BaseModel):
     workspace: str = ""  # empty = no workspace bound; file tools stay disabled
     endpoint_url: str = ""  # empty = use the default OLLAMA_URL
     search_url: str = ""  # SearXNG base URL; empty = web_search/web_fetch tools unavailable
-    use_pi: bool = False  # route through the Pi coding harness instead of Athena's own chat loop; requires workspace to be set
     images: list = []  # base64-encoded image strings (no data: prefix), passed through to vision-capable models
     attachments: list = []  # [{"name": str, "content": str}] text-file attachments, inlined into the prompt
 
@@ -491,28 +534,56 @@ def detect_models(req: DetectModelsIn):
 
 @app.get("/api/workspace/browse")
 def browse_workspace(path: str = ""):
-    """List subdirectories at a given path, for the workspace picker.
-    Defaults to the user's home directory. Only lists directories --
-    this is for choosing a workspace ROOT, not general file browsing
-    (that's what the model's own list_files tool is for, once a
-    workspace is actually bound)."""
+    """List subdirectories AND files at a given path, for both the
+    workspace picker (directories only matter there, workspace roots
+    can't be files) and the save-as-file picker (files are shown too,
+    read-only, so the user can see what's already there and avoid an
+    accidental overwrite). Defaults to the user's home directory."""
     target = os.path.realpath(path) if path else os.path.expanduser("~")
     if not os.path.isdir(target):
         return {"error": f"Not a directory: {target}"}
     try:
+        entries = os.listdir(target)
         dirs = sorted([
-            name for name in os.listdir(target)
+            name for name in entries
             if os.path.isdir(os.path.join(target, name)) and not name.startswith(".")
+        ], key=str.lower)
+        files = sorted([
+            name for name in entries
+            if os.path.isfile(os.path.join(target, name)) and not name.startswith(".")
         ], key=str.lower)
     except PermissionError:
         return {"error": f"Permission denied: {target}"}
     parent = os.path.dirname(target) if target != "/" else None
-    return {"path": target, "parent": parent, "directories": dirs}
+    return {"path": target, "parent": parent, "directories": dirs, "files": files}
 
 
 class MkdirIn(BaseModel):
     path: str
     name: str
+
+class SaveNoteFileIn(BaseModel):
+    path: str
+    filename: str
+    content: str
+
+@app.post("/api/notes/save-to-file")
+def save_note_to_file(req: SaveNoteFileIn):
+    """Writes note content to an arbitrary filesystem location chosen
+    via the same directory browser used for workspace selection --
+    a general 'Save As', not scoped to any pre-configured workspace."""
+    if not req.filename or "/" in req.filename or req.filename in (".", ".."):
+        return {"error": "Invalid filename."}
+    base = os.path.realpath(req.path)
+    if not os.path.isdir(base):
+        return {"error": f"Not a directory: {base}"}
+    target = os.path.join(base, req.filename)
+    try:
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(req.content)
+        return {"ok": True, "path": target}
+    except Exception as e:
+        return {"error": f"Could not save file: {e}"}
 
 @app.post("/api/workspace/mkdir")
 def mkdir_workspace(req: MkdirIn):
@@ -570,6 +641,185 @@ def read_workspace_file(workspace: str, path: str = ""):
     if not workspace:
         return {"error": "No workspace set."}
     return _read_file(workspace, path)
+
+@app.delete("/api/workspace/delete")
+def delete_workspace_entry(workspace: str, path: str = ""):
+    """Deletes a file or directory (recursively) at a path within the
+    given workspace, for the file browser panel's delete action --
+    reuses the same _resolve_workspace_path confinement check every
+    other file tool uses, so this can never delete anything outside
+    the workspace regardless of what path is passed."""
+    if not workspace:
+        return {"error": "No workspace set."}
+    if not path:
+        return {"error": "Refusing to delete the workspace root itself."}
+    try:
+        target = _resolve_workspace_path(workspace, path)
+        if target == os.path.realpath(workspace):
+            return {"error": "Refusing to delete the workspace root itself."}
+        if os.path.isdir(target):
+            import shutil
+            shutil.rmtree(target)
+        elif os.path.isfile(target):
+            os.remove(target)
+        else:
+            return {"error": f"Not found: {path}"}
+        return {"ok": True}
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"delete failed: {e}"}
+
+
+import yaml
+import re
+
+SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+def _parse_skill_frontmatter(content: str):
+    """Splits a SKILL.md's YAML frontmatter from its Markdown body.
+    Matches the open Agent Skills / SKILL.md standard, so skills
+    built here are usable elsewhere too and vice versa. Returns
+    (metadata, body), or (None, content) if there's no valid
+    frontmatter block."""
+    if not content.startswith("---"):
+        return None, content
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return None, content
+    try:
+        metadata = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return None, content
+    return metadata, parts[2].lstrip(chr(10))
+
+def _scan_skills():
+    """Lists every skill: a folder under SKILLS_DIR with a SKILL.md
+    that has at least a name and description in its frontmatter.
+    Only name+description are read here (progressive disclosure
+    level 1) -- cheap enough to include for every skill on every
+    request."""
+    skills = []
+    if not os.path.isdir(SKILLS_DIR):
+        return skills
+    for entry in sorted(os.listdir(SKILLS_DIR)):
+        skill_md = os.path.join(SKILLS_DIR, entry, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        try:
+            content = open(skill_md, encoding="utf-8").read()
+        except Exception:
+            continue
+        metadata, _ = _parse_skill_frontmatter(content)
+        if not metadata or not metadata.get("name") or not metadata.get("description"):
+            continue
+        skills.append({"name": metadata["name"], "description": metadata["description"], "folder": entry})
+    return skills
+
+def _load_skill(name: str):
+    """Returns one skill's full body -- progressive disclosure level
+    2, called by the model via the load_skill tool once it decides a
+    skill is relevant based on its description."""
+    for s in _scan_skills():
+        if s["name"] == name:
+            content = open(os.path.join(SKILLS_DIR, s["folder"], "SKILL.md"), encoding="utf-8").read()
+            _, body = _parse_skill_frontmatter(content)
+            return {"name": name, "content": body}
+    return {"error": "No skill named '" + name + "' found."}
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "skill"
+
+class SkillParseIn(BaseModel):
+    content: str
+
+@app.post("/api/skills/parse")
+def parse_skill_upload(req: SkillParseIn):
+    """Parses an uploaded SKILL.md's frontmatter+body without saving
+    anything, so the person can review/edit in the form before it
+    actually gets written to disk."""
+    metadata, body = _parse_skill_frontmatter(req.content)
+    if not metadata or not metadata.get("name") or not metadata.get("description"):
+        return {"error": "This file doesn't have valid SKILL.md frontmatter (needs at least name and description)."}
+    return {"name": metadata.get("name"), "description": metadata.get("description"), "body": body}
+
+from bs4 import BeautifulSoup
+import re as _re
+
+@app.get("/api/skills")
+def list_skills():
+    return {"skills": _scan_skills()}
+
+@app.get("/api/skills/{folder}")
+def get_skill(folder: str):
+    if ".." in folder or "/" in folder:
+        return {"error": "Invalid folder name."}
+    skill_md = os.path.join(SKILLS_DIR, folder, "SKILL.md")
+    if not os.path.isfile(skill_md):
+        return {"error": "Skill not found."}
+    content = open(skill_md, encoding="utf-8").read()
+    metadata, body = _parse_skill_frontmatter(content)
+    if not metadata:
+        return {"error": "Skill file has no valid frontmatter."}
+    return {"name": metadata.get("name"), "description": metadata.get("description"), "body": body, "folder": folder}
+
+class SkillIn(BaseModel):
+    name: str
+    description: str
+    body: str
+    folder: Optional[str] = None
+
+@app.post("/api/skills")
+def save_skill(req: SkillIn):
+    os.makedirs(SKILLS_DIR, exist_ok=True)
+    folder = req.folder or _slugify(req.name)
+    if ".." in folder or "/" in folder:
+        return {"error": "Invalid folder name."}
+    skill_dir = os.path.join(SKILLS_DIR, folder)
+    os.makedirs(skill_dir, exist_ok=True)
+    frontmatter = yaml.safe_dump({"name": req.name, "description": req.description}, default_flow_style=False, sort_keys=False)
+    content = "---" + chr(10) + frontmatter + "---" + chr(10) + chr(10) + req.body
+    with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write(content)
+    return {"ok": True, "folder": folder}
+
+@app.delete("/api/skills/{folder}")
+def delete_skill(folder: str):
+    if ".." in folder or "/" in folder:
+        return {"error": "Invalid folder name."}
+    skill_dir = os.path.join(SKILLS_DIR, folder)
+    if os.path.isdir(skill_dir):
+        import shutil
+        shutil.rmtree(skill_dir)
+        return {"ok": True}
+    return {"error": "Skill not found."}
+
+SKILL_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "Loads the full instructions for one available skill by name. Call this when a skill's description (listed in your system context) matches what you're being asked to do.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The exact skill name, as listed in your available skills."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+]
+
+def _get_skills_context() -> str:
+    skills = _scan_skills()
+    if not skills:
+        return ""
+    lines = ["Available skills: call load_skill(name) to load one's full instructions when its description matches the current task."]
+    for s in skills:
+        lines.append("- " + s["name"] + ": " + s["description"])
+    return chr(10) + chr(10) + chr(10).join(lines)
 
 
 WEB_TOOL_SCHEMAS = [
@@ -647,13 +897,60 @@ def _web_search(search_url: str, query: str):
     except Exception as e:
         return {"error": f"Search failed: {e}"}
 
+import re as _re_webfetch
+
 def _web_fetch(url: str):
     """Fetch and extract clean readable text -- uses BeautifulSoup for
     real HTML parsing (same technique Odysseus uses), not a regex
     tag-strip. A regex-only approach leaves nav/ad/script text mixed
     into the output, which was confusing local models into treating
     real content as unreliable. Structural elements (lists, headings)
-    get separators so the model can still parse a readable shape."""
+    get separators so the model can still parse a readable shape.
+
+    A bare GitHub repo root URL (github.com/owner/repo, no further
+    path) gets rewritten to fetch that repo's raw README.md directly
+    from raw.githubusercontent.com instead. Confirmed directly by
+    testing: modern GitHub repo pages are React-rendered SPAs whose
+    real content (README, file tree) only loads via JavaScript --
+    fetching the raw HTML here just returns UI chrome ('You signed in
+    with another tab...', 'Uh oh! There was an error while loading')
+    which is non-empty so it survives this function's own empty-text
+    check, but is useless to the model. The raw README route has none
+    of that problem since it's a plain text file, no rendering at all."""
+    github_repo_match = _re_webfetch.match(r"^https?://github\.com/([^/]+)/([^/]+)/?$", url)
+    if github_repo_match:
+        owner, repo = github_repo_match.group(1), github_repo_match.group(2)
+        for branch in ("main", "master"):
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md"
+            try:
+                raw_resp = httpx.get(raw_url, timeout=15, follow_redirects=True)
+                if raw_resp.status_code == 200 and raw_resp.text.strip():
+                    header = f"# {owner}/{repo} README\nSource: {raw_url}\n\n"
+                    return {"url": raw_url, "content": (header + raw_resp.text)[:6000]}
+            except Exception:
+                pass
+        # Both branches failed -- fall through to the normal HTML fetch
+        # below rather than giving up, since some repos use a different
+        # default branch name entirely.
+
+    # A /blob/branch/path URL is GitHub's own viewer for one specific
+    # file -- same React-SPA rendering problem as the repo root case
+    # above, just for a single file instead of the README. The branch
+    # is already given in the URL itself here, so no guessing between
+    # main/master is needed the way it is for the repo-root case.
+    blob_match = _re_webfetch.match(r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$", url)
+    if blob_match:
+        owner, repo, branch, file_path = blob_match.groups()
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
+        try:
+            raw_resp = httpx.get(raw_url, timeout=15, follow_redirects=True)
+            if raw_resp.status_code == 200 and raw_resp.text.strip():
+                header = f"# {owner}/{repo} -- {file_path}\nSource: {raw_url}\n\n"
+                return {"url": raw_url, "content": (header + raw_resp.text)[:6000]}
+        except Exception:
+            pass
+        # Raw fetch failed -- fall through to the normal HTML fetch below.
+
     try:
         from bs4 import BeautifulSoup
         resp = httpx.get(url, timeout=15, follow_redirects=True, headers={
@@ -679,6 +976,103 @@ def _web_fetch(url: str):
         return {"url": url, "content": output[:6000]}
     except Exception as e:
         return {"error": f"Fetch failed: {e}"}
+
+
+# Read-only shell access. Structured, not a raw command string: the
+# model supplies a bare command name plus a list of arguments, which
+# are passed directly to subprocess.run with shell=False -- no shell
+# is ever invoked at all, so shell metacharacters (;, &&, |, $(...),
+# backticks, redirection) have no special meaning whatsoever if they
+# appear in an argument; they're just literal text passed to the
+# allowlisted command itself. This is a structural guarantee against
+# command injection, not a blocklist of dangerous patterns to detect --
+# there's no shell present for an injection to exploit in the first
+# place. On top of that: only specific, genuinely read-only commands
+# are allowed at all, and specific dangerous flags are rejected even
+# for allowed commands (sed's -i, find's -delete/-exec), since those
+# would give write access through a "read" tool otherwise. This tool
+# never requires a workspace and is never confined to one -- it can
+# read anywhere this process has filesystem access, matching the
+# read-anywhere/write-only-in-workspace split this design is built on.
+BASH_ALLOWED_COMMANDS = {
+    "ls", "cat", "grep", "find", "head", "tail", "wc", "pwd",
+    "sed", "stat", "diff", "sort", "uniq", "file", "tree", "du", "date",
+}
+BASH_DANGEROUS_FLAGS = {
+    "sed": {"-i", "--in-place"},
+    "find": {"-delete", "-exec", "-execdir", "-fprintf", "-fprint", "-fprint0", "-fls"},
+}
+
+def _execute_readonly_bash(command: str, args: list, cwd: str = ""):
+    if not command:
+        return {"error": "Missing 'command'. Example: to run grep -n pattern file.txt, set command to 'grep' (just the program name) and args to ['-n', 'pattern', 'file.txt'] (a list of separate arguments)."}
+    if not isinstance(command, str) or " " in command or command.startswith("[") or command.startswith('"'):
+        return {
+            "error": "'" + str(command) + "' looks like a full command line or a JSON array, not a bare program name. "
+            "command must be ONLY the program name by itself, e.g. 'grep' -- never the whole command line, "
+            "and never the command name repeated inside args. Everything after the program name goes in "
+            "args as separate list items instead: to run grep -n pattern file.txt, use "
+            "command='grep' and args=['-n', 'pattern', 'file.txt']."
+        }
+    if command not in BASH_ALLOWED_COMMANDS:
+        return {"error": "Command '" + command + "' is not allowed. Allowed commands: " + ", ".join(sorted(BASH_ALLOWED_COMMANDS))}
+    dangerous = BASH_DANGEROUS_FLAGS.get(command, set())
+    shell_operators = ("|", ">", "<", "&", ";", "$(", "`", "&&", "||")
+    for arg in args:
+        if not isinstance(arg, str):
+            return {"error": "All arguments must be strings."}
+        if any(op in arg for op in shell_operators):
+            return {
+                "error": "Argument '" + arg + "' contains a shell operator (pipe, redirect, chaining, or substitution). "
+                "There is no shell here at all -- this tool runs the program directly, so operators like |, >, 2>/dev/null, "
+                "&&, or $(...) have no special meaning and can't do what they'd do in a real shell; they'd just be passed "
+                "as literal, meaningless text to the program. Make separate bash calls instead and read each result "
+                "yourself -- for example, to ignore a 'not found' error from find, just call find normally and ignore "
+                "any error in the response, rather than trying to redirect it away."
+            }
+        if arg in dangerous or any(arg.startswith(d) for d in dangerous):
+            return {"error": "Argument '" + arg + "' is not allowed for '" + command + "' -- this tool is strictly read-only, no in-place edits or deletions."}
+    try:
+        result = subprocess.run(
+            [command] + list(args),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            shell=False,
+            cwd=cwd if cwd else None,
+        )
+        output = result.stdout
+        if result.stderr:
+            output += "\n[stderr]\n" + result.stderr
+        return {"command": command, "args": args, "output": output[:10000], "exit_code": result.returncode}
+    except FileNotFoundError:
+        return {"error": "Command '" + command + "' not found on this system."}
+    except subprocess.TimeoutExpired:
+        return {"error": "Command timed out after 15 seconds."}
+    except Exception as e:
+        return {"error": f"bash execution failed: {e}"}
+
+BASH_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a read-only shell command. Only these commands are allowed: ls, cat, grep, find, head, tail, wc, pwd, sed, stat, diff, sort, uniq, file, tree, du, date. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. sed's -i flag and find's -delete/-exec flags are blocked; this tool can never write or modify anything, on any file, regardless of workspace. Works anywhere on the filesystem this process can read, not limited to any workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The bare command name, e.g. 'grep' or 'ls'. No path, no shell operators."},
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Arguments to the command, each as a separate array element (e.g. [\"-n\", \"pattern\", \"file.txt\"] for grep -n pattern file.txt).",
+                    },
+                },
+                "required": ["command", "args"],
+            },
+        },
+    },
+]
 
 
 FILE_TOOL_SCHEMAS = [
@@ -734,6 +1128,24 @@ FILE_TOOL_SCHEMAS = [
                     "new_text": {"type": "string", "description": "Replacement text."},
                 },
                 "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_lines",
+            "description": "Replace an exact range of lines in a file by line number, given the new content to put there -- use this instead of edit_file whenever you already know the exact line numbers (e.g. from grep -n or sed -n via bash), since it never requires reproducing old text byte-for-byte and so can't fail on a whitespace mismatch. Requires expected_content: what you believe is currently at that exact line range, used as a safety check before applying anything. If your line numbers turn out to be stale, this will try to find the expected content nearby and correct itself automatically, or fail safely and show you the real current content rather than corrupting the file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "start_line": {"type": "integer", "description": "First line to replace (1-indexed)."},
+                    "end_line": {"type": "integer", "description": "Last line to replace, inclusive (1-indexed). Same as start_line to replace a single line."},
+                    "new_content": {"type": "string", "description": "The new text to put in place of that line range. This completely replaces the range, it is not inserted alongside it."},
+                    "expected_content": {"type": "string", "description": "What you believe is currently at lines start_line-end_line, exactly as you last saw it. Used to verify your line numbers are still accurate before making any change."},
+                },
+                "required": ["path", "start_line", "end_line", "new_content", "expected_content"],
             },
         },
     },
@@ -813,148 +1225,109 @@ def _edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
     except Exception as e:
         return {"error": f"edit_file failed: {e}"}
 
-
-# Self-contained Pi config lives inside the Athena repo (not the user's
-# personal ~/.pi/agent, which may be shared with other unrelated Pi
-# projects) -- keeps the whole coding-harness setup portable: clone
-# Athena elsewhere and this directory comes with it.
-PI_AGENT_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pi-agent-config")
-PI_MODELS_JSON_PATH = os.path.join(PI_AGENT_CONFIG_DIR, "models.json")
-
-def _guess_thinking_format(model_name: str) -> dict:
-    """Heuristic mapping from model name to Pi's compat.thinkingFormat,
-    based on Pi's own documented format list (qwen, deepseek, zai, etc).
-    Only qwen is confirmed tested tonight -- others are best-effort so
-    a new model at least has a chance of getting real thinking output
-    instead of silently getting none."""
-    name = model_name.lower()
-    if "qwen" in name:
-        return {"thinkingFormat": "qwen"}
-    if "deepseek" in name:
-        return {"thinkingFormat": "deepseek"}
-    return {}
-
-def _ensure_pi_model_registered(model_name: str):
-    """Make sure Pi's models.json has an entry for whatever model is
-    currently selected in Athena, so Pi always works with 'whatever
-    model we have selected for that message' instead of requiring
-    every model to be manually pre-added to a static config file.
-    Runs before every Pi invocation -- cheap (small JSON file) and
-    keeps the two systems in sync automatically."""
+def _replace_lines(workspace: str, rel_path: str, start_line, end_line, new_content: str, expected_content: str):
+    """Replaces an exact line range by number, sidestepping edit_file's
+    fragile requirement to reproduce old text byte-for-byte. Requires
+    expected_content -- a sanity check against what's actually at that
+    line range right now, not an exact-match requirement like
+    old_text. If it genuinely doesn't match (most often because an
+    earlier edit shifted the file's line numbers and these ones are
+    now stale), this does NOT blindly apply the change: it searches a
+    window around the given range for the expected content and, if
+    found once and unambiguously, applies the edit there instead and
+    reports the correction. If it's not found nearby, or found more
+    than once, it fails safely and returns the real current content at
+    that location, rather than corrupting the file the way a blind
+    line-number replacement could."""
     try:
-        with open(PI_MODELS_JSON_PATH) as f:
-            config = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        config = {"providers": {}}
+        target = _resolve_workspace_path(workspace, rel_path)
+        if not os.path.isfile(target):
+            return {"error": f"Not a file: {rel_path}"}
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        lines = content.split("\n")
 
-    athena_provider = config.setdefault("providers", {}).setdefault("athena", {
-        "baseUrl": "http://localhost:9500/v1",
-        "api": "openai-completions",
-        "apiKey": "athena",
-        "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
-        "models": [],
-    })
-    models = athena_provider.setdefault("models", [])
-
-    # Prune entries for models that no longer actually exist in Ollama.
-    # The old version of this function only ever appended -- it never
-    # removed anything -- so every model ever used stayed listed
-    # forever, even long after being deleted from Ollama, silently
-    # looking like a hardcoded/stale list even though it was
-    # technically auto-updating the whole time.
-    try:
-        ollama_base = OLLAMA_URL.rsplit("/api/", 1)[0]
-        tags_resp = httpx.get(f"{ollama_base}/api/tags", timeout=3)
-        live_model_names = {m["name"] for m in tags_resp.json().get("models", [])}
-        models[:] = [m for m in models if m.get("id") in live_model_names or m.get("id") == model_name]
-    except Exception as e:
-        print(f"[Athena] Couldn't verify live Ollama models for Pi sync, leaving list as-is: {e}", flush=True)
-
-    for m in models:
-        if m.get("id") == model_name:
-            return  # already registered
-
-    models.append({
-        "id": model_name,
-        "name": f"{model_name} (dynamic ctx via Athena)",
-        "reasoning": True,
-        "contextWindow": MAX_CTX_DEFAULT,
-        "maxTokens": 8192,
-        "compat": _guess_thinking_format(model_name),
-    })
-
-    with open(PI_MODELS_JSON_PATH, "w") as f:
-        json.dump(config, f, indent=2)
-
-
-def _run_pi_agent(req: "ChatIn"):
-    _ensure_pi_model_registered(req.model)
-    """Stream a response via the Pi coding harness instead of Athena's
-    own chat loop. Pi handles its own tool-calling and session memory
-    (via --session-id, matching Athena's session_id so history persists
-    across messages in the same chat) -- this function only translates
-    Pi's JSON event stream into the same SSE shapes Athena's frontend
-    already understands (delta/tool_start/tool_output/done), so the
-    existing thinking panel and tool cards work unmodified."""
-    pi_binary = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node_modules", ".bin", "pi")
-    cmd = [
-        pi_binary,
-        "--provider", "athena",
-        "--model", req.model,
-        "--mode", "json",
-        "--session-id", req.session_id,
-        "-p", req.message,
-    ]
-
-    def generate():
-        full_reply = ""
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=req.workspace,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                env={**os.environ, "PI_CODING_AGENT_DIR": PI_AGENT_CONFIG_DIR},
-            )
-        except FileNotFoundError:
-            yield f"data: {json.dumps({'delta': 'Pi binary not found -- check node_modules/.bin/pi exists.'})}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
-            return
+            start_line = int(start_line)
+            end_line = int(end_line)
+        except (TypeError, ValueError):
+            return {"error": "start_line and end_line must be numbers."}
+        if start_line < 1 or start_line > len(lines) or end_line < start_line:
+            return {"error": f"Invalid range for a file with {len(lines)} lines (start_line={start_line}, end_line={end_line})."}
 
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        end = min(len(lines), end_line)
+        actual_block = "\n".join(lines[start_line - 1:end])
+        expected_stripped = (expected_content or "").strip()
 
-            etype = event.get("type")
+        if actual_block.strip() != expected_stripped:
+            window_start = max(0, start_line - 1 - 25)
+            window_end = min(len(lines), end_line + 25)
+            window_lines = lines[window_start:window_end]
+            expected_lines = expected_stripped.split("\n") if expected_stripped else []
 
-            if etype == "message_update":
-                ame = event.get("assistantMessageEvent", {})
-                ame_type = ame.get("type")
-                if ame_type == "text_delta":
-                    delta = ame.get("delta", "")
-                    full_reply += delta
-                    yield f"data: {json.dumps({'delta': delta})}\n\n"
-                elif ame_type == "thinking_delta":
-                    yield f"data: {json.dumps({'thinking': ame.get('delta', '')})}\n\n"
-                elif ame_type == "toolcall_start":
-                    yield f"data: {json.dumps({'type': 'tool_start', 'tool': ame.get('toolName', 'unknown')})}\n\n"
+            matches = []
+            if expected_lines:
+                for offset in range(len(window_lines) - len(expected_lines) + 1):
+                    candidate = "\n".join(window_lines[offset:offset + len(expected_lines)]).strip()
+                    if candidate == expected_stripped:
+                        matches.append(window_start + offset + 1)
 
-            elif etype == "tool_execution_end":
-                yield f"data: {json.dumps({'type': 'tool_output', 'tool': event.get('toolName', 'unknown'), 'output': event.get('result')})}\n\n"
+            if len(matches) == 1:
+                real_start = matches[0]
+                real_end = real_start + len(expected_lines) - 1
+                new_lines = new_content.split("\n")
+                updated_lines = lines[:real_start - 1] + new_lines + lines[real_end:]
+                with open(target, "w", encoding="utf-8") as f:
+                    f.write("\n".join(updated_lines))
+                return {
+                    "path": rel_path,
+                    "edited": True,
+                    "note": f"Your line numbers ({start_line}-{end_line}) were stale, but the expected content was found unambiguously nearby at lines {real_start}-{real_end} and the edit was applied there instead. Re-check line numbers for this file before your next edit, since they may have shifted again.",
+                }
 
-            elif etype == "agent_settled":
-                proc.wait()
-                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
-                yield f"data: {json.dumps({'done': True, 'assistant_message_id': _msg_id})}\n\n"
+            reason = "did not match" if not matches else f"was found {len(matches)} times nearby, which is ambiguous"
+            return {
+                "error": f"expected_content {reason} at or near lines {start_line}-{end_line}. Actual current content at that exact range right now:\n{actual_block}\n\nRe-verify the real content and line numbers before retrying, rather than guessing again."
+            }
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+        new_lines = new_content.split("\n")
+        updated_lines = lines[:start_line - 1] + new_lines + lines[end:]
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("\n".join(updated_lines))
+
+        delta = len(new_lines) - (end - start_line + 1)
+        result = {"path": rel_path, "edited": True, "lines_replaced": f"{start_line}-{end_line}"}
+        if delta != 0:
+            result["warning"] = f"This changed the file's line count by {delta:+d}. Any other line numbers you had for this file are now stale -- re-check before another replace_lines call."
+        return result
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"replace_lines failed: {e}"}
+
+
+# Per-session cancel signal for in-progress generations. The frontend's
+# stop button aborting its own fetch only stops the CLIENT from
+# listening -- it does nothing to the backend, which has no way to
+# know the client walked away and just keeps talking to Ollama in the
+# background regardless. This explicit flag, checked inside the
+# generator's own loop below, is what actually stops the backend's
+# work, not just the frontend's display of it.
+_cancel_flags = {}
+
+class CancelIn(BaseModel):
+    session_id: str
+
+@app.post("/api/chat/cancel")
+def cancel_chat(req: CancelIn):
+    print(f"[CANCEL-DEBUG] cancel request for session_id={req.session_id!r}, known flags={list(_cancel_flags.keys())!r}", flush=True)
+    flag = _cancel_flags.get(req.session_id)
+    if flag:
+        flag.set()
+        print(f"[CANCEL-DEBUG] flag found and set for {req.session_id!r}", flush=True)
+    else:
+        print(f"[CANCEL-DEBUG] NO matching flag for {req.session_id!r}", flush=True)
+    return {"cancelled": bool(flag)}
 
 
 _last_activity_ts = time.time()
@@ -963,15 +1336,6 @@ _last_activity_ts = time.time()
 def chat_stream(req: ChatIn):
     global _last_activity_ts
     _last_activity_ts = time.time()
-    if req.use_pi:
-        if not req.workspace:
-            def _no_workspace_error():
-                yield f"data: {json.dumps({'delta': 'Pi requires a workspace to be set -- pick one from the workspace pill first.'})}\n\n"
-                yield f"data: {json.dumps({'done': True})}\n\n"
-            return StreamingResponse(_no_workspace_error(), media_type="text/event-stream")
-        send_to_lcm(req.session_id, "user", req.message)
-        return _run_pi_agent(req)
-
     print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
     effective_message = req.message
     for att in req.attachments:
@@ -992,16 +1356,18 @@ def chat_stream(req: ChatIn):
     context = get_lcm_context(req.session_id)
 
     # Perpetual agent mode -- one tool set, always available. LCM's recall
-    # tools are always on; file write/edit tools (once the Pi bridge is
-    # wired in) will only be included here when req.workspace is non-empty,
-    # so the model can never edit files on a session with no workspace
+    # tools and the read-only bash tool are always on; file write/edit
+    # tools are only included here when req.workspace is non-empty, so
+    # the model can never edit files on a session with no workspace
     # bound to it, regardless of how it reads an ambiguous prompt.
-    system_prompt = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX + _get_memory_context()
-    tools = get_lcm_tools()
+    system_prompt = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX + _get_memory_context() + _get_skills_context()
+    tools = get_lcm_tools() + BASH_TOOL_SCHEMAS
     if req.search_url:
         tools = tools + WEB_TOOL_SCHEMAS
     if req.workspace:
         tools = tools + FILE_TOOL_SCHEMAS
+    if _scan_skills():
+        tools = tools + SKILL_TOOL_SCHEMAS
 
     _raw_messages = [{"role": "system", "content": system_prompt}] + context
     # Some chat templates (e.g. qwen3.5's) require every system-role
@@ -1041,6 +1407,10 @@ def chat_stream(req: ChatIn):
             return _web_search(req.search_url, args.get("query", ""))
         if name == "web_fetch":
             return _web_fetch(args.get("url", ""))
+        if name == "load_skill":
+            return _load_skill(args.get("name", ""))
+        if name == "bash":
+            return _execute_readonly_bash(args.get("command", ""), args.get("args", []), req.workspace)
         if name == "list_files":
             return _list_files(req.workspace, args.get("path", "."))
         if name == "read_file":
@@ -1049,6 +1419,8 @@ def chat_stream(req: ChatIn):
             return _write_file(req.workspace, args.get("path", ""), args.get("content", ""))
         if name == "edit_file":
             return _edit_file(req.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
+        if name == "replace_lines":
+            return _replace_lines(req.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
 
         args["session_id"] = req.session_id
         try:
@@ -1060,12 +1432,14 @@ def chat_stream(req: ChatIn):
             return {"error": f"Tool call failed: {e}"}
 
     def generate():
+        cancel_flag = threading.Event()
+        _cancel_flags[req.session_id] = cancel_flag
         yield f"data: {json.dumps({'user_message_id': _user_msg_id})}\n\n"
         full_reply = ""
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
         _messages = list(messages)
         print(f"[DEBUG] _messages roles={[m.get("role") for m in _messages]!r}", flush=True)
-        MAX_ROUNDS = 5
+        MAX_ROUNDS = 1000  # effectively unbounded; the stop button is the real safety net now
         last_eval_count = None
         last_eval_duration = None
 
@@ -1081,6 +1455,8 @@ def chat_stream(req: ChatIn):
                 "stream": True,
             }, timeout=180) as resp:
                 for line in resp.iter_lines():
+                    if cancel_flag.is_set():
+                        break
                     if not line:
                         continue
                     try:
@@ -1103,6 +1479,13 @@ def chat_stream(req: ChatIn):
                         last_eval_count = chunk.get("eval_count")
                         last_eval_duration = chunk.get("eval_duration")
                         break
+
+            if cancel_flag.is_set():
+                if full_reply:
+                    send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
+                yield f"data: {json.dumps({'done': True, 'cancelled': True})}\n\n"
+                _cancel_flags.pop(req.session_id, None)
+                return
 
             if not round_tool_calls:
                 _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
@@ -1210,194 +1593,6 @@ def get_history(session_id: str):
         pass
     return []
 
-# ---------------------------------------------------------------------------
-# OpenAI-compat translation proxy: lets the Pi coding harness (or any
-# other OpenAI-compat client) get Athena's real dynamic ctx sizing.
-# Pi's own provider config speaks OpenAI /v1/chat/completions, which has
-# no field for num_ctx at all -- Ollama's OpenAI-compat shim silently
-# ignores context sizing entirely, always falling back to whatever a
-# model's Modelfile happens to default to (often just 4096). This proxy
-# receives the OpenAI-shaped request, computes real ctx using the exact
-# same pick_dynamic_ctx used for Athena's own chat, forwards to Ollama's
-# NATIVE /api/chat with num_ctx set correctly, then translates the
-# response back into OpenAI shape. Point Pi's base_url at this endpoint
-# instead of Ollama directly and it gets proper dynamic ctx for free,
-# with zero per-model Modelfile baking required.
-# ---------------------------------------------------------------------------
-
-def _normalize_message_content(messages: list) -> list:
-    """OpenAI-format clients (like Pi) may send content as an array of
-    blocks (e.g. [{"type": "text", "text": "..."}]) for multimodal
-    support. Ollama's native API only accepts a plain string -- passing
-    the array shape through unchanged causes a Go-side unmarshal error
-    on Ollama's end, which surfaces as a silent {'error': ...} chunk
-    with no finish_reason, confusing OpenAI-compat clients that expect
-    a clean stream end.
-
-    Real OpenAI spec also requires tool_calls[].function.arguments to
-    be a JSON-encoded STRING (which is what a spec-correct client like
-    Pi sends back in conversation history), but Ollama's native API
-    outputs -- and expects -- that same field as a real object/dict.
-    Forwarding the string form unchanged causes Ollama's Go parser to
-    choke trying to unmarshal a string where it expects an object,
-    surfacing as "Value looks like object, but can't find closing '}'
-    symbol". Convert it back to an object before forwarding."""
-    normalized = []
-    for m in messages:
-        content = m.get("content")
-        if isinstance(content, list):
-            text_parts = [
-                block.get("text", "") for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            ]
-            m = {**m, "content": "\n".join(text_parts)}
-        elif content is None:
-            # Spec-correct OpenAI clients send content: null on an
-            # assistant message that only carries tool_calls. Ollama's
-            # Go struct expects content to always be a string; null
-            # produces the same confusing "can't find closing brace"
-            # class of parse error as the array-content case above.
-            m = {**m, "content": ""}
-
-        tool_calls = m.get("tool_calls")
-        if tool_calls:
-            fixed_calls = []
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                args = fn.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-                if not isinstance(args, dict):
-                    # A prior failed/malformed tool call can leave a
-                    # non-object value (e.g. []) recorded in history.
-                    # Ollama's Go struct requires an object here --
-                    # coerce anything else to empty rather than
-                    # crashing every subsequent request in the
-                    # conversation on a single bad historical entry.
-                    args = {}
-                fixed_calls.append({**tc, "function": {**fn, "arguments": args}})
-            m = {**m, "tool_calls": fixed_calls}
-
-        normalized.append(m)
-    return normalized
-
-
-@app.post("/v1/chat/completions")
-async def openai_compat_proxy(request: Request):
-    body = await request.json()
-    model = body.get("model", DEFAULT_MODEL)
-    messages = _normalize_message_content(body.get("messages", []))
-    tools = body.get("tools")
-    stream = body.get("stream", False)
-
-    _summary = []
-    for i, m in enumerate(messages):
-        tc = m.get("tool_calls")
-        tc_info = ""
-        if tc:
-            for t in tc:
-                args = t.get("function", {}).get("arguments")
-                tc_info += f" tool_call_args_type={type(args).__name__}:{repr(args)[:80]}"
-        _summary.append(f"[{i}] role={m.get('role')} content_type={type(m.get('content')).__name__}{tc_info}")
-    print("[PROXY-DEBUG] message summary:\n" + "\n".join(_summary), flush=True)
-    if tools:
-        for t in tools:
-            if t.get("function", {}).get("name") == "read":
-                print(f"[PROXY-DEBUG] read tool schema={json.dumps(t, indent=2)}", flush=True)
-    ctx_size = pick_dynamic_ctx(messages, tools)
-
-    ollama_payload = {
-        "model": model,
-        "messages": messages,
-        "options": {"num_ctx": ctx_size},
-        "stream": stream,
-    }
-    if tools:
-        ollama_payload["tools"] = tools
-
-    if not stream:
-        resp = httpx.post(OLLAMA_URL, json=ollama_payload, timeout=180)
-        data = resp.json()
-        msg = data.get("message", {})
-        return {
-            "id": "athena-proxy",
-            "object": "chat.completion",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": msg.get("content", ""), "tool_calls": msg.get("tool_calls")},
-                "finish_reason": "tool_calls" if msg.get("tool_calls") else "stop",
-            }],
-        }
-
-    def generate():
-        with httpx.stream("POST", OLLAMA_URL, json=ollama_payload, timeout=180) as resp:
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                print(f"[PROXY-DEBUG] chunk={chunk}", flush=True)
-                msg = chunk.get("message", {})
-
-                delta = {}
-                if msg.get("thinking"):
-                    # De facto OpenAI-compat convention for reasoning
-                    # models (vLLM, LiteLLM, etc): delta.reasoning_content.
-                    # Without this, thinking tokens Ollama genuinely sends
-                    # were silently dropped in translation -- Pi never
-                    # even had a chance to surface them, regardless of
-                    # any --thinking level or models.json config.
-                    delta = {"reasoning_content": msg["thinking"]}
-                elif msg.get("content"):
-                    delta = {"content": msg["content"]}
-                elif msg.get("tool_calls"):
-                    # Real OpenAI streaming format requires each tool call to
-                    # have a top-level "index" and function.arguments as a
-                    # JSON-encoded STRING (clients accumulate it as string
-                    # fragments across chunks). Ollama sends the whole call
-                    # complete in one chunk with arguments as a real object
-                    # and no top-level index -- forwarding that shape
-                    # unchanged silently breaks spec-compliant streaming
-                    # clients like Pi, which end up recording empty
-                    # arguments despite the real data having been sent.
-                    fixed_tool_calls = []
-                    for i, tc in enumerate(msg["tool_calls"]):
-                        fn = tc.get("function", {})
-                        args = fn.get("arguments", {})
-                        fixed_tool_calls.append({
-                            "index": i,
-                            "id": tc.get("id", f"call_{i}"),
-                            "type": "function",
-                            "function": {
-                                "name": fn.get("name", ""),
-                                "arguments": json.dumps(args) if isinstance(args, dict) else (args or ""),
-                            },
-                        })
-                    delta = {"tool_calls": fixed_tool_calls}
-
-                openai_chunk = {
-                    "id": "athena-proxy",
-                    "object": "chat.completion.chunk",
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": delta,
-                        "finish_reason": ("tool_calls" if msg.get("tool_calls") else "stop") if chunk.get("done") else None,
-                    }],
-                }
-                yield f"data: {json.dumps(openai_chunk)}\n\n"
-                if chunk.get("done"):
-                    yield "data: [DONE]\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
-
-
 class MemoryIn(BaseModel):
     content: str
 
@@ -1446,6 +1641,7 @@ class SessionMetaIn(BaseModel):
     label: str
     pinned: bool = False
     created_at: float
+    last_active: Optional[float] = None
 
 @app.get("/api/sessions")
 def list_sessions_proxy():
@@ -1545,16 +1741,194 @@ def _save_settings(settings):
         json.dump(settings, f)
     os.replace(tmp_path, _SETTINGS_PATH)
 
+_notes_lock = threading.Lock()
+_NOTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_notes.json")
+
+def _load_notes():
+    try:
+        with open(_NOTES_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_notes(notes):
+    """Atomic write (temp file + os.replace), same pattern as
+    settings, so a crash or a concurrent write from another device
+    mid-write can never leave a corrupted notes file behind. This
+    replaces the old localStorage-only storage, which never synced
+    notes across devices at all -- a note saved on one device was
+    simply invisible everywhere else."""
+    tmp_path = _NOTES_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(notes, f)
+    os.replace(tmp_path, _NOTES_PATH)
+
+class NotesIn(BaseModel):
+    notes: list
+
+@app.get("/api/notes")
+def get_notes():
+    with _notes_lock:
+        return {"notes": _load_notes()}
+
+@app.post("/api/notes")
+def save_notes_endpoint(req: NotesIn):
+    with _notes_lock:
+        _save_notes(req.notes)
+    return {"ok": True}
+
 class MemoryModelIn(BaseModel):
     model: Optional[str] = None
 
 class SettingsIn(BaseModel):
     workspace: Optional[str] = None
-    use_pi: Optional[bool] = None
     endpoints: Optional[list] = None
     search_url: Optional[str] = None
     default_model: Optional[dict] = None
     theme: Optional[dict] = None
+
+class MCPServerIn(BaseModel):
+    name: str
+    command: str
+    args: Optional[list] = None
+
+@app.get("/api/mcp/servers")
+def list_mcp_servers():
+    from mcp_manager import mcp_manager
+    servers = mcp_manager.list_servers()
+    for s in servers:
+        tools = mcp_manager.list_tools(s["name"])
+        s["tools"] = [{"name": t.name, "description": t.description, "inputSchema": t.input_schema} for t in tools]
+    return {"servers": servers}
+
+@app.post("/api/mcp/servers")
+def add_mcp_server(req: MCPServerIn):
+    """Adds a server to persisted config AND connects immediately,
+    so the person sees real success/failure right away instead of
+    only finding out on the next restart."""
+    from mcp_manager import mcp_manager
+    with _settings_lock:
+        settings = _load_settings()
+        servers = settings.setdefault("mcp_servers", [])
+        servers = [s for s in servers if s["name"] != req.name]
+        servers.append({"name": req.name, "command": req.command, "args": req.args or []})
+        settings["mcp_servers"] = servers
+        _save_settings(settings)
+    try:
+        tools = mcp_manager.connect_server(req.name, req.command, req.args or [])
+        return {"connected": True, "tool_count": len(tools)}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+@app.delete("/api/mcp/servers/{name}")
+def remove_mcp_server(name: str):
+    from mcp_manager import mcp_manager
+    mcp_manager.disconnect_server(name)
+    with _settings_lock:
+        settings = _load_settings()
+        settings["mcp_servers"] = [s for s in settings.get("mcp_servers", []) if s["name"] != name]
+        _save_settings(settings)
+    return {"removed": True}
+
+class MCPCallIn(BaseModel):
+    server: str
+    tool: str
+    arguments: Optional[dict] = None
+
+@app.post("/api/mcp/call")
+def call_mcp_tool(req: MCPCallIn):
+    """Generic tool-call passthrough -- Athena has no idea what any
+    given tool does, it just forwards the call and hands back the raw
+    result. If the result's text content happens to parse as JSON,
+    that's included too, for the frontend's shape-sniffing renderer to
+    work with; the raw text is always included as a safe fallback."""
+    from mcp_manager import mcp_manager
+    try:
+        result = mcp_manager.call_tool(req.server, req.tool, req.arguments or {})
+    except Exception as e:
+        return {"error": str(e)}
+
+    text_parts = [item.text for item in result.content if hasattr(item, "text")]
+    raw_text = "\n".join(text_parts)
+
+    parsed = None
+    try:
+        parsed = json.loads(raw_text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return {"isError": getattr(result, "isError", False), "raw_text": raw_text, "parsed": parsed}
+
+MCP_UIS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_uis")
+
+def _serve_mcp_ui_file(server_name: str, path: str):
+    """Serves a custom, hand-built UI for one MCP server, if the
+    person has created one -- entirely optional plugin folders,
+    gitignored by default, so a public release of Athena never ships
+    anyone's bespoke tool-specific UI. Falls back to a short, friendly
+    explainer (not a bare 404) when no folder exists, so this doubles
+    as living documentation for building one."""
+    if ".." in server_name or ".." in path:
+        return HTMLResponse("Invalid path", status_code=400)
+
+    server_dir = os.path.join(MCP_UIS_DIR, server_name)
+    if not os.path.isdir(server_dir):
+        return HTMLResponse(f"""
+        <html><body style="font-family: sans-serif; padding: 2rem; color: #666; max-width: 640px; margin: 0 auto;">
+        <h2>No custom UI for &#39;{server_name}&#39; yet</h2>
+        <p>To build one, create a folder at <code>mcp_uis/{server_name}/</code> containing an <code>index.html</code> (plus any JS/CSS/images it needs). It loads in an isolated iframe, so it can be styled however you like.</p>
+        <p>It can call Athena&#39;s existing generic endpoints to interact with this server:</p>
+        <ul>
+            <li><code>GET /api/mcp/servers</code> &mdash; list connected servers and their discovered tools</li>
+            <li><code>POST /api/mcp/call</code> &mdash; call a tool: <code>{{"server": "{server_name}", "tool": "...", "arguments": {{...}}}}</code></li>
+        </ul>
+        </body></html>
+        """)
+
+    if not path:
+        path = "index.html"
+    file_path = os.path.join(server_dir, path)
+    real_server_dir = os.path.realpath(server_dir)
+    real_file_path = os.path.realpath(file_path)
+    if not real_file_path.startswith(real_server_dir):
+        return HTMLResponse("Invalid path", status_code=400)
+    if not os.path.isfile(file_path):
+        return HTMLResponse("Not found", status_code=404)
+    return FileResponse(file_path)
+
+def _load_mcp_ui_backends():
+    """Generic plugin mechanism: any mcp_uis/<name>/backend.py that
+    defines a FastAPI APIRouter named `router` gets mounted under
+    /mcp-ui-api/<name>/. Athena's core has zero knowledge of what's
+    inside a plugin's backend -- this is the one place tool-specific
+    server-side logic is allowed to exist at all, deliberately
+    isolated to plugin folders that are gitignored by default, never
+    touching Athena's own codebase."""
+    import importlib.util
+    if not os.path.isdir(MCP_UIS_DIR):
+        return
+    for name in os.listdir(MCP_UIS_DIR):
+        backend_path = os.path.join(MCP_UIS_DIR, name, "backend.py")
+        if os.path.isfile(backend_path):
+            try:
+                spec = importlib.util.spec_from_file_location(f"mcp_ui_backend_{name}", backend_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, "router"):
+                    app.include_router(module.router, prefix=f"/mcp-ui-api/{name}")
+                    print(f"[Athena] Loaded custom backend for MCP UI plugin '{name}'", flush=True)
+            except Exception as e:
+                print(f"[Athena] Failed to load custom backend for MCP UI plugin '{name}': {e}", flush=True)
+
+_load_mcp_ui_backends()
+
+@app.get("/mcp-ui/{server_name}")
+def serve_mcp_ui_root(server_name: str):
+    return _serve_mcp_ui_file(server_name, "index.html")
+
+@app.get("/mcp-ui/{server_name}/{path:path}")
+def serve_mcp_ui_file(server_name: str, path: str):
+    return _serve_mcp_ui_file(server_name, path)
 
 @app.get("/api/settings")
 def get_settings():
@@ -1729,82 +2103,21 @@ def _check_requirements():
         for m in mismatched:
             print(f"  - {m}", flush=True)
 
-def _check_pi_sandbox():
-    """Read-only diagnostic: on Ubuntu 24.04+ (and other distros with
-    AppArmor's unprivileged-userns restriction), Pi's bundled sandbox
-    helper needs a scoped AppArmor profile to create the user namespace
-    it sandboxes commands in -- without it, every Pi tool call fails
-    with a confusing 'No such file or directory' several layers deep
-    instead of the real cause. This never modifies anything or invokes
-    sudo itself (Athena's own process shouldn't self-escalate); it just
-    surfaces the real problem and the exact fix, computed fresh against
-    THIS machine's actual architecture and paths so it stays correct
-    wherever Athena is deployed, not just here. Prints a result either
-    way (not just on failure) so this is visibly confirmed working
-    rather than silently assumed."""
-    import platform
-
-    arch_map = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}
-    arch_dir = arch_map.get(platform.machine())
-    if not arch_dir:
-        print(f"[Athena] Pi sandbox check: skipped (unrecognized architecture {platform.machine()!r})", flush=True)
-        return
-
-    sandbox_root = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "pi-agent-config", "npm", "node_modules", "@carderne",
-        "sandbox-runtime", "vendor", "seccomp",
-    )
-    binary_path = os.path.join(sandbox_root, arch_dir, "apply-seccomp")
-    if not os.path.isfile(binary_path):
-        print("[Athena] Pi sandbox check: skipped (Pi's sandbox isn't set up on this machine)", flush=True)
-        return
-
-    try:
-        result = subprocess.run(
-            [binary_path, "true"], capture_output=True, text=True, timeout=5,
-        )
-    except Exception as e:
-        print(f"[Athena] WARNING: couldn't run Pi's sandbox helper to check it: {e}", flush=True)
-        return
-
-    if result.returncode == 0:
-        print("[Athena] Pi sandbox check: OK -- user namespace creation works, no fix needed.", flush=True)
-        return
-
-    stderr = (result.stderr or "").strip()
-    print("=" * 70, flush=True)
-    print("[Athena] WARNING: Pi's sandbox helper can't create its required", flush=True)
-    print("  user namespace on this system, so Pi tool calls will fail.", flush=True)
-    print(f"  Real error: {stderr}", flush=True)
-    if "userns" in stderr.lower() or "capability" in stderr.lower():
-        print("  This is Ubuntu 24.04+'s AppArmor unprivileged-userns", flush=True)
-        print("  restriction. Fix (requires sudo, run once):", flush=True)
-        print(flush=True)
-        profile_block = (
-            "    sudo tee /etc/apparmor.d/athena-apply-seccomp > /dev/null << 'EOF'\n"
-            "abi <abi/4.0>,\n"
-            "include <tunables/global>\n"
-            "\n"
-            "profile athena-apply-seccomp " + binary_path + " flags=(unconfined) {\n"
-            "  userns,\n"
-            "  include if exists <local/athena-apply-seccomp>\n"
-            "}\n"
-            "EOF\n"
-            "    sudo apparmor_parser -r /etc/apparmor.d/athena-apply-seccomp"
-        )
-        print(profile_block, flush=True)
-    else:
-        print("  Cause doesn't match the known AppArmor userns issue --", flush=True)
-        print("  the real error above will need its own investigation.", flush=True)
-    print("=" * 70, flush=True)
-
 if __name__ == "__main__":
     import uvicorn
     import threading
     _check_requirements()
-    _check_pi_sandbox()
     _start_bundled_lcm()
     threading.Thread(target=_memory_scan_loop, daemon=True).start()
+
+    from mcp_manager import mcp_manager
+    mcp_manager.start()
+    for server_cfg in _load_settings().get("mcp_servers", []):
+        try:
+            tools = mcp_manager.connect_server(server_cfg["name"], server_cfg["command"], server_cfg.get("args", []))
+            print(f"[Athena] Connected to MCP server '{server_cfg['name']}' -- {len(tools)} tools discovered", flush=True)
+        except Exception as e:
+            print(f"[Athena] Failed to connect to MCP server '{server_cfg['name']}': {e}", flush=True)
+
     port = int(os.environ.get("ATHENA_PORT", "9500"))
     uvicorn.run(app, host="0.0.0.0", port=port)
