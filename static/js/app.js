@@ -27,9 +27,26 @@ function athenaApp() {
         sessionId: localStorage.getItem("athena_session") || generateUUID(),
         sessions: [],
         sessionMenuOpen: null,
+        expandedForkSessions: {},
         messages: [],
         inputText: "",
         sending: false,
+        modelAliases: {},
+        renamingModelValue: null,
+        renameInputText: "",
+        notePreviewMode: false,
+        pinnedMenuOpen: false,
+        backgroundGenerating: false,
+        tasks: [],
+        taskCapabilities: {tools: [], default_enabled_tools: [], skills: []},
+        taskModalOpen: false,
+        taskDraft: null,
+        editingTaskId: null,
+        taskModalError: '',
+        deleteTaskConfirmId: null,
+        historyReady: true,
+        _streamBuffer: "",
+        _streamFlushTimer: null,
         currentAbortController: null,
         isRecording: false,
         mediaRecorder: null,
@@ -39,6 +56,8 @@ function athenaApp() {
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
+        modelProvider: "",
+        modelApiKey: "",
         endpoints: [],
         addEndpointOpen: false,
         newEndpointType: "local",
@@ -132,6 +151,9 @@ function athenaApp() {
         renameModalOpen: false,
         renameModalSessionId: null,
         renameModalValue: "",
+        forkModalOpen: false,
+        forkModalMessageIdx: null,
+        forkModalValue: "",
         systemStatsOpen: false,
         systemStats: null,
         systemStatsTimer: null,
@@ -183,6 +205,7 @@ function athenaApp() {
         },
 
         async loadSessionHistory(id) {
+            this.historyReady = false;
             try {
                 const resp = await fetch(`/api/history/${id}`);
                 const history = await resp.json();
@@ -193,6 +216,7 @@ function athenaApp() {
                     model: m.role === "assistant" ? (m.model || this.getStoredMsgModel(m.messageId)) : undefined,
                 }));
                 await this.loadRatingsForSession(id);
+                await this.loadPinsForSession(id);
                 this.forceScrollToBottom();
                 // Images referenced in message content load asynchronously
                 // AFTER Alpine's own nextTick settles, growing the layout
@@ -208,10 +232,169 @@ function athenaApp() {
                         }
                     });
                 });
+                // renderMarkdown() does its own Prism syntax highlighting
+                // and copy-button wiring inside its own separate nextTick,
+                // per message, independent of this one -- for a long
+                // history with many code blocks those can still be
+                // settling (and still shifting layout height) after the
+                // scroll above already ran. A couple of delayed re-scrolls
+                // catches that without needing to plumb a real completion
+                // signal out of renderMarkdown() itself. historyReady only
+                // flips to true after the LAST of these, once the final
+                // scroll position should actually be settled -- revealing
+                // it any earlier is what showed the top-then-fade-then-
+                // snap sequence, since the first scroll attempt is often
+                // still short at that point.
+                setTimeout(() => this.forceScrollToBottom(), 60);
+                setTimeout(() => {
+                    this.forceScrollToBottom();
+                    this.historyReady = true;
+                }, 180);
+                this.checkBackgroundGeneration(id);
             } catch (e) {
                 console.error("Failed to load session history:", e);
             }
         },
+        async checkBackgroundGeneration(sessionId) {
+            // A generation can keep running server-side after the tab
+            // that started it closed or navigated away -- this checks
+            // whether that's happening for the session now being
+            // viewed, shows a placeholder while it's still going, and
+            // reloads the real, completed message once it finishes.
+            // Re-polls on a timer rather than once, and bails out
+            // quietly if the user has since switched to a different
+            // session so it doesn't poll forever in the background.
+            try {
+                const resp = await fetch(`/api/chat/status/${sessionId}`);
+                const data = await resp.json();
+                if (this.sessionId !== sessionId) return; // navigated away since this check started
+                if (data.generating) {
+                    this.backgroundGenerating = true;
+                    setTimeout(() => this.checkBackgroundGeneration(sessionId), 2000);
+                } else {
+                    const wasGenerating = this.backgroundGenerating;
+                    this.backgroundGenerating = false;
+                    if (wasGenerating) {
+                        await this.loadSessionHistory(sessionId);
+                    }
+                }
+            } catch (e) {
+                this.backgroundGenerating = false;
+            }
+        },
+        async loadTasks() {
+            try {
+                const resp = await fetch('/api/tasks');
+                this.tasks = await resp.json();
+            } catch (e) {
+                console.error('Failed to load tasks:', e);
+            }
+        },
+        async loadTaskCapabilities() {
+            try {
+                const resp = await fetch('/api/tasks/capabilities');
+                this.taskCapabilities = await resp.json();
+            } catch (e) {
+                console.error('Failed to load task capabilities:', e);
+            }
+        },
+        openNewTaskModal() {
+            this.editingTaskId = null;
+            const defaults = this.taskCapabilities.default_enabled_tools || [];
+            this.taskDraft = {
+                prompt: '', session_id: null, session_label: 'New task session',
+                model: this.model || '', endpoint_url: this.modelEndpointUrl || '', workspace: '',
+                schedule_type: 'recurring', run_at: null,
+                recurrence: {frequency: 'daily', interval: 1, days_of_week: [], time_of_day: '09:00', end: {type: 'never'}},
+                enabled_tools: [...defaults], enabled_skills: [],
+            };
+            this.taskModalOpen = true;
+        },
+        openEditTaskModal(task) {
+            this.editingTaskId = task.id;
+            this.taskDraft = JSON.parse(JSON.stringify(task));
+            if (!this.taskDraft.recurrence) {
+                this.taskDraft.recurrence = {frequency: 'daily', interval: 1, days_of_week: [], time_of_day: '09:00', end: {type: 'never'}};
+            }
+            this.taskModalOpen = true;
+        },
+        async saveTaskDraft() {
+            this.taskModalError = '';
+            if (!this.taskDraft.prompt.trim()) { this.taskModalError = 'A task needs a prompt.'; return; }
+            const payload = {...this.taskDraft};
+            if (payload.schedule_type !== 'recurring') payload.recurrence = null;
+            try {
+                const url = this.editingTaskId ? `/api/tasks/${this.editingTaskId}` : '/api/tasks';
+                const method = this.editingTaskId ? 'PUT' : 'POST';
+                const resp = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+                const data = await resp.json();
+                if (data.error) { this.taskModalError = 'Failed to save: ' + data.error; return; }
+                this.taskModalOpen = false;
+                await this.loadTasks();
+            } catch (e) {
+                this.taskModalError = 'Failed to save: ' + e.message;
+            }
+        },
+        deleteTask(id) {
+            this.deleteTaskConfirmId = id;
+        },
+        async confirmDeleteTask() {
+            const id = this.deleteTaskConfirmId;
+            this.deleteTaskConfirmId = null;
+            try {
+                await fetch(`/api/tasks/${id}`, {method: 'DELETE'});
+                await this.loadTasks();
+            } catch (e) {
+                console.error('Failed to delete task:', e);
+            }
+        },
+        async toggleTaskStatus(task) {
+            const newStatus = task.status === 'paused' ? 'active' : 'paused';
+            try {
+                await fetch(`/api/tasks/${task.id}/status`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: newStatus})});
+                await this.loadTasks();
+            } catch (e) {
+                alert('Failed to update task: ' + e.message);
+            }
+        },
+        toggleTaskTool(name) {
+            const arr = this.taskDraft.enabled_tools;
+            const idx = arr.indexOf(name);
+            if (idx === -1) arr.push(name); else arr.splice(idx, 1);
+        },
+        toggleTaskSkill(name) {
+            const arr = this.taskDraft.enabled_skills;
+            const idx = arr.indexOf(name);
+            if (idx === -1) arr.push(name); else arr.splice(idx, 1);
+        },
+        toggleTaskDayOfWeek(day) {
+            const arr = this.taskDraft.recurrence.days_of_week;
+            const idx = arr.indexOf(day);
+            if (idx === -1) arr.push(day); else arr.splice(idx, 1);
+        },
+        isTaskComplete(task) {
+            return task.schedule_type === 'once' && !task.next_run_at && task.last_run_at;
+        },
+        formatTaskSchedule(task) {
+            if (task.schedule_type === 'once') {
+                if (!task.next_run_at && task.last_run_at) return 'One-time (completed)';
+                return task.run_at ? ('One-time: ' + new Date(task.run_at * 1000).toLocaleString()) : 'One-time';
+            }
+            const r = task.recurrence;
+            if (!r) return 'Recurring';
+            const interval = r.interval || 1;
+            const t = r.time_of_day || '';
+            if (r.frequency === 'weekly') {
+                const dayNames = {SU:'Sun',MO:'Mon',TU:'Tue',WE:'Wed',TH:'Thu',FR:'Fri',SA:'Sat'};
+                const days = (r.days_of_week || []).map(d => dayNames[d]).join(', ') || 'same day each week';
+                return (interval === 1 ? 'Every week' : `Every ${interval} weeks`) + ' on ' + days + ' at ' + t;
+            }
+            if (r.frequency === 'monthly') {
+                return (interval === 1 ? 'Every month' : `Every ${interval} months`) + ' at ' + t;
+            }
+            return (interval === 1 ? 'Every day' : `Every ${interval} days`) + ' at ' + t;
+        },
+
         getStoredMsgModel(id) {
             if (id === null || id === undefined) return undefined;
             try {
@@ -220,6 +403,36 @@ function athenaApp() {
             } catch (e) {
                 return undefined;
             }
+        },
+        getModelProviderIcon(modelName) {
+            // Maps a model's raw identifier to the Simple Icons slug
+            // (simpleicons.org, CDN at cdn.simpleicons.org/:slug) for
+            // the company/family that made it -- Qwen gets the Qwen
+            // logo, a nemotron model gets the NVIDIA logo, a llama
+            // model gets Meta's, etc., matching what Odysseus used to
+            // show. Matched by keyword against the model name itself
+            // since Ollama tags don't carry structured provider
+            // metadata. Order matters where names could overlap (e.g.
+            // check specific families before generic ones).
+            if (!modelName) return null;
+            const name = modelName.toLowerCase();
+            const patterns = [
+                [/qwen/, 'qwen'],
+                [/nemotron|nvidia/, 'nvidia'],
+                [/llama|meta-?llama/, 'meta'],
+                [/gemma|gemini/, 'google'],
+                [/mistral|mixtral|codestral|devstral/, 'mistralai'],
+                [/deepseek/, 'deepseek'],
+                [/phi-?\d|phi3|phi4/, 'microsoft'],
+                [/claude/, 'anthropic'],
+                [/gpt-|gpt\d|^o1|^o3|^o4/, 'openai'],
+                [/command-?r|cohere/, 'cohere'],
+                [/hermes|nous/, 'huggingface'],
+            ];
+            for (const [re, slug] of patterns) {
+                if (re.test(name)) return slug;
+            }
+            return null;
         },
         setStoredMsgModel(id, model) {
             if (id === null || id === undefined || !model) return;
@@ -256,7 +469,7 @@ function athenaApp() {
                     console.error("Failed to load sessions:", data.error);
                     return;
                 }
-                this.sessions = data.map(s => ({id: s.id, label: s.label, pinned: s.pinned, createdAt: s.created_at, lastActive: s.last_active}));
+                this.sessions = data.map(s => ({id: s.id, label: s.label, pinned: s.pinned, createdAt: s.created_at, lastActive: s.last_active, parentSessionId: s.parent_session_id}));
             } catch (e) {
                 console.error("Failed to load sessions:", e);
             }
@@ -300,11 +513,41 @@ function athenaApp() {
             const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
             const yesterday = today - 86400000;
             const query = this.sessionSearch.trim().toLowerCase();
-            const filtered = query
-                ? this.sessions.filter(s => (s.label || "").toLowerCase().includes(query))
-                : this.sessions;
             const activityTime = s => s.lastActive || s.createdAt || 0;
             const byRecent = (a, b) => activityTime(b) - activityTime(a);
+
+            // Forks are never shown as their own top-level entry -- they
+            // live only under their ancestor's expand arrow. childrenOf
+            // maps a session id to its direct forks; collectDescendants
+            // flattens the whole subtree (fork-of-a-fork included) into
+            // one list under the original ancestor's single arrow,
+            // rather than nesting an arrow inside an arrow.
+            const childrenOf = new Map();
+            for (const s of this.sessions) {
+                if (s.parentSessionId) {
+                    if (!childrenOf.has(s.parentSessionId)) childrenOf.set(s.parentSessionId, []);
+                    childrenOf.get(s.parentSessionId).push(s);
+                }
+            }
+            const collectDescendants = (id, seen) => {
+                seen = seen || new Set();
+                if (seen.has(id)) return [];
+                seen.add(id);
+                const direct = childrenOf.get(id) || [];
+                let all = direct.slice();
+                for (const child of direct) all = all.concat(collectDescendants(child.id, seen));
+                return all;
+            };
+
+            const topLevel = this.sessions.filter(s => !s.parentSessionId);
+            for (const s of topLevel) {
+                const descendants = collectDescendants(s.id);
+                s.forks = descendants.length ? descendants.sort(byRecent) : undefined;
+            }
+
+            const filtered = query
+                ? topLevel.filter(s => (s.label || "").toLowerCase().includes(query))
+                : topLevel;
             const pinned = filtered.filter(s => s.pinned).sort(byRecent);
             const rest = filtered.filter(s => !s.pinned);
             const groups = {Pinned: pinned, Today: [], Yesterday: [], Earlier: []};
@@ -322,6 +565,10 @@ function athenaApp() {
                 .map(([label, items]) => ({label, items}));
         },
 
+        toggleForkExpand(id) {
+            this.expandedForkSessions[id] = !this.expandedForkSessions[id];
+        },
+
         newChat() {
             this.sessionId = generateUUID();
             localStorage.setItem("athena_session", this.sessionId);
@@ -329,6 +576,13 @@ function athenaApp() {
         },
 
         async switchSession(id) {
+            // Hide the chat container before anything else changes --
+            // otherwise messages = [] renders below at full visibility
+            // for a moment before loadSessionHistory's own historyReady
+            // flip even runs, flashing the empty-state welcome screen
+            // in between the old chat and the new one.
+            this.historyReady = false;
+            this.backgroundGenerating = false;
             this.sessionId = id;
             localStorage.setItem("athena_session", id);
             this.messages = [];
@@ -383,16 +637,51 @@ function athenaApp() {
                 alert("Failed to delete message: " + e.message);
             }
         },
+        forkFromMessage(idx) {
+            const msg = this.messages[idx];
+            if (!msg || !msg.messageId) return;
+            this.forkModalMessageIdx = idx;
+            const current = this.sessions.find(s => s.id === this.sessionId);
+            this.forkModalValue = "Fork of " + (current ? current.label : "chat");
+            this.forkModalOpen = true;
+        },
+        async confirmFork() {
+            const idx = this.forkModalMessageIdx;
+            const msg = this.messages[idx];
+            this.forkModalOpen = false;
+            if (!msg || !msg.messageId) return;
+            const label = this.forkModalValue.trim() || "Forked chat";
+            try {
+                const resp = await fetch(`/api/sessions/${this.sessionId}/fork`, {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({message_id: msg.messageId, label: label}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Failed to fork: " + data.error);
+                    return;
+                }
+                await this.loadSessions();
+                await this.switchSession(data.session_id);
+            } catch (e) {
+                alert("Failed to fork: " + e.message);
+            }
+        },
         async confirmDelete() {
             const id = this.deleteConfirmSessionId;
             this.deleteConfirmSessionId = null;
-            this.sessions = this.sessions.filter(x => x.id !== id);
+            let deletedIds = [id];
             try {
-                await fetch(`/api/history/${id}`, {method: "DELETE"});
+                const resp = await fetch(`/api/history/${id}`, {method: "DELETE"});
+                const data = await resp.json();
+                if (Array.isArray(data.sessions_deleted)) deletedIds = data.sessions_deleted;
             } catch (e) {
                 console.error("Failed to delete session from LCM:", e);
             }
-            if (id === this.sessionId) this.newChat();
+            const deletedSet = new Set(deletedIds);
+            this.sessions = this.sessions.filter(x => !deletedSet.has(x.id));
+            if (deletedSet.has(this.sessionId)) this.newChat();
         },
         toggleSystemStats() {
             this.systemStatsOpen = !this.systemStatsOpen;
@@ -417,6 +706,8 @@ function athenaApp() {
             this.model = m.value;
             this.modelLabel = m.label;
             this.modelEndpointUrl = m.endpointUrl || "";
+            this.modelProvider = m.provider || "";
+            this.modelApiKey = m.apiKey || "";
             this.modelPopupOpen = false;
         },
 
@@ -705,6 +996,7 @@ function athenaApp() {
                 const data = await resp.json();
                 if (data.workspace !== undefined) this.workspace = data.workspace;
                 if (data.endpoints !== undefined) this.endpoints = data.endpoints;
+                if (data.model_aliases !== undefined) this.modelAliases = data.model_aliases;
                 if (data.search_url !== undefined) this.searchUrl = data.search_url;
                 if (data.default_model !== undefined) this.defaultModel = data.default_model;
                 if (data.theme) {
@@ -730,6 +1022,17 @@ function athenaApp() {
             const reconstructSoft = (val) => {
                 if (!val) return '#8b5cf6';
                 if (val.startsWith('#')) return val;
+                // Dark mode's accentSoft is saved as rgba(...) (see
+                // _hexToRgbaFaded at apply time), not hsla(...) -- this
+                // branch was missing entirely, so reopening the editor
+                // always fell through to the hardcoded default below,
+                // silently discarding whatever the user had actually
+                // picked for dark mode specifically.
+                const rgbMatch = val.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+                if (rgbMatch) {
+                    const toHex = (n) => parseInt(n, 10).toString(16).padStart(2, '0');
+                    return `#${toHex(rgbMatch[1])}${toHex(rgbMatch[2])}${toHex(rgbMatch[3])}`;
+                }
                 const m = val.match(/hsla?\(([\d.]+)/);
                 if (m) return this._hslToHex(parseFloat(m[1]), 70, 60);
                 return '#8b5cf6';
@@ -741,14 +1044,19 @@ function athenaApp() {
                         accentSoft: reconstructSoft(t.light.accentSoft), accentText: t.light.accentText,
                         accentTextStrong: t.light.accentTextStrong, accentBorder: t.light.accentBorder,
                         accentBorderFocus: t.light.accentBorderFocus, wordmark: t.light.wordmark,
-                        logoColor: reconstructLogo(t.light.logoHue),
+                        // Read the actual saved logoColor directly, same
+                        // as every other field here -- reconstructLogo(hue)
+                        // was the old hue-rotation-era approximation and
+                        // is now stale/wrong, only kept as a fallback for
+                        // themes saved before logoColor existed at all.
+                        logoColor: t.light.logoColor || reconstructLogo(t.light.logoHue),
                     },
                     dark: {
                         accent: t.dark.accent || t.light.accent, accentHover: t.dark.accentHover || t.light.accentHover,
                         accentIcon: t.dark.accentIcon || t.light.accentIcon, accentSoft: reconstructSoft(t.dark.accentSoft),
                         accentText: t.dark.accentText, accentTextStrong: t.dark.accentTextStrong,
                         accentBorder: t.dark.accentBorder, accentBorderFocus: t.dark.accentBorderFocus,
-                        wordmark: t.dark.wordmark, logoColor: reconstructLogo(t.dark.logoHue),
+                        wordmark: t.dark.wordmark, logoColor: t.dark.logoColor || reconstructLogo(t.dark.logoHue),
                     },
                 };
             }
@@ -763,7 +1071,8 @@ function athenaApp() {
                     accent: draft.accent, accentHover: draft.accentHover, accentIcon: draft.accentIcon,
                     accentText: draft.accentText, accentTextStrong: draft.accentTextStrong,
                     accentBorder: draft.accentBorder, accentBorderFocus: draft.accentBorderFocus,
-                    wordmark: draft.wordmark, logoHue: logoHue, accentSoft: draft.accentSoft,
+                    wordmark: draft.wordmark, logoHue: logoHue, logoColor: draft.logoColor,
+                    accentSoft: draft.accentSoft,
                 };
             };
             const light = buildMode(this.themeDraft.light);
@@ -1116,6 +1425,7 @@ function athenaApp() {
                 accentBorderFocus: this._hslToHex(h, s, 70),
                 wordmark: this._hslToHex(h, Math.min(s + 10, 80), 55),
                 logoHue: logoHue,
+                logoColor: this._hslToHex(h, Math.min(s, 50), 28),
             };
             const dark = {
                 accentSoft: `hsla(${h.toFixed(0)}, ${s.toFixed(0)}%, 60%, 0.1)`,
@@ -1125,6 +1435,7 @@ function athenaApp() {
                 accentBorderFocus: this._hslToHex(h, s, 50),
                 wordmark: this._hslToHex(h, Math.min(s + 10, 80), 65),
                 logoHue: logoHue,
+                logoColor: this._hslToHex(h, Math.min(s, 50), 28),
             };
             return {light, dark, seedColor: seedHex};
         },
@@ -1145,6 +1456,13 @@ function athenaApp() {
                 if (!colors) return '';
                 return Object.entries(colors).map(([key, val]) => {
                     if (key === 'logoHue') return `--athena-logo-hue: ${val}deg;`;
+                    if (key === 'logoColor') {
+                        const hsl = this._hexToHsl(val);
+                        const shade2 = this._hslToHex(hsl.h, hsl.s, hsl.l + 8.6);
+                        const shade3 = this._hslToHex(hsl.h, hsl.s, hsl.l + 12.9);
+                        const shade4 = this._hslToHex(hsl.h, hsl.s, hsl.l + 2.4);
+                        return `--athena-logo-color: ${val}; --athena-logo-shade2: ${shade2}; --athena-logo-shade3: ${shade3}; --athena-logo-shade4: ${shade4};`;
+                    }
                     const varName = CSS_VAR_MAP[key];
                     return varName ? `${varName}: ${val};` : '';
                 }).join(' ');
@@ -1187,12 +1505,35 @@ function athenaApp() {
         allAvailableModels() {
             const list = [];
             for (const ep of this.endpoints) {
-                if (ep.type !== "local") continue;
                 for (const m of (ep.enabledModels || [])) {
-                    list.push({value: m, label: `${m} (${ep.name})`, endpointUrl: ep.url});
+                    const displayName = this.modelAliases[m] || m;
+                    const entry = {value: m, label: `${displayName} (${ep.name})`, endpointUrl: ep.url};
+                    if (ep.type === "online") {
+                        entry.provider = ep.provider;
+                        entry.apiKey = ep.apiKey;
+                    }
+                    list.push(entry);
                 }
             }
             return list;
+        },
+        startRenameModel(m, event) {
+            event.stopPropagation();
+            this.renamingModelValue = m.value;
+            this.renameInputText = this.modelAliases[m.value] || m.value;
+        },
+        saveModelRename() {
+            const trimmed = this.renameInputText.trim();
+            if (trimmed && trimmed !== this.renamingModelValue) {
+                this.modelAliases[this.renamingModelValue] = trimmed;
+            } else {
+                delete this.modelAliases[this.renamingModelValue];
+            }
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({model_aliases: this.modelAliases})}).catch(e => console.error("Failed to save model alias:", e));
+            this.renamingModelValue = null;
+        },
+        cancelRenameModel() {
+            this.renamingModelValue = null;
         },
 
         saveEndpoints() {
@@ -1205,8 +1546,9 @@ function athenaApp() {
                 name: this.newEndpointName || (this.newEndpointType === "local" ? "Local Endpoint" : "Online Provider"),
                 type: this.newEndpointType,
                 url: this.newEndpointUrl,
-                provider: this.newEndpointProvider,
-                apiKey: this.newEndpointApiKey,
+                provider: this.newEndpointType === "local" ? "" : this.newEndpointProvider,
+                apiKey: this.newEndpointType === "local" ? "" : this.newEndpointApiKey,
+                modelNames: this.newEndpointModelNames || "",
                 detectedModels: [],
                 enabledModels: [],
                 detecting: false,
@@ -1218,6 +1560,7 @@ function athenaApp() {
             this.newEndpointName = "";
             this.newEndpointUrl = "";
             this.newEndpointApiKey = "";
+            this.newEndpointModelNames = "";
         },
 
         deleteEndpoint(id) {
@@ -1235,7 +1578,7 @@ function athenaApp() {
                 const resp = await fetch("/api/detect-models", {
                     method: "POST",
                     headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({url: ep.url}),
+                    body: JSON.stringify({url: ep.url, type: ep.type || "", provider: ep.provider || "", api_key: ep.apiKey || ""}),
                 });
                 const data = await resp.json();
                 if (data.error) {
@@ -1253,6 +1596,29 @@ function athenaApp() {
                 ep.detecting = false;
                 this.saveEndpoints();
             }
+        },
+        filteredEndpointModels(ep) {
+            const list = ep.detectedModels || [];
+            const q = (ep.modelFilter || "").trim().toLowerCase();
+            if (!q) return list;
+            return list.filter(m => m.toLowerCase().includes(q));
+        },
+        selectAllFilteredModels(ep) {
+            // Operates on whatever's currently visible (respects an
+            // active search filter) rather than the endpoint's full
+            // detected list, so "search free, then select all" only
+            // selects the free ones, without touching any other
+            // already-enabled models outside that filter.
+            const visible = this.filteredEndpointModels(ep);
+            const enabledSet = new Set(ep.enabledModels || []);
+            for (const m of visible) enabledSet.add(m);
+            ep.enabledModels = [...enabledSet];
+            this.saveEndpoints();
+        },
+        deselectAllFilteredModels(ep) {
+            const visibleSet = new Set(this.filteredEndpointModels(ep));
+            ep.enabledModels = (ep.enabledModels || []).filter(m => !visibleSet.has(m));
+            this.saveEndpoints();
         },
 
         toggleModelEnabled(endpointId, modelName) {
@@ -1293,7 +1659,15 @@ function athenaApp() {
                         btn.textContent = "Copied!";
                         setTimeout(() => btn.textContent = "Copy", 1500);
                     };
-                    pre.appendChild(btn);
+                    const wrapper = document.createElement("div");
+        wrapper.className = "pre-copy-wrap";
+        wrapper.style.position = "relative";
+        pre.parentElement.replaceChild(wrapper, pre);
+        wrapper.appendChild(pre);
+        btn.style.position = "absolute";
+        btn.style.top = "8px";
+        btn.style.right = "8px";
+        wrapper.appendChild(btn);
                 });
             });
             return html;
@@ -1303,13 +1677,32 @@ function athenaApp() {
             e.target.style.height = "auto";
             e.target.style.height = e.target.scrollHeight + "px";
         },
+        handleComposerEnter(e) {
+            // Matches the app's own md: breakpoint (768px) used
+            // everywhere else for mobile vs desktop layout, rather than
+            // touch-detection, which is unreliable on hybrid devices.
+            const isMobile = window.innerWidth < 768;
+            if (isMobile || e.shiftKey) {
+                return; // let Enter (or Shift+Enter on desktop) insert a newline naturally
+            }
+            e.preventDefault();
+            this.send();
+        },
 
         _scrollThinkingToBottom() {
             this.$nextTick(() => {
                 const boxes = document.querySelectorAll('.thinking-scroll-target');
                 if (boxes.length) {
                     const last = boxes[boxes.length - 1];
-                    last.scrollTop = last.scrollHeight;
+                    // Same guard as scrollToBottom() -- unconditionally
+                    // forcing this on every thinking chunk made it
+                    // impossible to scroll up and read earlier thinking
+                    // content, since it snapped back down on the very
+                    // next chunk.
+                    const distanceFromBottom = last.scrollHeight - last.scrollTop - last.clientHeight;
+                    if (distanceFromBottom < 100) {
+                        last.scrollTop = last.scrollHeight;
+                    }
                 }
             });
         },
@@ -1381,6 +1774,8 @@ function athenaApp() {
                         search_url: this.searchUrl,
                         images: imagesToSend,
                         attachments: attachmentsToSend,
+                        provider: this.modelProvider,
+                        api_key: this.modelApiKey,
                     }),
                 });
 
@@ -1408,9 +1803,16 @@ function athenaApp() {
                             this._scrollThinkingToBottom();
                         }
                         if (data.delta) {
-                            this.messages[msgIndex].content += data.delta;
                             this.messages[msgIndex].thinkingOpen = false;
-                            this.scrollToBottom();
+                            this._streamBuffer += data.delta;
+                            if (!this._streamFlushTimer) {
+                                this._streamFlushTimer = setTimeout(() => {
+                                    this.messages[msgIndex].content += this._streamBuffer;
+                                    this._streamBuffer = "";
+                                    this._streamFlushTimer = null;
+                                    this.scrollToBottom();
+                                }, 80);
+                            }
                         }
                         if (data.type === "tool_start") {
                             this.messages[msgIndex].toolCalls.push({tool: data.tool, status: "running", output: null, open: true});
@@ -1426,6 +1828,14 @@ function athenaApp() {
                             this.scrollToBottom();
                         }
                         if (data.done) {
+                            if (this._streamFlushTimer) {
+                                clearTimeout(this._streamFlushTimer);
+                                this._streamFlushTimer = null;
+                            }
+                            if (this._streamBuffer) {
+                                this.messages[msgIndex].content += this._streamBuffer;
+                                this._streamBuffer = "";
+                            }
                             this.messages[msgIndex].ctxUsed = data.ctx_used;
                             this.messages[msgIndex].promptTokens = data.prompt_tokens;
                             this.messages[msgIndex].tokensPerSec = data.tokens_per_sec;
@@ -1650,6 +2060,65 @@ function athenaApp() {
             }
         },
 
+        async pinMessage(msgIndex, event) {
+            if (event) event.stopPropagation();
+            const msg = this.messages[msgIndex];
+            if (!msg.messageId) {
+                alert("Can't pin this message yet -- it hasn't finished saving.");
+                return;
+            }
+            const newPinned = !msg.pinned;
+            const previousPinned = msg.pinned;
+            msg.pinned = newPinned; // update immediately, revert on failure
+            try {
+                const resp = await fetch("/api/pin", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        message_id: msg.messageId,
+                        session_id: this.sessionId,
+                        content: msg.content,
+                        pinned: newPinned,
+                    }),
+                });
+                if (!resp.ok) throw new Error("Request failed");
+            } catch (e) {
+                msg.pinned = previousPinned; // real failure -- don't show a pin that didn't actually save
+                alert("Couldn't save pin: " + e.message);
+            }
+        },
+        async loadPinsForSession(sessionId) {
+            // Re-applies which messages show the pin toggle as active
+            // after a reload -- pins live server-side (a content
+            // snapshot, not a reference), separate fetch same as ratings.
+            try {
+                const resp = await fetch(`/api/pins/${sessionId}`);
+                const pins = await resp.json();
+                for (const msg of this.messages) {
+                    if (msg.messageId && pins[msg.messageId]) {
+                        msg.pinned = true;
+                    }
+                }
+            } catch (e) {
+                // Non-critical -- pins just won't show as pre-selected.
+            }
+        },
+        pinnedMessages() {
+            return this.messages
+                .map((msg, idx) => ({msg, idx}))
+                .filter(m => m.msg.pinned);
+        },
+        scrollToPinnedMessage(idx) {
+            this.pinnedMenuOpen = false;
+            this.$nextTick(() => {
+                const el = document.getElementById('msg-' + idx);
+                if (!el) return;
+                el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                el.classList.add('pinned-jump-highlight');
+                setTimeout(() => el.classList.remove('pinned-jump-highlight'), 1200);
+            });
+        },
+
         async playTTS(text, event) {
             const msg = this.messages.find(m => m.content === text);
             if (msg) msg.ttsLabel = "Loading...";
@@ -1737,7 +2206,96 @@ function athenaApp() {
             }
         },
         saveNotes() {
+            const note = this.activeNote();
+            if (note) note.updatedAt = Date.now();
             this.saveNotesToStorage();
+        },
+        noteWordCount() {
+            const note = this.activeNote();
+            if (!note || !note.body) return 0;
+            return note.body.trim().split(/\s+/).filter(Boolean).length;
+        },
+        notePreviewText(note) {
+            if (!note || !note.body) return "";
+            return note.body.replace(/\s+/g, " ").trim().slice(0, 80);
+        },
+        insertNoteFormat(prefix, suffix, blockPrefix) {
+            const ta = this.$refs.noteBody;
+            const note = this.activeNote();
+            if (!ta || !note) return;
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const body = note.body || "";
+            let insertion, newStart, newEnd;
+            if (blockPrefix) {
+                // Apply to every line touched by the selection, not just
+                // the line the selection starts on -- a real list/heading
+                // toggle has to persist across each selected line, and a
+                // single stray prefix on one line surrounded by plain text
+                // is also why it wasn't rendering as a real list in preview.
+                const blockStart = body.lastIndexOf("\n", start - 1) + 1;
+                let blockEnd = body.indexOf("\n", end);
+                if (blockEnd === -1) blockEnd = body.length;
+                const block = body.slice(blockStart, blockEnd);
+                const lines = block.split("\n");
+                const isOrdered = /^\d/.test(blockPrefix);
+                const newLines = lines.map((line, i) => isOrdered ? `${i + 1}. ${line}` : `${blockPrefix}${line}`);
+                const newBlock = newLines.join("\n");
+                insertion = body.slice(0, blockStart) + newBlock + body.slice(blockEnd);
+                newStart = start + (isOrdered ? 3 : blockPrefix.length);
+                newEnd = end + (newBlock.length - block.length);
+            } else {
+                const selected = body.slice(start, end);
+                insertion = body.slice(0, start) + prefix + selected + suffix + body.slice(end);
+                newStart = start + prefix.length;
+                newEnd = newStart + selected.length;
+            }
+            note.body = insertion;
+            this.saveNotes();
+            this.$nextTick(() => {
+                ta.focus();
+                ta.setSelectionRange(newStart, newEnd);
+            });
+        },
+
+        handleNoteListContinue(e) {
+            // Enter inside a list line should continue the list (next
+            // number, same bullet) or, on an empty item, exit it --
+            // without this, typing a second line after starting a list
+            // never gets its own marker, and CommonMark's lazy-
+            // continuation rule then silently folds that unmarked line
+            // into the previous list item's own text instead of
+            // starting a new one.
+            const ta = this.$refs.noteBody;
+            const note = this.activeNote();
+            if (!ta || !note) return;
+            const pos = ta.selectionStart;
+            const body = note.body || "";
+            const lineStart = body.lastIndexOf("\n", pos - 1) + 1;
+            const beforeCursor = body.slice(lineStart, pos);
+            const m = beforeCursor.match(/^(\s*)([-*]|\d+\.)\s(.*)$/);
+            if (!m) return; // not on a list line -- let Enter behave normally
+            e.preventDefault();
+            const [, indent, marker, content] = m;
+            if (content.trim() === "") {
+                note.body = body.slice(0, lineStart) + body.slice(pos);
+                this.saveNotes();
+                this.$nextTick(() => {
+                    ta.focus();
+                    ta.setSelectionRange(lineStart, lineStart);
+                });
+                return;
+            }
+            const isOrdered = /^\d+\.$/.test(marker);
+            const nextMarker = isOrdered ? `${parseInt(marker, 10) + 1}. ` : `${marker} `;
+            const insertion = "\n" + indent + nextMarker;
+            note.body = body.slice(0, pos) + insertion + body.slice(pos);
+            const newPos = pos + insertion.length;
+            this.saveNotes();
+            this.$nextTick(() => {
+                ta.focus();
+                ta.setSelectionRange(newPos, newPos);
+            });
         },
         newNote() {
             const note = {id: generateUUID(), title: "", body: "", createdAt: Date.now()};

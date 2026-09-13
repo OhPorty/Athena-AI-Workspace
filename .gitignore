@@ -8,3 +8,9 @@ lcm/lcm.db
 mcp_uis/
 athena_notes.json
 skills/
+pins.db
+ratings.db
+file_backups/
+bots.db
+rag_index.db
+tasks.db

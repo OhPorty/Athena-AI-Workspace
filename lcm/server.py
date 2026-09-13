@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -94,15 +95,36 @@ def delete_session(session_id: str):
     row for this session -- the actual data-deletion counterpart to a
     UI 'delete chat' action, not just hiding it from a list. Also
     cleans up the sessions metadata table so a deleted chat doesn't
-    linger as a stale entry in another device's session list."""
+    linger as a stale entry in another device's session list.
+
+    Cascades to every fork descended from this session (fork-of-a-fork
+    included) -- deleting a session deletes its whole connected tree,
+    not just the one row, since a fork only exists in relation to the
+    session it branched from."""
     conn = lcm._conn()
-    msg_count = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
-    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-    conn.execute("DELETE FROM nodes WHERE session_id = ?", (session_id,))
-    conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+    all_rows = conn.execute("SELECT id, parent_session_id FROM sessions").fetchall()
+    children_of = {}
+    for sid, parent_id in all_rows:
+        if parent_id:
+            children_of.setdefault(parent_id, []).append(sid)
+
+    to_delete = [session_id]
+    frontier = [session_id]
+    while frontier:
+        current = frontier.pop()
+        for child_id in children_of.get(current, []):
+            to_delete.append(child_id)
+            frontier.append(child_id)
+
+    placeholders = ",".join("?" * len(to_delete))
+    msg_count = conn.execute(f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})", to_delete).fetchone()[0]
+    conn.execute(f"DELETE FROM messages WHERE session_id IN ({placeholders})", to_delete)
+    conn.execute(f"DELETE FROM nodes WHERE session_id IN ({placeholders})", to_delete)
+    conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", to_delete)
     conn.commit()
     conn.close()
-    return {"session_id": session_id, "messages_deleted": msg_count}
+    return {"session_id": session_id, "sessions_deleted": to_delete, "messages_deleted": msg_count}
 
 class SessionMetaIn(BaseModel):
     id: str
@@ -118,9 +140,9 @@ def list_sessions():
     device sees the same sessions regardless of which one created
     them."""
     conn = lcm._conn()
-    rows = conn.execute("SELECT id, label, pinned, created_at, last_active FROM sessions").fetchall()
+    rows = conn.execute("SELECT id, label, pinned, created_at, last_active, parent_session_id FROM sessions").fetchall()
     conn.close()
-    return [{"id": r[0], "label": r[1], "pinned": bool(r[2]), "created_at": r[3], "last_active": r[4]} for r in rows]
+    return [{"id": r[0], "label": r[1], "pinned": bool(r[2]), "created_at": r[3], "last_active": r[4], "parent_session_id": r[5]} for r in rows]
 
 @app.post("/sessions")
 def upsert_session(req: SessionMetaIn):
@@ -135,6 +157,120 @@ def upsert_session(req: SessionMetaIn):
     conn.commit()
     conn.close()
     return {"id": req.id}
+
+
+class ForkSessionIn(BaseModel):
+    message_id: int
+    label: str
+
+
+@app.post("/sessions/{session_id}/fork")
+def fork_session(session_id: str, req: ForkSessionIn):
+    """Create a new, independent session containing a copy of every
+    message in session_id up to and including message_id, plus any
+    summary nodes that are entirely eligible (see below) -- letting
+    the caller rewind to a specific point in a conversation and
+    continue down a different path from there, without touching or
+    losing the original session.
+
+    A summary node is only copied if EVERY message and sub-node it
+    covers falls at-or-before the fork point -- a node straddling the
+    cutoff (summarizing messages both before and after it) can't be
+    copied as-is into a session that doesn't contain its later half.
+    Any message whose original covering node is excluded for this
+    reason is copied as a plain, uncovered message instead: it becomes
+    visible in the forked session rather than stying folded into a
+    summary, which is correct (not a bug) -- the fork may show
+    slightly more raw detail early on than the original session did
+    at that exact moment.
+    """
+    conn = lcm._conn()
+    cutoff = req.message_id
+
+    messages = conn.execute(
+        "SELECT id, role, content, created_at, covered_by_node, service, model, has_image "
+        "FROM messages WHERE session_id = ? AND id <= ? ORDER BY id",
+        (session_id, cutoff)
+    ).fetchall()
+    if not messages:
+        conn.close()
+        return {"error": "No messages found at or before that point."}
+
+    all_nodes = conn.execute(
+        "SELECT id, summary_text, level, covers_message_ids, covers_node_ids, covered_by_node, created_at "
+        "FROM nodes WHERE session_id = ?",
+        (session_id,)
+    ).fetchall()
+    nodes_by_id = {n[0]: n for n in all_nodes}
+
+    eligibility_cache = {}
+
+    def node_eligible(node_id):
+        if node_id in eligibility_cache:
+            return eligibility_cache[node_id]
+        node = nodes_by_id.get(node_id)
+        if node is None:
+            eligibility_cache[node_id] = False
+            return False
+        _, _, _, covers_msg_json, covers_node_json, _, _ = node
+        covers_msg_ids = json.loads(covers_msg_json) if covers_msg_json else []
+        covers_node_ids = json.loads(covers_node_json) if covers_node_json else []
+        if any(mid > cutoff for mid in covers_msg_ids):
+            eligibility_cache[node_id] = False
+            return False
+        if not all(node_eligible(nid) for nid in covers_node_ids):
+            eligibility_cache[node_id] = False
+            return False
+        eligibility_cache[node_id] = True
+        return True
+
+    eligible_node_ids = sorted(nid for nid in nodes_by_id if node_eligible(nid))
+
+    new_session_id = str(uuid.uuid4())
+    now = time.time() * 1000
+    conn.execute(
+        "INSERT INTO sessions (id, label, pinned, created_at, last_active, parent_session_id) VALUES (?, ?, 0, ?, ?, ?)",
+        (new_session_id, req.label, now, now, session_id)
+    )
+
+    msg_id_map = {}
+    for (old_id, role, content, created_at, covered_by_node, service, model, has_image) in messages:
+        cur = conn.execute(
+            "INSERT INTO messages (session_id, role, content, created_at, covered_by_node, service, model, has_image) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_session_id, role, content, created_at, None, service, model, has_image)
+        )
+        msg_id_map[old_id] = cur.lastrowid
+
+    node_id_map = {}
+    for old_id in eligible_node_ids:
+        _, summary_text, level, covers_msg_json, covers_node_json, _, created_at = nodes_by_id[old_id]
+        covers_msg_ids = json.loads(covers_msg_json) if covers_msg_json else []
+        covers_node_ids = json.loads(covers_node_json) if covers_node_json else []
+        new_covers_msg_ids = [msg_id_map[m] for m in covers_msg_ids if m in msg_id_map]
+        new_covers_node_ids = [node_id_map[n] for n in covers_node_ids if n in node_id_map]
+        cur = conn.execute(
+            "INSERT INTO nodes (session_id, summary_text, level, covers_message_ids, covers_node_ids, covered_by_node, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_session_id, summary_text, level, json.dumps(new_covers_msg_ids),
+             json.dumps(new_covers_node_ids) if new_covers_node_ids else None, None, created_at)
+        )
+        node_id_map[old_id] = cur.lastrowid
+
+    for old_id, new_id in msg_id_map.items():
+        orig_covered_by = next(m[4] for m in messages if m[0] == old_id)
+        if orig_covered_by is not None and orig_covered_by in node_id_map:
+            conn.execute("UPDATE messages SET covered_by_node = ? WHERE id = ?", (node_id_map[orig_covered_by], new_id))
+
+    for old_id, new_id in node_id_map.items():
+        orig_covered_by = nodes_by_id[old_id][5]
+        if orig_covered_by is not None and orig_covered_by in node_id_map:
+            conn.execute("UPDATE nodes SET covered_by_node = ? WHERE id = ?", (node_id_map[orig_covered_by], new_id))
+
+    conn.commit()
+    conn.close()
+    return {"session_id": new_session_id, "messages_copied": len(msg_id_map), "nodes_copied": len(node_id_map)}
+
 
 @app.post("/summarize")
 def summarize(req: SummarizeIn):

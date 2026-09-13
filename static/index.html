@@ -7,9 +7,9 @@
     <title>Athena</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <script src="https://cdn.tailwindcss.com/3.4.16"></script>
-    <script>tailwind.config = { darkMode: 'class' };</script>
+    <script>tailwind.config = { darkMode: 'class', theme: { extend: { fontFamily: { mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'] }, colors: { neutral: { 50: '#ececed' } } } } };</script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Alex+Brush&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Alex+Brush&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <script src="/static/js/vendor/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -22,22 +22,22 @@
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body x-data="athenaApp()" x-init="init()" :class="theme === 'dark' ? 'dark' : ''" class="h-dvh w-screen overflow-hidden font-[Inter] antialiased">
-<div class="flex h-full w-full bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">
+<div class="flex h-full w-full app-canvas text-neutral-900 dark:text-neutral-100">
 
     <!-- ICON RAIL -->
     <div x-show="mobileNavOpen" x-cloak @click="mobileNavOpen = false" class="fixed inset-0 bg-black/40 z-30 md:hidden"></div>
     <button x-show="!mobileNavOpen" x-cloak @click="mobileNavOpen = true" title="Menu" class="md:hidden fixed top-2 left-3 z-20 flex items-center justify-center h-10 w-10 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400 shadow-md border border-neutral-200 dark:border-neutral-700">
         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <nav class="fixed md:static inset-y-0 left-0 z-40 w-16 shrink-0 flex flex-col items-center py-4 gap-1 border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 transition-transform duration-200 md:translate-x-0 overflow-y-auto" :class="mobileNavOpen ? 'translate-x-0' : '-translate-x-full'">
+    <nav class="fixed md:static inset-y-0 left-0 z-40 w-16 shrink-0 flex flex-col items-center py-4 gap-1 border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 surface transition-transform duration-200 md:translate-x-0 overflow-y-auto" :class="mobileNavOpen ? 'translate-x-0' : '-translate-x-full'">
         <button @click="currentPage = 'chat'; newChat(); mobileNavOpen = false" title="Home" class="h-8 w-8 rounded-lg overflow-hidden mb-4 hover:opacity-80 transition">
-            <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain" style="filter: hue-rotate(var(--athena-logo-hue, 0deg))">
+            <svg viewBox="0 0 1000 1000" class="h-full w-full object-contain"><path d="M498.89 57.53C500.59 59.35 500.02 61.96 500.02 64.38C500.02 69.86 500.02 75.34 500.02 80.82C500.02 102.74 500.02 124.66 500.02 146.58C500.02 203.81 500.02 261.04 500.02 318.26C500.02 337.44 500.02 356.62 500.02 375.8C500.02 385.98 499.57 396.29 500.17 406.46C500.27 433.88 500.38 461.3 500.49 488.72C498.72 494.43 499.99 513.02 499.99 520.09C499.99 542.92 499.99 565.75 499.99 588.58C499.99 670.17 499.99 751.75 499.99 833.33C499.99 858.3 499.99 883.26 499.99 908.22C499.99 917.08 501.45 936.86 499.27 944.37C496.6 941.68 493.94 938.98 491.27 936.29C491.54 936.06 491.8 935.84 492.07 935.62C489.84 933.39 487.62 931.16 485.39 928.93C485.16 929.2 484.94 929.47 484.72 929.73C483.56 928.57 482.39 927.4 481.23 926.23C481.46 926.01 481.69 925.79 481.92 925.57C479.42 923.07 476.93 920.58 474.43 918.08C474.21 918.31 473.99 918.54 473.77 918.77C472.6 917.61 471.43 916.44 470.27 915.28C470.53 915.06 470.8 914.84 471.07 914.61C468.84 912.38 466.61 910.16 464.38 907.93C464.16 908.2 463.94 908.46 463.71 908.73C462.55 907.56 461.39 906.4 460.23 905.23C460.46 905.01 460.69 904.79 460.92 904.57C458.42 902.07 455.92 899.57 453.42 897.07C453.2 897.3 452.98 897.53 452.76 897.76C446.23 893.08 435.97 893.45 428.08 891.85C414.06 889 400.12 885.11 386.52 880.66C352.82 869.62 321.01 852.97 292.04 832.6C280.63 824.58 266.86 815.07 257.6 804.68C257.96 804.49 258.32 804.3 258.67 804.11C257.53 803.1 256.39 802.09 255.25 801.08C255.05 801.33 254.84 801.58 254.64 801.84C247.79 796.9 241.84 789.72 236.1 783.54C221.54 767.88 208.74 750.94 197.09 733.04C134.47 636.85 122.14 510.17 166.05 403.99C178.5 373.91 194.15 345.36 214.1 319.55C218.89 313.34 230.61 297.06 236.62 293.49C239.61 290.79 242.59 288.09 245.57 285.39C245.3 285.18 245.02 284.97 244.74 284.76C246.77 282.82 248.81 280.88 250.84 278.93C253.73 278.14 256.09 275.73 257.01 273.17C260.18 268.44 266.09 264.54 270.54 260.93C279.34 253.8 288.22 246.87 297.61 240.53C329.89 218.72 365.7 201.34 403.36 191.16C415.09 187.99 427.11 185.05 439.11 183.08C446.54 181.85 454.43 181.64 461.64 179.52C474.06 138.86 486.47 98.2 498.89 57.53ZM538.81 179.92C588.31 185.37 637.33 200.7 680.39 226C689.16 231.16 697.65 236.65 706.06 242.37C710.59 245.44 716.32 248.66 719.78 252.85C720.8 254.05 721.81 255.25 722.83 256.46C723.07 256.17 723.32 255.88 723.56 255.6C730.57 261.64 737.58 267.69 744.59 273.74C745.32 276.14 747.3 277.36 749.32 279.04C749.53 278.87 749.74 278.7 749.95 278.53C756.69 283.49 770.99 298.63 775.44 305.68C775.24 305.92 775.04 306.15 774.84 306.39C776.27 307.7 777.7 309.02 779.13 310.33C781.56 313.34 783.99 316.35 786.42 319.36C786.13 319.6 785.84 319.85 785.55 320.09C786.75 321.11 787.95 322.13 789.15 323.14C795.2 328.34 799.4 337.05 803.75 343.72C816.2 362.83 826.06 382.97 834.9 403.95C869.93 487 870.03 589.79 835 672.85C826.17 693.79 816.42 714.07 803.87 733.08C799.64 739.49 795.78 747.52 790.06 752.68C787.78 753.72 787.03 754.9 786.53 757.3C780.4 764.81 774.27 772.32 768.14 779.82C767.95 779.58 767.77 779.33 767.58 779.08C765.69 781.03 763.8 782.98 761.91 784.93C762.15 785.16 762.39 785.39 762.63 785.62C756.88 791.33 751.12 797.04 745.37 802.75C745.16 802.47 744.95 802.19 744.75 801.91C743.6 802.95 742.45 803.99 741.3 805.02C741.67 805.22 742.03 805.41 742.39 805.6C734.24 815.18 716.33 827.59 705.66 834.88C673.58 856.81 638.6 873.89 601.24 884.74C590.36 887.89 579.31 890.63 568.18 892.74C562.47 893.82 556.2 893.98 550.68 895.73C550.71 885.44 550.74 875.15 550.76 864.87C563.34 864.61 575.97 860.03 588.1 857.12C625.08 848.27 660.64 829.89 691.72 808.17C700.58 801.98 709.12 795.15 717.25 788.03C721.94 783.91 726.3 778.96 731.32 775.31C731.53 775.49 731.75 775.67 731.96 775.84C733.24 774.61 734.52 773.38 735.8 772.15C735.59 771.94 735.37 771.73 735.15 771.53C738.53 768.06 741.92 764.6 745.3 761.14C746.65 759.94 748.01 758.74 749.36 757.53C749.18 757.32 749.01 757.11 748.84 756.9C752.33 751.5 757.3 746.79 761.28 741.67C766.09 735.49 770.64 729.06 775.05 722.58C788.36 703.04 799.34 681.69 808.12 659.77C844.86 568.06 837.2 458.55 786.87 373.35C775.39 353.93 762.28 335.76 747.42 318.81C739.91 310.24 730.49 302.81 723.34 294.18C723.62 293.99 723.89 293.8 724.17 293.61C722.81 292.38 721.45 291.14 720.09 289.91C719.84 290.12 719.6 290.32 719.35 290.53C716.83 288.32 714.32 286.1 711.8 283.89C710.68 281.27 708.73 279.85 706.02 279.17C700.91 276.86 696.2 272.05 691.55 268.75C682.92 262.62 673.95 256.89 664.74 251.68C630.72 232.43 587.85 215.64 548.86 211.67C546.37 207.92 545.97 203.44 544.57 199.25C542.51 193.13 539.4 186.35 538.81 179.92ZM292.43 281.34C292.22 281.07 292 280.8 291.78 280.53C290.59 281.94 289.4 283.34 288.21 284.75C285.69 286.98 283.16 289.21 280.64 291.44C280.4 291.15 280.15 290.86 279.91 290.58C278.87 291.59 277.84 292.6 276.8 293.61C277.07 293.81 277.33 294.01 277.6 294.2C269.04 302.85 260.49 311.5 251.93 320.15C249.78 320.97 248.43 322.54 246.99 324.66C247.19 324.89 247.39 325.13 247.58 325.37C245.97 327.28 244.35 329.2 242.73 331.11C240.36 332.19 239.14 333.65 238.59 336.3C236.64 340.77 232.57 344.87 229.76 348.98C224.04 357.37 218.54 365.84 213.42 374.61C200.74 396.28 191.44 419.68 183.77 443.49C179.71 456.1 177.1 469.33 174.92 482.37C162.32 557.82 175.42 635.62 213.32 702.23C223.45 720.03 235.36 737.18 248.7 752.71C254.14 759.04 260.92 764.78 265.79 771.49C265.61 771.71 265.43 771.93 265.26 772.15C266.18 773.07 267.11 774 268.04 774.93C268.26 774.74 268.49 774.56 268.71 774.37C274.07 779.31 279.43 784.24 284.79 789.18C285.9 790.6 287.02 792.02 288.13 793.44C288.36 793.17 288.59 792.89 288.82 792.62C292.14 795.34 295.45 798.06 298.77 800.79C299.82 803.3 301.55 804.32 304.06 804.79C308.49 806.45 312.83 810.6 316.88 813.28C324.26 818.15 331.72 822.89 339.46 827.19C362.75 840.11 387.22 849.9 412.81 857.09C421.61 859.57 442.23 865.78 450.49 864.38C450.33 726.79 450.17 589.19 450.01 451.6C436.43 441.18 422.74 430.84 408.96 420.69C404.57 417.46 394.26 411.48 392.16 406.85C411.9 342.01 431.64 277.17 451.39 212.33C442.31 211.17 422.58 217.31 413.06 219.8C381.92 227.94 351.23 241.42 324.14 258.87C316.61 263.72 309.21 268.83 302.05 274.21C298.94 276.55 295.86 279.62 292.43 281.34Z" fill="var(--athena-logo-color, #265152)"/><path d="M549.66 452.98C550.46 464.29 549.82 475.87 549.82 487.21C549.82 509.44 549.82 531.66 549.82 553.88C549.82 620.55 549.82 687.21 549.82 753.88C549.82 780.67 549.82 807.46 549.82 834.25C549.82 841.25 549.82 848.25 549.82 855.25C549.82 858.4 549.16 862.4 550.76 864.87C550.74 875.15 550.71 885.44 550.68 895.73C534.4 912.07 518.11 928.41 501.83 944.75C500.97 944.63 500.12 944.5 499.27 944.37C501.45 936.86 499.99 917.08 499.99 908.22C499.99 883.26 499.99 858.3 499.99 833.33C499.99 751.75 499.99 670.17 499.99 588.58C499.99 565.75 499.99 542.92 499.99 520.09C499.99 513.02 498.72 494.43 500.49 488.72C516.88 476.81 533.27 464.9 549.66 452.98Z" fill="var(--athena-logo-shade2, #346e70)"/><path d="M538.81 179.92C539.4 186.35 542.51 193.13 544.57 199.25C545.97 203.44 546.37 207.92 548.86 211.67C568.54 276.43 588.22 341.18 607.9 405.94C607.52 406.39 607.14 406.85 606.76 407.31C601.24 405.18 581.95 406.59 574.89 406.59C550.07 406.59 524.95 407.7 500.17 406.46C499.57 396.29 500.02 385.98 500.02 375.8C500.02 356.62 500.02 337.44 500.02 318.26C500.02 261.04 500.02 203.81 500.02 146.58C500.02 124.66 500.02 102.74 500.02 80.82C500.02 75.34 500.02 69.86 500.02 64.38C500.02 61.96 500.59 59.35 498.89 57.53C500.18 55.75 499.26 56.22 501.08 57.08C513.66 98.02 526.23 138.97 538.81 179.92Z" fill="var(--athena-logo-shade3, #3c7d7f)"/><path d="M719.78 252.85C721.04 253.77 722.3 254.68 723.56 255.6C723.32 255.88 723.07 256.17 722.83 256.46C721.81 255.25 720.8 254.05 719.78 252.85ZM257.01 273.17C256.09 275.73 253.73 278.14 250.84 278.93C252.9 277.01 254.96 275.09 257.01 273.17ZM744.59 273.74C746.37 275.34 748.16 276.93 749.95 278.53C749.74 278.7 749.53 278.87 749.32 279.04C747.3 277.36 745.32 276.14 744.59 273.74ZM706.02 279.17C708.73 279.85 710.68 281.27 711.8 283.89C709.87 282.31 707.95 280.74 706.02 279.17ZM292.43 281.34C291.03 282.47 289.62 283.61 288.21 284.75C289.4 283.34 290.59 281.94 291.78 280.53C292 280.8 292.22 281.07 292.43 281.34ZM244.74 284.76C245.02 284.97 245.3 285.18 245.57 285.39C242.59 288.09 239.61 290.79 236.62 293.49C239.33 290.58 242.03 287.67 244.74 284.76ZM723.34 294.18C722.01 292.97 720.68 291.75 719.35 290.53C719.6 290.32 719.84 290.12 720.09 289.91C721.45 291.14 722.81 292.38 724.17 293.61C723.89 293.8 723.62 293.99 723.34 294.18ZM280.64 291.44C279.63 292.36 278.61 293.28 277.6 294.2C277.33 294.01 277.07 293.81 276.8 293.61C277.84 292.6 278.87 291.59 279.91 290.58C280.15 290.86 280.4 291.15 280.64 291.44ZM775.44 305.68C776.67 307.23 777.9 308.78 779.13 310.33C777.7 309.02 776.27 307.7 774.84 306.39C775.04 306.15 775.24 305.92 775.44 305.68ZM786.42 319.36C787.33 320.62 788.24 321.88 789.15 323.14C787.95 322.13 786.75 321.11 785.55 320.09C785.84 319.85 786.13 319.6 786.42 319.36ZM251.93 320.15C250.48 321.89 249.03 323.63 247.58 325.37C247.39 325.13 247.19 324.89 246.99 324.66C248.43 322.54 249.78 320.97 251.93 320.15ZM242.73 331.11C241.35 332.84 239.97 334.57 238.59 336.3C239.14 333.65 240.36 332.19 242.73 331.11ZM500.17 406.46C524.95 407.7 550.07 406.59 574.89 406.59C581.95 406.59 601.24 405.18 606.76 407.31C606.66 407.74 607 408.24 606.82 408.65C606.22 410.04 603.67 411.2 602.49 412.08C598.65 414.92 594.89 417.87 591.05 420.69C582.65 426.86 574.46 433.3 566.1 439.51C561 443.3 555.41 446.82 550.83 451.22C550.44 451.81 550.05 452.4 549.66 452.98C533.27 464.9 516.88 476.81 500.49 488.72C500.38 461.3 500.27 433.88 500.17 406.46ZM790.06 752.68C788.88 754.22 787.71 755.76 786.53 757.3C787.03 754.9 787.78 753.72 790.06 752.68ZM748.84 756.9C749.01 757.11 749.18 757.32 749.36 757.53C748.01 758.74 746.65 759.94 745.3 761.14C746.48 759.72 747.66 758.31 748.84 756.9ZM265.79 771.49C266.77 772.45 267.74 773.41 268.71 774.37C268.49 774.56 268.26 774.74 268.04 774.93C267.11 774 266.18 773.07 265.26 772.15C265.43 771.93 265.61 771.71 265.79 771.49ZM735.15 771.53C735.37 771.73 735.59 771.94 735.8 772.15C734.52 773.38 733.24 774.61 731.96 775.84C731.75 775.67 731.53 775.49 731.32 775.31C732.6 774.05 733.87 772.79 735.15 771.53ZM768.14 779.82C766.3 781.76 764.47 783.69 762.63 785.62C762.39 785.39 762.15 785.16 761.91 784.93C763.8 782.98 765.69 781.03 767.58 779.08C767.77 779.33 767.95 779.58 768.14 779.82ZM284.79 789.18C286.13 790.33 287.48 791.47 288.82 792.62C288.59 792.89 288.36 793.17 288.13 793.44C287.02 792.02 285.9 790.6 284.79 789.18ZM257.6 804.68C256.62 803.73 255.63 802.78 254.64 801.84C254.84 801.58 255.05 801.33 255.25 801.08C256.39 802.09 257.53 803.1 258.67 804.11C258.32 804.3 257.96 804.49 257.6 804.68ZM298.77 800.79C300.53 802.12 302.29 803.46 304.06 804.79C301.55 804.32 299.82 803.3 298.77 800.79ZM745.37 802.75C744.38 803.7 743.38 804.65 742.39 805.6C742.03 805.41 741.67 805.22 741.3 805.02C742.45 803.99 743.6 802.95 744.75 801.91C744.95 802.19 745.16 802.47 745.37 802.75ZM460.23 905.23C457.74 902.74 455.25 900.25 452.76 897.76C452.98 897.53 453.2 897.3 453.42 897.07C455.92 899.57 458.42 902.07 460.92 904.57C460.69 904.79 460.46 905.01 460.23 905.23ZM470.27 915.28C468.08 913.1 465.9 910.91 463.71 908.73C463.94 908.46 464.16 908.2 464.38 907.93C466.61 910.16 468.84 912.38 471.07 914.61C470.8 914.84 470.53 915.06 470.27 915.28ZM481.23 926.23C478.74 923.75 476.25 921.26 473.77 918.77C473.99 918.54 474.21 918.31 474.43 918.08C476.93 920.58 479.42 923.07 481.92 925.57C481.69 925.79 481.46 926.01 481.23 926.23ZM491.27 936.29C489.09 934.1 486.9 931.92 484.72 929.73C484.94 929.47 485.16 929.2 485.39 928.93C487.62 931.16 489.84 933.39 492.07 935.62C491.8 935.84 491.54 936.06 491.27 936.29Z" fill="var(--athena-logo-shade4, #2b585a)"/><path d="M550.83 451.22C550.81 589.1 550.79 726.98 550.76 864.87C549.16 862.4 549.82 858.4 549.82 855.25C549.82 848.25 549.82 841.25 549.82 834.25C549.82 807.46 549.82 780.67 549.82 753.88C549.82 687.21 549.82 620.55 549.82 553.88C549.82 531.66 549.82 509.44 549.82 487.21C549.82 475.87 550.46 464.29 549.66 452.98C550.05 452.4 550.44 451.81 550.83 451.22Z" fill="var(--athena-logo-shade2, #346e70)"/></svg>
         </button>
 
         <template x-for="p in pages" :key="p.id">
             <div @click="currentPage = p.id; mobileNavOpen = false"
                  class="icon-rail-btn w-12"
-                 :class="currentPage === p.id ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'text-neutral-400 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-600 dark:hover:text-neutral-300'">
+                 :class="currentPage === p.id ? 'rail-active bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'text-neutral-400 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-600 dark:hover:text-neutral-300'">
                 <span x-html="p.icon"></span>
                 <span class="rail-label" x-text="p.label"></span>
             </div>
@@ -54,7 +54,7 @@
     <!-- CHAT PAGE -->
     <template x-if="currentPage === 'chat'">
         <div id="chat-page-root" class="flex flex-1 min-w-0">
-            <aside class="fixed md:static inset-y-0 left-0 md:left-auto z-40 w-60 shrink-0 flex flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 transition-transform duration-200 md:translate-x-0" :class="mobileNavOpen ? 'translate-x-16' : '-translate-x-full'">
+            <aside class="fixed md:static inset-y-0 left-0 md:left-auto z-40 w-60 shrink-0 flex flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 surface-inset-left transition-transform duration-200 md:translate-x-0" :class="mobileNavOpen ? 'translate-x-16' : '-translate-x-full'">
                 <div class="p-3">
                     <button @click="newChat(); mobileNavOpen = false" class="w-full flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-2.5 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -71,8 +71,12 @@
                             <div class="text-[11px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500 px-2 mb-1.5" x-text="group.label"></div>
                             <div class="space-y-0.5">
                                 <template x-for="s in group.items" :key="s.id">
-                                    <div class="group relative flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm cursor-pointer"
-                                         :class="s.id === sessionId ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                    <div>
+<div class="group relative flex items-center gap-2 px-2.5 py-2 rounded-lg text-sm cursor-pointer session-row"
+                                         :class="s.id === sessionId ? 'active bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                        <button x-show="s.forks && s.forks.length" @click.stop="toggleForkExpand(s.id)" class="shrink-0 p-0.5 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded transition-transform" :class="expandedForkSessions[s.id] ? 'rotate-90' : ''">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                                        </button>
                                         <svg x-show="s.pinned" xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-amber-500"><path d="M12 2l1.5 5.5L19 9l-4 3.5L16 18l-4-3-4 3 1-5.5L5 9l5.5-1.5z"/></svg>
                                         <span @click="switchSession(s.id); mobileNavOpen = false" class="truncate flex-1" x-text="s.label"></span>
                                         <span class="text-[10px] text-neutral-400 dark:text-neutral-500 shrink-0 group-hover:hidden" x-text="relativeTime(s.lastActive || s.createdAt)"></span>
@@ -81,12 +85,56 @@
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
                                             </button>
                                             <div x-show="sessionMenuOpen === s.id" @click.outside="sessionMenuOpen = null" x-cloak
-                                                 class="absolute right-0 top-6 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg py-1 w-32 text-xs">
+                                                 class="absolute right-0 top-6 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg surface-modal py-1 w-32 text-xs">
                                                 <div @click.stop="togglePin(s.id)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer" x-text="s.pinned ? 'Unpin' : 'Pin'"></div>
                                                 <div @click.stop="renameSession(s.id)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer">Rename</div>
                                                 <div @click.stop="deleteSession(s.id)" class="px-3 py-1.5 hover:bg-red-50 dark:hover:bg-red-500/10 text-red-500 cursor-pointer">Delete</div>
                                             </div>
                                         </div>
+                                    </div>
+                                    <div x-show="expandedForkSessions[s.id]" x-cloak class="pl-5 space-y-0.5 mt-0.5">
+                                        <template x-for="f in (s.forks || [])" :key="f.id">
+                                            <div class="group relative flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-sm cursor-pointer session-row"
+                                                    :class="f.id === sessionId ? 'active bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-500 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 opacity-60"><path d="M6 2v6a3 3 0 0 0 3 3v0a3 3 0 0 0 3-3V2"/><path d="M6 2v6"/><path d="M9 11v11"/><path d="M18 2v11a3 3 0 0 1-3 3h0"/><path d="M18 2v6"/></svg>
+                                                <span @click="switchSession(f.id); mobileNavOpen = false" class="truncate flex-1" x-text="f.label"></span>
+                                                <span class="text-[10px] text-neutral-400 dark:text-neutral-500 shrink-0 group-hover:hidden" x-text="relativeTime(f.lastActive || f.createdAt)"></span>
+                                                <div class="relative">
+                                                    <button @click.stop="sessionMenuOpen = sessionMenuOpen === f.id ? null : f.id" class="opacity-0 group-hover:opacity-100 p-1 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                                                    </button>
+                                                    <div x-show="sessionMenuOpen === f.id" @click.outside="sessionMenuOpen = null" x-cloak
+                                                        class="absolute right-0 top-6 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg surface-modal py-1 w-32 text-xs">
+                                                        <div @click.stop="togglePin(f.id)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer" x-text="f.pinned ? 'Unpin' : 'Pin'"></div>
+                                                        <div @click.stop="renameSession(f.id)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer">Rename</div>
+                                                        <div @click.stop="deleteSession(f.id)" class="px-3 py-1.5 hover:bg-red-50 dark:hover:bg-red-500/10 text-red-500 cursor-pointer">Delete</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        
+                                    <div x-show="expandedForkSessions[s.id]" x-cloak class="pl-5 space-y-0.5 mt-0.5">
+                                        <template x-for="f in (s.forks || [])" :key="f.id">
+                                            <div class="group relative flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-sm cursor-pointer session-row-fork"
+                                                    :class="f.id === sessionId ? 'active bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-500 dark:text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 opacity-60"><path d="M6 2v6a3 3 0 0 0 3 3v0a3 3 0 0 0 3-3V2"/><path d="M6 2v6"/><path d="M9 11v11"/><path d="M18 2v11a3 3 0 0 1-3 3h0"/><path d="M18 2v6"/></svg>
+                                                <span @click="switchSession(f.id); mobileNavOpen = false" class="truncate flex-1" x-text="f.label"></span>
+                                                <span class="text-[10px] text-neutral-400 dark:text-neutral-500 shrink-0 group-hover:hidden" x-text="relativeTime(f.lastActive || f.createdAt)"></span>
+                                                <div class="relative">
+                                                    <button @click.stop="sessionMenuOpen = sessionMenuOpen === f.id ? null : f.id" class="opacity-0 group-hover:opacity-100 p-1 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                                                    </button>
+                                                    <div x-show="sessionMenuOpen === f.id" @click.outside="sessionMenuOpen = null" x-cloak
+                                                        class="absolute right-0 top-6 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg surface-modal py-1 w-32 text-xs">
+                                                        <div @click.stop="togglePin(f.id)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer" x-text="f.pinned ? 'Unpin' : 'Pin'"></div>
+                                                        <div @click.stop="renameSession(f.id)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer">Rename</div>
+                                                        <div @click.stop="deleteSession(f.id)" class="px-3 py-1.5 hover:bg-red-50 dark:hover:bg-red-500/10 text-red-500 cursor-pointer">Delete</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+</template>
                                     </div>
                                 </template>
                             </div>
@@ -96,7 +144,7 @@
             </aside>
 
             <main class="flex-1 flex flex-col min-w-0">
-                <div class="h-14 md:h-11 shrink-0 flex items-center justify-between gap-3 pl-14 md:pl-4 pr-4 border-b border-neutral-200 dark:border-neutral-800">
+                <div class="h-14 md:h-11 shrink-0 flex items-center justify-between gap-3 pl-14 md:pl-4 pr-4 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 surface-bar">
                     <div class="flex-1 min-w-0 overflow-x-auto">
                         <template x-if="systemStatsOpen">
                             <div class="flex items-center gap-2 md:gap-3 whitespace-nowrap text-[9px] md:text-[11px] text-neutral-500 dark:text-neutral-400">
@@ -125,24 +173,27 @@
                         </button>
                     </div>
                 </div>
-                <div class="flex-1 min-h-0 min-w-0 overflow-y-auto" x-ref="chatBox">
+                <div class="flex-1 min-h-0 min-w-0 overflow-y-auto transition-opacity duration-150" :style="historyReady ? 'opacity: 1' : 'visibility: hidden; opacity: 0'" x-ref="chatBox">
                     <template x-if="messages.length === 0">
                         <div class="h-full flex flex-col items-center justify-center gap-4">
+                            <div class="surface-raised welcome-card flex flex-col items-center gap-4 px-12 py-10" style="border-radius: 6rem">
                             <div class="relative flex items-center justify-center" style="width:12rem;height:12rem">
-                                <img src="/static/svg/spear.svg" alt="Athena" class="h-full w-full object-contain opacity-80" style="filter: hue-rotate(var(--athena-logo-hue, 0deg))">
+                                <svg viewBox="0 0 1000 1000" class="h-full w-full object-contain opacity-80"><path d="M498.89 57.53C500.59 59.35 500.02 61.96 500.02 64.38C500.02 69.86 500.02 75.34 500.02 80.82C500.02 102.74 500.02 124.66 500.02 146.58C500.02 203.81 500.02 261.04 500.02 318.26C500.02 337.44 500.02 356.62 500.02 375.8C500.02 385.98 499.57 396.29 500.17 406.46C500.27 433.88 500.38 461.3 500.49 488.72C498.72 494.43 499.99 513.02 499.99 520.09C499.99 542.92 499.99 565.75 499.99 588.58C499.99 670.17 499.99 751.75 499.99 833.33C499.99 858.3 499.99 883.26 499.99 908.22C499.99 917.08 501.45 936.86 499.27 944.37C496.6 941.68 493.94 938.98 491.27 936.29C491.54 936.06 491.8 935.84 492.07 935.62C489.84 933.39 487.62 931.16 485.39 928.93C485.16 929.2 484.94 929.47 484.72 929.73C483.56 928.57 482.39 927.4 481.23 926.23C481.46 926.01 481.69 925.79 481.92 925.57C479.42 923.07 476.93 920.58 474.43 918.08C474.21 918.31 473.99 918.54 473.77 918.77C472.6 917.61 471.43 916.44 470.27 915.28C470.53 915.06 470.8 914.84 471.07 914.61C468.84 912.38 466.61 910.16 464.38 907.93C464.16 908.2 463.94 908.46 463.71 908.73C462.55 907.56 461.39 906.4 460.23 905.23C460.46 905.01 460.69 904.79 460.92 904.57C458.42 902.07 455.92 899.57 453.42 897.07C453.2 897.3 452.98 897.53 452.76 897.76C446.23 893.08 435.97 893.45 428.08 891.85C414.06 889 400.12 885.11 386.52 880.66C352.82 869.62 321.01 852.97 292.04 832.6C280.63 824.58 266.86 815.07 257.6 804.68C257.96 804.49 258.32 804.3 258.67 804.11C257.53 803.1 256.39 802.09 255.25 801.08C255.05 801.33 254.84 801.58 254.64 801.84C247.79 796.9 241.84 789.72 236.1 783.54C221.54 767.88 208.74 750.94 197.09 733.04C134.47 636.85 122.14 510.17 166.05 403.99C178.5 373.91 194.15 345.36 214.1 319.55C218.89 313.34 230.61 297.06 236.62 293.49C239.61 290.79 242.59 288.09 245.57 285.39C245.3 285.18 245.02 284.97 244.74 284.76C246.77 282.82 248.81 280.88 250.84 278.93C253.73 278.14 256.09 275.73 257.01 273.17C260.18 268.44 266.09 264.54 270.54 260.93C279.34 253.8 288.22 246.87 297.61 240.53C329.89 218.72 365.7 201.34 403.36 191.16C415.09 187.99 427.11 185.05 439.11 183.08C446.54 181.85 454.43 181.64 461.64 179.52C474.06 138.86 486.47 98.2 498.89 57.53ZM538.81 179.92C588.31 185.37 637.33 200.7 680.39 226C689.16 231.16 697.65 236.65 706.06 242.37C710.59 245.44 716.32 248.66 719.78 252.85C720.8 254.05 721.81 255.25 722.83 256.46C723.07 256.17 723.32 255.88 723.56 255.6C730.57 261.64 737.58 267.69 744.59 273.74C745.32 276.14 747.3 277.36 749.32 279.04C749.53 278.87 749.74 278.7 749.95 278.53C756.69 283.49 770.99 298.63 775.44 305.68C775.24 305.92 775.04 306.15 774.84 306.39C776.27 307.7 777.7 309.02 779.13 310.33C781.56 313.34 783.99 316.35 786.42 319.36C786.13 319.6 785.84 319.85 785.55 320.09C786.75 321.11 787.95 322.13 789.15 323.14C795.2 328.34 799.4 337.05 803.75 343.72C816.2 362.83 826.06 382.97 834.9 403.95C869.93 487 870.03 589.79 835 672.85C826.17 693.79 816.42 714.07 803.87 733.08C799.64 739.49 795.78 747.52 790.06 752.68C787.78 753.72 787.03 754.9 786.53 757.3C780.4 764.81 774.27 772.32 768.14 779.82C767.95 779.58 767.77 779.33 767.58 779.08C765.69 781.03 763.8 782.98 761.91 784.93C762.15 785.16 762.39 785.39 762.63 785.62C756.88 791.33 751.12 797.04 745.37 802.75C745.16 802.47 744.95 802.19 744.75 801.91C743.6 802.95 742.45 803.99 741.3 805.02C741.67 805.22 742.03 805.41 742.39 805.6C734.24 815.18 716.33 827.59 705.66 834.88C673.58 856.81 638.6 873.89 601.24 884.74C590.36 887.89 579.31 890.63 568.18 892.74C562.47 893.82 556.2 893.98 550.68 895.73C550.71 885.44 550.74 875.15 550.76 864.87C563.34 864.61 575.97 860.03 588.1 857.12C625.08 848.27 660.64 829.89 691.72 808.17C700.58 801.98 709.12 795.15 717.25 788.03C721.94 783.91 726.3 778.96 731.32 775.31C731.53 775.49 731.75 775.67 731.96 775.84C733.24 774.61 734.52 773.38 735.8 772.15C735.59 771.94 735.37 771.73 735.15 771.53C738.53 768.06 741.92 764.6 745.3 761.14C746.65 759.94 748.01 758.74 749.36 757.53C749.18 757.32 749.01 757.11 748.84 756.9C752.33 751.5 757.3 746.79 761.28 741.67C766.09 735.49 770.64 729.06 775.05 722.58C788.36 703.04 799.34 681.69 808.12 659.77C844.86 568.06 837.2 458.55 786.87 373.35C775.39 353.93 762.28 335.76 747.42 318.81C739.91 310.24 730.49 302.81 723.34 294.18C723.62 293.99 723.89 293.8 724.17 293.61C722.81 292.38 721.45 291.14 720.09 289.91C719.84 290.12 719.6 290.32 719.35 290.53C716.83 288.32 714.32 286.1 711.8 283.89C710.68 281.27 708.73 279.85 706.02 279.17C700.91 276.86 696.2 272.05 691.55 268.75C682.92 262.62 673.95 256.89 664.74 251.68C630.72 232.43 587.85 215.64 548.86 211.67C546.37 207.92 545.97 203.44 544.57 199.25C542.51 193.13 539.4 186.35 538.81 179.92ZM292.43 281.34C292.22 281.07 292 280.8 291.78 280.53C290.59 281.94 289.4 283.34 288.21 284.75C285.69 286.98 283.16 289.21 280.64 291.44C280.4 291.15 280.15 290.86 279.91 290.58C278.87 291.59 277.84 292.6 276.8 293.61C277.07 293.81 277.33 294.01 277.6 294.2C269.04 302.85 260.49 311.5 251.93 320.15C249.78 320.97 248.43 322.54 246.99 324.66C247.19 324.89 247.39 325.13 247.58 325.37C245.97 327.28 244.35 329.2 242.73 331.11C240.36 332.19 239.14 333.65 238.59 336.3C236.64 340.77 232.57 344.87 229.76 348.98C224.04 357.37 218.54 365.84 213.42 374.61C200.74 396.28 191.44 419.68 183.77 443.49C179.71 456.1 177.1 469.33 174.92 482.37C162.32 557.82 175.42 635.62 213.32 702.23C223.45 720.03 235.36 737.18 248.7 752.71C254.14 759.04 260.92 764.78 265.79 771.49C265.61 771.71 265.43 771.93 265.26 772.15C266.18 773.07 267.11 774 268.04 774.93C268.26 774.74 268.49 774.56 268.71 774.37C274.07 779.31 279.43 784.24 284.79 789.18C285.9 790.6 287.02 792.02 288.13 793.44C288.36 793.17 288.59 792.89 288.82 792.62C292.14 795.34 295.45 798.06 298.77 800.79C299.82 803.3 301.55 804.32 304.06 804.79C308.49 806.45 312.83 810.6 316.88 813.28C324.26 818.15 331.72 822.89 339.46 827.19C362.75 840.11 387.22 849.9 412.81 857.09C421.61 859.57 442.23 865.78 450.49 864.38C450.33 726.79 450.17 589.19 450.01 451.6C436.43 441.18 422.74 430.84 408.96 420.69C404.57 417.46 394.26 411.48 392.16 406.85C411.9 342.01 431.64 277.17 451.39 212.33C442.31 211.17 422.58 217.31 413.06 219.8C381.92 227.94 351.23 241.42 324.14 258.87C316.61 263.72 309.21 268.83 302.05 274.21C298.94 276.55 295.86 279.62 292.43 281.34Z" fill="var(--athena-logo-color, #265152)"/><path d="M549.66 452.98C550.46 464.29 549.82 475.87 549.82 487.21C549.82 509.44 549.82 531.66 549.82 553.88C549.82 620.55 549.82 687.21 549.82 753.88C549.82 780.67 549.82 807.46 549.82 834.25C549.82 841.25 549.82 848.25 549.82 855.25C549.82 858.4 549.16 862.4 550.76 864.87C550.74 875.15 550.71 885.44 550.68 895.73C534.4 912.07 518.11 928.41 501.83 944.75C500.97 944.63 500.12 944.5 499.27 944.37C501.45 936.86 499.99 917.08 499.99 908.22C499.99 883.26 499.99 858.3 499.99 833.33C499.99 751.75 499.99 670.17 499.99 588.58C499.99 565.75 499.99 542.92 499.99 520.09C499.99 513.02 498.72 494.43 500.49 488.72C516.88 476.81 533.27 464.9 549.66 452.98Z" fill="var(--athena-logo-shade2, #346e70)"/><path d="M538.81 179.92C539.4 186.35 542.51 193.13 544.57 199.25C545.97 203.44 546.37 207.92 548.86 211.67C568.54 276.43 588.22 341.18 607.9 405.94C607.52 406.39 607.14 406.85 606.76 407.31C601.24 405.18 581.95 406.59 574.89 406.59C550.07 406.59 524.95 407.7 500.17 406.46C499.57 396.29 500.02 385.98 500.02 375.8C500.02 356.62 500.02 337.44 500.02 318.26C500.02 261.04 500.02 203.81 500.02 146.58C500.02 124.66 500.02 102.74 500.02 80.82C500.02 75.34 500.02 69.86 500.02 64.38C500.02 61.96 500.59 59.35 498.89 57.53C500.18 55.75 499.26 56.22 501.08 57.08C513.66 98.02 526.23 138.97 538.81 179.92Z" fill="var(--athena-logo-shade3, #3c7d7f)"/><path d="M719.78 252.85C721.04 253.77 722.3 254.68 723.56 255.6C723.32 255.88 723.07 256.17 722.83 256.46C721.81 255.25 720.8 254.05 719.78 252.85ZM257.01 273.17C256.09 275.73 253.73 278.14 250.84 278.93C252.9 277.01 254.96 275.09 257.01 273.17ZM744.59 273.74C746.37 275.34 748.16 276.93 749.95 278.53C749.74 278.7 749.53 278.87 749.32 279.04C747.3 277.36 745.32 276.14 744.59 273.74ZM706.02 279.17C708.73 279.85 710.68 281.27 711.8 283.89C709.87 282.31 707.95 280.74 706.02 279.17ZM292.43 281.34C291.03 282.47 289.62 283.61 288.21 284.75C289.4 283.34 290.59 281.94 291.78 280.53C292 280.8 292.22 281.07 292.43 281.34ZM244.74 284.76C245.02 284.97 245.3 285.18 245.57 285.39C242.59 288.09 239.61 290.79 236.62 293.49C239.33 290.58 242.03 287.67 244.74 284.76ZM723.34 294.18C722.01 292.97 720.68 291.75 719.35 290.53C719.6 290.32 719.84 290.12 720.09 289.91C721.45 291.14 722.81 292.38 724.17 293.61C723.89 293.8 723.62 293.99 723.34 294.18ZM280.64 291.44C279.63 292.36 278.61 293.28 277.6 294.2C277.33 294.01 277.07 293.81 276.8 293.61C277.84 292.6 278.87 291.59 279.91 290.58C280.15 290.86 280.4 291.15 280.64 291.44ZM775.44 305.68C776.67 307.23 777.9 308.78 779.13 310.33C777.7 309.02 776.27 307.7 774.84 306.39C775.04 306.15 775.24 305.92 775.44 305.68ZM786.42 319.36C787.33 320.62 788.24 321.88 789.15 323.14C787.95 322.13 786.75 321.11 785.55 320.09C785.84 319.85 786.13 319.6 786.42 319.36ZM251.93 320.15C250.48 321.89 249.03 323.63 247.58 325.37C247.39 325.13 247.19 324.89 246.99 324.66C248.43 322.54 249.78 320.97 251.93 320.15ZM242.73 331.11C241.35 332.84 239.97 334.57 238.59 336.3C239.14 333.65 240.36 332.19 242.73 331.11ZM500.17 406.46C524.95 407.7 550.07 406.59 574.89 406.59C581.95 406.59 601.24 405.18 606.76 407.31C606.66 407.74 607 408.24 606.82 408.65C606.22 410.04 603.67 411.2 602.49 412.08C598.65 414.92 594.89 417.87 591.05 420.69C582.65 426.86 574.46 433.3 566.1 439.51C561 443.3 555.41 446.82 550.83 451.22C550.44 451.81 550.05 452.4 549.66 452.98C533.27 464.9 516.88 476.81 500.49 488.72C500.38 461.3 500.27 433.88 500.17 406.46ZM790.06 752.68C788.88 754.22 787.71 755.76 786.53 757.3C787.03 754.9 787.78 753.72 790.06 752.68ZM748.84 756.9C749.01 757.11 749.18 757.32 749.36 757.53C748.01 758.74 746.65 759.94 745.3 761.14C746.48 759.72 747.66 758.31 748.84 756.9ZM265.79 771.49C266.77 772.45 267.74 773.41 268.71 774.37C268.49 774.56 268.26 774.74 268.04 774.93C267.11 774 266.18 773.07 265.26 772.15C265.43 771.93 265.61 771.71 265.79 771.49ZM735.15 771.53C735.37 771.73 735.59 771.94 735.8 772.15C734.52 773.38 733.24 774.61 731.96 775.84C731.75 775.67 731.53 775.49 731.32 775.31C732.6 774.05 733.87 772.79 735.15 771.53ZM768.14 779.82C766.3 781.76 764.47 783.69 762.63 785.62C762.39 785.39 762.15 785.16 761.91 784.93C763.8 782.98 765.69 781.03 767.58 779.08C767.77 779.33 767.95 779.58 768.14 779.82ZM284.79 789.18C286.13 790.33 287.48 791.47 288.82 792.62C288.59 792.89 288.36 793.17 288.13 793.44C287.02 792.02 285.9 790.6 284.79 789.18ZM257.6 804.68C256.62 803.73 255.63 802.78 254.64 801.84C254.84 801.58 255.05 801.33 255.25 801.08C256.39 802.09 257.53 803.1 258.67 804.11C258.32 804.3 257.96 804.49 257.6 804.68ZM298.77 800.79C300.53 802.12 302.29 803.46 304.06 804.79C301.55 804.32 299.82 803.3 298.77 800.79ZM745.37 802.75C744.38 803.7 743.38 804.65 742.39 805.6C742.03 805.41 741.67 805.22 741.3 805.02C742.45 803.99 743.6 802.95 744.75 801.91C744.95 802.19 745.16 802.47 745.37 802.75ZM460.23 905.23C457.74 902.74 455.25 900.25 452.76 897.76C452.98 897.53 453.2 897.3 453.42 897.07C455.92 899.57 458.42 902.07 460.92 904.57C460.69 904.79 460.46 905.01 460.23 905.23ZM470.27 915.28C468.08 913.1 465.9 910.91 463.71 908.73C463.94 908.46 464.16 908.2 464.38 907.93C466.61 910.16 468.84 912.38 471.07 914.61C470.8 914.84 470.53 915.06 470.27 915.28ZM481.23 926.23C478.74 923.75 476.25 921.26 473.77 918.77C473.99 918.54 474.21 918.31 474.43 918.08C476.93 920.58 479.42 923.07 481.92 925.57C481.69 925.79 481.46 926.01 481.23 926.23ZM491.27 936.29C489.09 934.1 486.9 931.92 484.72 929.73C484.94 929.47 485.16 929.2 485.39 928.93C487.62 931.16 489.84 933.39 492.07 935.62C491.8 935.84 491.54 936.06 491.27 936.29Z" fill="var(--athena-logo-shade4, #2b585a)"/><path d="M550.83 451.22C550.81 589.1 550.79 726.98 550.76 864.87C549.16 862.4 549.82 858.4 549.82 855.25C549.82 848.25 549.82 841.25 549.82 834.25C549.82 807.46 549.82 780.67 549.82 753.88C549.82 687.21 549.82 620.55 549.82 553.88C549.82 531.66 549.82 509.44 549.82 487.21C549.82 475.87 550.46 464.29 549.66 452.98C550.05 452.4 550.44 451.81 550.83 451.22Z" fill="var(--athena-logo-shade2, #346e70)"/></svg>
                                 <span class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-6xl leading-none whitespace-nowrap" style="color:var(--wordmark-color, #5eead4)">𝓐𝓽𝓱𝓮𝓷𝓪</span>
                             </div>
                             <div class="text-lg text-neutral-300">Ready to chat</div>
                             <div class="text-xs text-neutral-500">Powered by local models, no cloud round-trip.</div>
+                            </div>
                         </div>
                     </template>
                     <div class="max-w-3xl mx-auto px-6 py-8 space-y-8">
                         <template x-for="(msg, idx) in messages" :key="idx">
-                            <div class="flex gap-4 group" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
+                            <div class="flex gap-4 group" :id="'msg-' + idx" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
                                 <div class="flex flex-col gap-1.5 max-w-[95%] min-w-0" :class="msg.role === 'user' ? 'items-end' : 'items-start'">
                                     <template x-if="msg.role === 'assistant'">
                                         <div class="flex items-center gap-1.5 text-xs text-neutral-400 dark:text-neutral-500">
-                                            <span class="font-medium text-neutral-500 dark:text-neutral-400" x-text="msg.model || 'Unknown model'"></span>
+                                            <img x-show="getModelProviderIcon(msg.model)" :src="'https://cdn.simpleicons.org/' + getModelProviderIcon(msg.model)" @error="$event.target.style.display = 'none'" class="h-3 w-3 shrink-0" alt="">
+                                            <span class="font-medium text-neutral-500 dark:text-neutral-400" x-text="(msg.model ? (modelAliases[msg.model] || msg.model) : 'Unknown model')"></span>
                                             <span x-show="msg.tokensPerSec" x-text="'· ' + msg.tokensPerSec + ' t/s'"></span>
                                         </div>
                                     </template>
@@ -191,11 +242,14 @@
                                         <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                                         <span>Image attached</span>
                                     </div>
-                                    <div :class="msg.role === 'user' ? 'bg-[var(--accent)] text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100'"
+                                    <div :class="msg.role === 'user' ? 'bubble-user text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100 surface-raised px-4 py-3'"
                                          class="text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(msg.content)"></div>
                                     <div class="flex items-center gap-1" x-show="msg.role === 'user'">
                                         <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 opacity-0 group-hover:opacity-100 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                        </button>
+                                        <button @click="pinMessage(idx, $event)" title="Pin to context" class="p-1 rounded-lg transition" :class="msg.pinned ? 'text-[var(--accent)]' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
                                         </button>
                                         <button x-show="msg.messageId" @click="deleteMessagePair(msg)" title="Delete" class="p-1 rounded-lg text-neutral-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
@@ -208,6 +262,9 @@
                                         <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                                         </button>
+                                        <button @click="pinMessage(idx, $event)" title="Pin to context" class="p-1.5 rounded-lg transition" :class="msg.pinned ? 'text-[var(--accent)]' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
+                                        </button>
                                         <button @click="retryMessage(idx)" title="Retry" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                                         </button>
@@ -216,6 +273,9 @@
                                         </button>
                                         <button @click="rateMessage(idx, 'down')" title="Bad response" class="p-1.5 rounded-lg transition" :class="msg.rating === 'down' ? 'text-red-500' : 'text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg>
+                                        </button>
+                                        <button x-show="msg.messageId" @click="forkFromMessage(idx)" title="Fork conversation from here" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v6a3 3 0 0 0 3 3v0a3 3 0 0 0 3-3V2"/><path d="M6 2v6"/><path d="M9 11v11"/><path d="M18 2v11a3 3 0 0 1-3 3h0"/><path d="M18 2v6"/></svg>
                                         </button>
                                         <button @click="playTTS(msg.content, $event)" title="Play" class="p-1.5 rounded-lg text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
@@ -233,6 +293,10 @@
                                 </div>
                             </div>
                         </template>
+                        <div x-show="backgroundGenerating" x-cloak class="flex items-center gap-2 text-sm text-neutral-400 dark:text-neutral-500 py-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                            Still generating in the background...
+                        </div>
                     </div>
                 </div>
 
@@ -245,6 +309,10 @@
                             </span>
                             <span class="flex items-center gap-1 shrink-0">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :class="workspace ? 'text-[var(--accent)]' : 'text-neutral-300 dark:text-neutral-600'" title="Workspace"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                                <span class="flex items-center gap-0.5" :class="pinnedMessages().length > 0 ? 'text-[var(--accent)]' : 'text-neutral-300 dark:text-neutral-600'">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" title="Pinned messages"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
+                                    <span x-show="pinnedMessages().length > 0" x-text="pinnedMessages().length" class="text-[10px] font-semibold min-w-[14px] text-center rounded-full leading-[14px] bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)]"></span>
+                                </span>
                             </span>
                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="9 18 15 12 9 6"/></svg>
                         </button>
@@ -261,6 +329,19 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                                 <span x-text="workspace || 'no workspace'"></span>
                             </button>
+                            <div class="relative">
+                                <button @click="pinnedMenuOpen = !pinnedMenuOpen" class="flex items-center gap-1 text-xs font-medium px-2 py-1.5 rounded-full border transition" :class="pinnedMessages().length > 0 ? 'border-[var(--accent-border)] dark:border-[var(--accent-border)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
+                                    <span x-show="pinnedMessages().length > 0" x-text="pinnedMessages().length" class="text-[10px] font-semibold min-w-[14px] text-center px-1 rounded-full leading-[14px] bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)]"></span>
+                                </button>
+                                <div x-show="pinnedMenuOpen" x-cloak @click.outside="pinnedMenuOpen = false" class="absolute left-0 bottom-10 z-20 surface-modal bg-white dark:bg-neutral-800 rounded-xl p-1.5 w-64 text-xs max-h-72 overflow-y-auto">
+                                    <div class="px-2 pb-1.5 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">Pinned messages</div>
+                                    <template x-for="p in pinnedMessages()" :key="p.idx">
+                                        <div @click="scrollToPinnedMessage(p.idx)" class="session-row px-2.5 py-2 rounded-lg cursor-pointer truncate text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700/50" x-text="(p.msg.content || '').slice(0, 80)"></div>
+                                    </template>
+                                    <div x-show="pinnedMessages().length === 0" class="px-2.5 py-2 text-neutral-400 dark:text-neutral-500">No pinned messages yet.</div>
+                                </div>
+                            </div>
                         </div>
                         <div class="rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 shadow-sm focus-within:border-[var(--accent-border-focus)] dark:focus-within:border-[var(--accent-border-focus)] transition">
                             <div x-show="pendingImages.length || pendingAttachments.length" class="flex flex-wrap gap-1.5 px-2 pt-2">
@@ -283,7 +364,7 @@
                                     <button @click="attachMenuOpen = !attachMenuOpen" class="p-2.5 rounded-xl text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800 transition">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                                     </button>
-                                    <div x-show="attachMenuOpen" @click.outside="attachMenuOpen = false" x-cloak class="absolute bottom-12 left-0 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg py-1 w-40 text-xs">
+                                    <div x-show="attachMenuOpen" @click.outside="attachMenuOpen = false" x-cloak class="absolute bottom-12 left-0 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg surface-modal py-1 w-40 text-xs">
                                         <div @click="attachMenuOpen = false; $refs.imageInput.click()" class="flex items-center gap-2 px-3 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-600 cursor-pointer">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                                             Image
@@ -299,7 +380,7 @@
                                 <button @click="toggleRecording()" class="p-2.5 rounded-xl transition" :class="isRecording ? 'text-red-500 bg-red-50 dark:bg-red-500/10' : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800'">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>
                                 </button>
-                                <textarea x-ref="textareaEl" x-model="inputText" rows="1" @keydown.enter.prevent="send()" @input="autoGrow($event)" placeholder="Message Athena..." class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"></textarea>
+                                <textarea x-ref="textareaEl" x-model="inputText" rows="1" @keydown.enter="handleComposerEnter($event)" @input="autoGrow($event)" placeholder="Message Athena..." class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"></textarea>
                                 <button @click="sending ? stopGeneration() : send()" class="p-2.5 rounded-xl bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition">
                                     <svg x-show="!sending" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                                     <svg x-show="sending" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
@@ -352,7 +433,7 @@
             <div class="max-w-lg mx-auto">
                 <div class="flex items-center justify-between mb-1">
                     <h2 class="text-xl font-semibold">Memory</h2>
-                    <button @click="newMemoryText = ''; addMemoryModalOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]">
+                    <button @click="newMemoryText = ''; addMemoryModalOpen = true" class="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bubble-user">
                         <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                         Add
                     </button>
@@ -366,7 +447,7 @@
 
                 <div class="space-y-2">
                     <template x-for="mem in memories" :key="mem.id">
-                        <div class="group flex items-start justify-between gap-3 p-3 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800">
+                        <div class="group flex items-start justify-between gap-3 p-3 surface-raised">
                             <div class="min-w-0">
                                 <div class="text-sm text-neutral-800 dark:text-neutral-100" x-text="mem.content"></div>
                                 <div class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1" x-text="(mem.manual ? 'Added manually' : 'Auto-detected') + ' · ' + relativeTime(mem.created_at * 1000)"></div>
@@ -383,7 +464,7 @@
 
     <!-- ADD MEMORY MODAL -->
     <div x-show="addMemoryModalOpen" x-cloak @click.self="addMemoryModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-96 p-5">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-96 p-5">
             <h3 class="font-semibold text-sm mb-3">Add a memory</h3>
             <textarea x-model="newMemoryText" rows="3" placeholder="e.g. Prefers responses without emoji" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] resize-none"></textarea>
             <div class="flex gap-2 mt-4">
@@ -410,7 +491,7 @@
                     </div>
                     <div x-show="skillUploadError" class="text-xs text-red-500" x-text="skillUploadError"></div>
 
-                    <div x-show="skillFormOpen" class="space-y-2 p-4 rounded-2xl border border-neutral-200 dark:border-neutral-700">
+                    <div x-show="skillFormOpen" class="space-y-2 p-4 surface-raised">
                         <input type="text" x-model="skillDraft.name" placeholder="Skill name" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                         <input type="text" x-model="skillDraft.description" placeholder="Description (when should this be used?)" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                         <textarea x-model="skillDraft.body" placeholder="Full instructions (Markdown)" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2" style="min-height:200px;"></textarea>
@@ -422,7 +503,7 @@
 
                     <div class="space-y-2">
                         <template x-for="skill in skills" :key="skill.folder">
-                            <div class="flex items-center justify-between p-3 rounded-xl border border-neutral-200 dark:border-neutral-700">
+                            <div class="flex items-center justify-between p-3 surface-raised">
                                 <div class="min-w-0">
                                     <div class="text-sm font-medium truncate" x-text="skill.name"></div>
                                     <div class="text-xs text-neutral-400 dark:text-neutral-500 truncate" x-text="skill.description"></div>
@@ -442,85 +523,183 @@
 
     <!-- TASKS PAGE -->
     <template x-if="currentPage === 'tasks'">
-        <div class="flex-1 flex flex-col items-center justify-center gap-3 text-neutral-400 dark:text-neutral-600 p-8">
-            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-            <div class="text-lg font-medium text-neutral-700 dark:text-neutral-300">Automations coming soon</div>
-            <div class="text-sm text-center max-w-sm">Scheduled prompts that run on their own and report back, once the scheduler backend exists.</div>
+        <div class="flex-1 overflow-y-auto p-6" x-init="loadTasks(); loadTaskCapabilities()">
+            <div class="max-w-2xl mx-auto">
+                <div class="flex items-center justify-between mb-6">
+                    <div>
+                        <div class="text-lg font-semibold text-neutral-800 dark:text-neutral-100">Tasks</div>
+                        <div class="text-sm text-neutral-400 dark:text-neutral-500">Prompts that run on their own, on a schedule, and post results into a chat.</div>
+                    </div>
+                    <button @click="openNewTaskModal()" class="px-3 py-1.5 rounded-lg bubble-user text-white text-sm font-medium">+ New task</button>
+                </div>
+
+                <div x-show="tasks.length === 0" class="text-center text-neutral-400 dark:text-neutral-600 py-16">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="mx-auto mb-3"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                    <div class="text-sm">No tasks yet -- create one to run a prompt on a schedule.</div>
+                </div>
+
+                <div class="space-y-3">
+                    <template x-for="task in tasks" :key="task.id">
+                        <div class="surface-raised p-4 rounded-xl border-l-[3px] transition hover:shadow-md" :style="'border-left-color: ' + (isTaskComplete(task) ? '#9ca3af' : task.status === 'active' ? 'var(--accent)' : task.status === 'paused' ? '#9ca3af' : '#f87171')">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="min-w-0 flex-1">
+                                    <div class="text-sm text-neutral-800 dark:text-neutral-100 font-medium" x-text="task.prompt"></div>
+                                    <div class="flex items-center gap-2 mt-2 flex-wrap">
+                                        <span class="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full font-medium" :class="isTaskComplete(task) ? 'bg-neutral-200 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400' : task.status === 'active' ? 'bg-[var(--accent-soft)] text-[var(--accent-text)]' : task.status === 'paused' ? 'bg-neutral-200 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400' : 'bg-red-100 dark:bg-red-900/30 text-red-500'">
+                                            <span class="h-1.5 w-1.5 rounded-full" :class="isTaskComplete(task) ? 'bg-neutral-400' : task.status === 'active' ? 'bg-[var(--accent)]' : task.status === 'paused' ? 'bg-neutral-400' : 'bg-red-500'"></span>
+                                            <span x-text="isTaskComplete(task) ? 'Complete' : task.status === 'active' ? 'Active' : task.status === 'paused' ? 'Paused' : task.status"></span>
+                                        </span>
+                                        <span class="text-xs text-neutral-400 dark:text-neutral-500" x-text="formatTaskSchedule(task)"></span>
+                                    </div>
+                                    <div class="text-xs text-neutral-400 dark:text-neutral-600 mt-1.5" x-show="task.last_run_at">
+                                        Last run <span x-text="relativeTime(task.last_run_at * 1000)"></span> --
+                                        <span :class="task.last_run_status === 'error' ? 'text-red-400 font-medium' : ''" x-text="task.last_run_status"></span>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-0.5 shrink-0">
+                                    <button @click="switchSession(task.session_id); currentPage = 'chat'" x-show="task.session_id" title="View session" class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                    </button>
+                                    <button @click="toggleTaskStatus(task)" :title="task.status === 'paused' ? 'Resume' : 'Pause'" class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                        <svg x-show="task.status !== 'paused'" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                                        <svg x-show="task.status === 'paused'" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                                    </button>
+                                    <button @click="openEditTaskModal(task)" title="Edit" class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>
+                                    </button>
+                                    <button @click="deleteTask(task.id)" title="Delete" class="p-1.5 rounded-lg text-neutral-400 hover:text-red-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
         </div>
     </template>
 
     <!-- NOTES PAGE (fully functional, local) -->
     <template x-if="currentPage === 'notes'">
-        <div class="flex flex-1 min-w-0">
-            <aside class="w-full sm:w-60 shrink-0 flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 flex" :class="activeNoteId && 'hidden sm:flex'">
-                <div class="p-3">
-                    <button @click="newNote()" class="w-full flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-2.5 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
+        <div class="flex-1 min-w-0 overflow-y-auto" x-show="!activeNote()">
+            <div class="max-w-5xl mx-auto p-4 sm:p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Notes</h2>
+                    <button @click="newNote()" class="flex items-center gap-2 rounded-xl border border-neutral-200 dark:border-neutral-700 px-3 py-2 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 transition">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                         New note
                     </button>
                 </div>
-                <div class="flex-1 overflow-y-auto px-3 space-y-0.5">
+                <div style="columns: 4 220px; column-gap: 1rem;">
                     <template x-for="n in notes" :key="n.id">
-                        <div @click="activeNoteId = n.id" class="group flex items-center justify-between px-2.5 py-2 rounded-lg text-sm cursor-pointer"
-                             :class="n.id === activeNoteId ? 'bg-[var(--accent-soft)] dark:bg-[var(--accent-soft)] text-[var(--accent-text-strong)] dark:text-[var(--accent-text-strong)]' : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
-                            <span class="truncate" x-text="n.title || 'Untitled'"></span>
-                            <svg @click.stop="deleteNote(n.id)" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="opacity-0 group-hover:opacity-100 shrink-0 hover:text-red-500"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                        <div @click="activeNoteId = n.id" class="mb-4 p-4 rounded-2xl cursor-pointer surface-raised group" style="break-inside: avoid;">
+                            <div class="flex items-start justify-between gap-2 mb-1.5">
+                                <span class="font-medium text-sm truncate" x-text="n.title || 'Untitled'"></span>
+                                <svg @click.stop="deleteNote(n.id)" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="opacity-0 group-hover:opacity-100 shrink-0 hover:text-red-500"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                            </div>
+                            <div class="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed prose-msg overflow-hidden" style="max-height: 8rem;" x-html="renderMarkdown(n.body || '') || '&lt;span class=&quot;italic text-neutral-400&quot;&gt;No additional text&lt;/span&gt;'"></div>
+                            <div class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-2" x-text="n.updatedAt ? relativeTime(n.updatedAt) : ''"></div>
                         </div>
                     </template>
                 </div>
-            </aside>
-            <div class="flex-1 flex-col p-4 sm:p-6 min-w-0 flex" x-show="activeNote()">
-                <div class="flex items-center gap-2 mb-4">
-                    <button @click="activeNoteId = null" class="sm:hidden p-1.5 -ml-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 shrink-0">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-                    </button>
-                    <input type="text" x-model="activeNote().title" @input="saveNotes()" placeholder="Untitled" class="text-2xl font-semibold bg-transparent outline-none flex-1 min-w-0">
-                    <button @click="openSaveNoteFilePopup()" title="Save as file" class="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 shrink-0">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                    </button>
-                </div>
-                <textarea x-model="activeNote().body" @input="saveNotes()" placeholder="Start writing..." class="flex-1 bg-transparent outline-none resize-none text-[15px] leading-relaxed"></textarea>
-            </div>
-            <div class="flex-1 items-center justify-center text-neutral-400 dark:text-neutral-600 hidden sm:flex" x-show="!activeNote()">
-                Select or create a note
+                <div x-show="notes.length === 0" class="text-center text-neutral-400 dark:text-neutral-500 py-16">No notes yet.</div>
             </div>
         </div>
     </template>
-
+    <template x-if="currentPage === 'notes'">
+        <div class="flex-1 flex-col p-4 sm:p-6 min-w-0 flex" x-show="activeNote()">
+            <div class="flex items-center gap-2 mb-3">
+                <button @click="activeNoteId = null" class="flex items-center gap-1 p-1.5 -ml-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 shrink-0 text-sm">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                </button>
+                <input type="text" x-model="activeNote().title" @input="saveNotes()" placeholder="Untitled" class="text-2xl font-semibold bg-transparent outline-none flex-1 min-w-0">
+                <button @click="notePreviewMode = !notePreviewMode" :title="notePreviewMode ? 'Edit' : 'Preview'" class="p-1.5 rounded-lg transition shrink-0" :class="notePreviewMode ? 'text-[var(--accent-text)] bg-[var(--accent-soft)]' : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+                <button @click="openSaveNoteFilePopup()" title="Save as file" class="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                </button>
+            </div>
+            <div class="flex-1 flex flex-col min-h-0 surface-raised overflow-hidden">
+                <div class="flex items-center gap-0.5 px-2 py-1.5 border-b border-neutral-200 dark:border-neutral-700" x-show="!notePreviewMode">
+                    <button @click="insertNoteFormat('**', '**')" title="Bold" class="p-1.5 rounded-lg text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h9a4 4 0 0 1 0 8H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h7a4 4 0 0 1 0 8"/></svg>
+                    </button>
+                    <button @click="insertNoteFormat('*', '*')" title="Italic" class="p-1.5 rounded-lg text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" x2="10" y1="4" y2="4"/><line x1="14" x2="5" y1="20" y2="20"/><line x1="15" x2="9" y1="4" y2="20"/></svg>
+                    </button>
+                    <div class="w-px h-4 bg-neutral-200 dark:bg-neutral-700 mx-1"></div>
+                    <button @click="insertNoteFormat(null, null, '# ')" title="Heading 1" class="px-1.5 py-1 rounded-lg text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">H1</button>
+                    <button @click="insertNoteFormat(null, null, '## ')" title="Heading 2" class="px-1.5 py-1 rounded-lg text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">H2</button>
+                    <div class="w-px h-4 bg-neutral-200 dark:bg-neutral-700 mx-1"></div>
+                    <button @click="insertNoteFormat(null, null, '- ')" title="Bullet list" class="p-1.5 rounded-lg text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg>
+                    </button>
+                    <button @click="insertNoteFormat(null, null, '1. ')" title="Numbered list" class="p-1.5 rounded-lg text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="21" y1="6" y2="6"/><line x1="10" x2="21" y1="12" y2="12"/><line x1="10" x2="21" y1="18" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>
+                    </button>
+                </div>
+                <textarea x-show="!notePreviewMode" x-ref="noteBody" x-model="activeNote().body" @input="saveNotes()" @keydown.enter="handleNoteListContinue($event)" placeholder="Start writing..." class="flex-1 bg-transparent outline-none resize-none text-[15px] leading-relaxed p-4"></textarea>
+                <div x-show="notePreviewMode" class="flex-1 overflow-y-auto p-4 text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(activeNote().body || '*Nothing to preview yet*')"></div>
+                <div class="flex items-center justify-between px-4 py-2 border-t border-neutral-200 dark:border-neutral-700 text-[11px] text-neutral-400 dark:text-neutral-500 shrink-0">
+                    <span x-text="noteWordCount() + (noteWordCount() === 1 ? ' word' : ' words')"></span>
+                    <span x-text="activeNote().updatedAt ? 'Saved ' + relativeTime(activeNote().updatedAt) : ''"></span>
+                </div>
+            </div>
+        </div>
+    </template>
     <!-- MODELS PAGE -->
     <template x-if="currentPage === 'models'">
         <div class="flex-1 overflow-y-auto p-8">
-            <div class="max-w-2xl mx-auto space-y-8">
+            <div class="max-w-2xl mx-auto space-y-6">
                 <div class="flex items-center justify-between">
                     <h2 class="text-xl font-semibold">Models &amp; Endpoints</h2>
-                    <button @click="addEndpointOpen = true" class="px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">+ Add Endpoint</button>
+                    <button @click="addEndpointOpen = true" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bubble-user text-sm font-medium">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                        Add Endpoint
+                    </button>
                 </div>
 
-                <template x-for="ep in endpoints" :key="ep.id">
-                    <div class="border border-neutral-200 dark:border-neutral-700 rounded-xl p-4">
-                        <div class="flex items-center justify-between mb-2">
-                            <div>
-                                <div class="font-medium text-sm" x-text="ep.name"></div>
-                                <div class="text-xs text-neutral-400 dark:text-neutral-500" x-text="ep.type === 'local' ? ep.url : (ep.provider + ' \u00b7 online')"></div>
+                <div class="space-y-4">
+                    <template x-for="ep in endpoints" :key="ep.id">
+                        <div class="surface-raised p-4">
+                            <div class="flex items-center justify-between mb-3 gap-2">
+                                <div class="flex items-center gap-3 min-w-0">
+                                    <div class="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center" :class="ep.type === 'local' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-sky-500/10 text-sky-500'">
+                                        <svg x-show="ep.type === 'local'" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
+                                        <svg x-show="ep.type !== 'local'" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <div class="font-medium text-sm truncate" x-text="ep.name"></div>
+                                        <div class="text-xs text-neutral-400 dark:text-neutral-500 truncate font-mono" x-text="ep.type === 'local' ? ep.url : (ep.provider + ' \u00b7 online')"></div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 shrink-0">
+                                    <button @click="detectModels(ep.id)" class="text-xs px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800" x-text="ep.detecting ? 'Detecting...' : 'Detect Models'"></button>
+                                    <button @click="deleteEndpoint(ep.id)" class="text-xs px-2.5 py-1 rounded-lg border border-red-200 dark:border-red-900 text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10">Remove</button>
+                                </div>
                             </div>
-                            <div class="flex gap-2">
-                                <button x-show="ep.type === 'local'" @click="detectModels(ep.id)" class="text-xs px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800" x-text="ep.detecting ? 'Detecting...' : 'Detect Models'"></button>
-                                <button @click="deleteEndpoint(ep.id)" class="text-xs px-2.5 py-1 rounded-lg border border-red-200 dark:border-red-900 text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10">Remove</button>
+                            <div x-show="ep.error" class="text-xs text-red-500 mb-2" x-text="ep.error"></div>
+                            <div x-show="ep.detectedModels && ep.detectedModels.length > 0" class="mb-2">
+                                <input x-model="ep.modelFilter" type="text" placeholder="Search models..." class="w-full text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2.5 py-1.5 outline-none focus:border-[var(--accent-border-focus)] mb-2">
+                                <div class="flex items-center gap-2">
+                                    <button @click="selectAllFilteredModels(ep)" class="flex-1 text-xs px-2 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">Select all</button>
+                                    <button @click="deselectAllFilteredModels(ep)" class="flex-1 text-xs px-2 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">Deselect all</button>
+                                </div>
                             </div>
+                            <div class="space-y-0.5 max-h-64 overflow-y-auto" x-show="ep.detectedModels && ep.detectedModels.length">
+                                <template x-for="m in filteredEndpointModels(ep)" :key="m">
+                                    <label class="flex items-center gap-2.5 text-sm py-1.5 px-2 -mx-2 rounded-lg cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700/50 transition">
+                                        <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] dark:checked:bg-[var(--accent)] dark:checked:border-[var(--accent)] cursor-pointer shrink-0">
+                                        <span class="font-mono text-xs truncate" x-text="modelAliases[m] || m"></span>
+                                    </label>
+                                </template>
+                                <div x-show="ep.modelFilter && filteredEndpointModels(ep).length === 0" class="text-xs text-neutral-400 dark:text-neutral-500 py-1">No models match "<span x-text="ep.modelFilter"></span>".</div>
+                            </div>
+                            <div x-show="(!ep.detectedModels || !ep.detectedModels.length) && !ep.error" class="text-xs text-neutral-400 dark:text-neutral-500">No models detected yet -- click "Detect Models".</div>
                         </div>
-                        <div x-show="ep.error" class="text-xs text-red-500 mb-2" x-text="ep.error"></div>
-                        <div class="space-y-1" x-show="ep.detectedModels && ep.detectedModels.length">
-                            <template x-for="m in ep.detectedModels" :key="m">
-                                <label class="flex items-center gap-2 text-sm py-1 cursor-pointer">
-                                    <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] dark:checked:bg-[var(--accent)] dark:checked:border-[var(--accent)] cursor-pointer">
-                                    <span x-text="m"></span>
-                                </label>
-                            </template>
-                        </div>
-                        <div x-show="ep.type === 'local' && (!ep.detectedModels || !ep.detectedModels.length) && !ep.error" class="text-xs text-neutral-400 dark:text-neutral-500">No models detected yet -- click "Detect Models".</div>
-                        <div x-show="ep.type === 'online'" class="text-xs text-amber-600 dark:text-amber-500 mt-1">Configured, but online inference isn't wired up yet -- coming in a follow-up.</div>
-                    </div>
-                </template>
+                    </template>
+                </div>
 
                 <div x-show="endpoints.length === 0" class="text-sm text-neutral-400 dark:text-neutral-500 text-center py-8">No endpoints configured yet.</div>
             </div>
@@ -534,17 +713,17 @@
                 <h2 class="text-xl font-semibold">MCP Servers</h2>
                 <div class="text-sm text-neutral-400 dark:text-neutral-500">Connect any MCP server by name and launch command -- no server-specific code, just configuration.</div>
 
-                <div class="space-y-2 p-4 rounded-2xl border border-neutral-200 dark:border-neutral-700">
+                <div class="space-y-2 p-4 surface-raised">
                     <input type="text" x-model="newMcpName" placeholder="Name (e.g. highlighthunter)" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                     <input type="text" x-model="newMcpCommand" placeholder="Command (e.g. python3)" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                     <input type="text" x-model="newMcpArgs" placeholder="Args, space-separated (e.g. /home/ohporty/highlighthunter-mcp/server.py)" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
-                    <button @click="addMcpServer()" class="w-full py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Connect</button>
+                    <button @click="addMcpServer()" class="w-full py-2 rounded-lg bubble-user text-sm font-medium">Connect</button>
                     <div x-show="mcpAddError" class="text-xs text-red-500" x-text="mcpAddError"></div>
                 </div>
 
                 <div class="space-y-2">
                     <template x-for="server in mcpServers" :key="server.name">
-                        <div class="rounded-xl border border-neutral-200 dark:border-neutral-700 overflow-hidden">
+                        <div class="surface-raised overflow-hidden">
                             <div class="flex items-center justify-between p-3 cursor-pointer" @click="expandedServer = expandedServer === server.name ? null : server.name">
                                 <div class="min-w-0">
                                     <div class="flex items-center gap-2">
@@ -566,12 +745,12 @@
                         </div>
                     </template>
                     <div x-show="mcpServers.length === 0" class="text-sm text-neutral-400 dark:text-neutral-500 text-center py-4">No MCP servers connected yet.</div>
-                    <div x-show="mcpCallResult" class="p-3 rounded-xl border border-neutral-200 dark:border-neutral-700">
+                    <div x-show="mcpCallResult" class="p-3 surface-raised">
                         <div class="text-xs font-semibold mb-2">Result:</div>
                         <template x-if="mcpCallResult && mcpCallResult.shape && mcpCallResult.shape.type === 'cards'">
                             <div class="grid grid-cols-2 gap-2">
                                 <template x-for="(item, idx) in mcpCallResult.shape.items" :key="idx">
-                                    <div class="rounded-lg overflow-hidden border border-neutral-200 dark:border-neutral-700">
+                                    <div class="rounded-lg overflow-hidden surface-raised">
                                         <img :src="item[mcpCallResult.shape.imageKey]" class="w-full h-20 object-cover bg-neutral-100 dark:bg-neutral-700">
                                         <div class="p-1.5 text-xs truncate" x-text="item[mcpCallResult.shape.titleKey]"></div>
                                     </div>
@@ -592,7 +771,7 @@
             <div class="max-w-lg mx-auto space-y-8">
                 <h2 class="text-xl font-semibold">Settings</h2>
 
-                <div>
+                <div class="surface-raised p-5">
                     <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Appearance</h3>
                     <div class="flex items-center justify-between py-2">
                         <span class="text-sm">Theme</span>
@@ -606,7 +785,7 @@
                         <div class="flex items-center gap-2 relative">
                             <button @click="openColorPicker()" class="h-9 w-9 rounded-xl border-2 border-neutral-200 dark:border-neutral-700 shadow-sm cursor-pointer shrink-0" :style="'background:' + themeSeedColor"></button>
                             <div x-show="colorPickerOpen" x-cloak @click.self="colorPickerOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-[60] p-4">
-                            <div class="p-3 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-2xl w-64">
+                            <div class="p-3 rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 surface-modal w-64">
                                 <div class="relative w-full h-40 rounded-lg cursor-crosshair select-none" :style="'background: linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(' + pickerHue + ',100%,50%))'" @mousedown="startDragSL($event)" @touchstart="startDragSL($event)">
                                     <div class="absolute w-4 h-4 rounded-full border-2 border-white shadow -translate-x-1/2 -translate-y-1/2 pointer-events-none" :style="'left:' + pickerSat + '%; top:' + (100 - pickerVal) + '%'"></div>
                                 </div>
@@ -626,20 +805,15 @@
                     <div class="text-xs text-neutral-400 dark:text-neutral-500">Regenerates the accent color, borders, highlights, logo, and wordmark from one picked color, for both light and dark mode.</div>
                 </div>
 
-                <div>
+                <div class="surface-raised p-5">
                     <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Defaults</h3>
                     <div class="flex items-center justify-between py-2">
                         <span class="text-sm">Default model</span>
                         <span class="text-sm text-neutral-500 dark:text-neutral-400" x-text="defaultModel ? defaultModel.label : 'Not set'"></span>
                     </div>
                     <div class="text-xs text-neutral-400 dark:text-neutral-500">Set from the model picker in Chat (open it, pick a model, then "Set current as default").</div>
-
-                </div>
-
-                <div>
-                    <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Memory</h3>
-                    <div class="flex items-center justify-between gap-2 py-2">
-                        <span class="text-sm shrink-0">Extraction model</span>
+                    <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm shrink-0">Memory extraction model</span>
                         <select x-model="memoryExtractionModel" @change="saveMemoryModel()" class="text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5 min-w-0 max-w-[60%]">
                             <option value="">Off (no automatic memory)</option>
                             <template x-for="m in allAvailableModels()" :key="m.value">
@@ -648,16 +822,14 @@
                         </select>
                     </div>
                     <div class="text-xs text-neutral-400 dark:text-neutral-500">Runs automatically after 10 minutes of inactivity, scanning everything said since the last scan across all chats for genuinely durable facts worth remembering. Off by default.</div>
+                    <div class="py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-1.5">SearXNG URL (enables web_search and web_fetch)</label>
+                        <input type="text" x-model="searchUrl" @change="saveSearchUrl()" placeholder="http://localhost:4444" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
+                        <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1.5" x-show="!searchUrl">Web search tools are unavailable until this is set.</div>
+                    </div>
                 </div>
 
-                <div>
-                    <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Tools</h3>
-                    <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-1.5">SearXNG URL (enables web_search and web_fetch)</label>
-                    <input type="text" x-model="searchUrl" @change="saveSearchUrl()" placeholder="http://localhost:4444" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
-                    <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1.5" x-show="!searchUrl">Web search tools are unavailable until this is set.</div>
-                </div>
-
-                <div>
+                <div class="surface-raised p-5">
                     <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Security</h3>
 
                     <div class="py-2">
@@ -685,7 +857,7 @@
                     </div>
                 </div>
 
-                <div>
+                <div class="surface-raised p-5">
                     <h3 class="text-sm font-semibold text-neutral-500 dark:text-neutral-400 mb-3">Data</h3>
                     <div class="flex items-center justify-between py-2">
                         <span class="text-sm">Export sessions &amp; notes</span>
@@ -703,11 +875,23 @@
 
 <!-- MODEL POPUP -->
 <div x-show="modelPopupOpen" x-cloak @click.self="modelPopupOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-96 shadow-2xl">
-        <h3 class="font-semibold text-sm mb-3">Model &amp; Context</h3>
-        <div class="space-y-1">
+    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-96 max-h-[80vh] flex flex-col surface-modal">
+        <h3 class="font-semibold text-sm mb-3 shrink-0">Model &amp; Context</h3>
+        <div class="space-y-1 overflow-y-auto">
             <template x-for="m in allAvailableModels()" :key="m.value">
-                <div @click="selectModel(m)" class="px-3 py-2 rounded-lg text-sm cursor-pointer" :class="m.value === model ? 'bg-[var(--accent)] text-white' : 'text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800'" x-text="m.label"></div>
+                <div class="group px-3 py-2 rounded-lg text-sm flex items-center gap-2" :class="m.value === model && renamingModelValue !== m.value ? 'bg-[var(--accent)] text-white' : 'text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+                    <template x-if="renamingModelValue !== m.value">
+                        <div @click="selectModel(m)" class="flex-1 cursor-pointer truncate" x-text="m.label"></div>
+                    </template>
+                    <template x-if="renamingModelValue !== m.value">
+                        <button @click="startRenameModel(m, $event)" class="opacity-0 group-hover:opacity-100 shrink-0 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10" title="Rename">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                        </button>
+                    </template>
+                    <template x-if="renamingModelValue === m.value">
+                        <input type="text" x-model="renameInputText" @click.stop @keydown.enter="saveModelRename()" @keydown.escape="cancelRenameModel()" @blur="saveModelRename()" x-init="$nextTick(() => $el.focus())" class="flex-1 min-w-0 text-sm bg-white dark:bg-neutral-700 border border-neutral-300 dark:border-neutral-600 rounded px-2 py-1 text-neutral-800 dark:text-neutral-100">
+                    </template>
+                </div>
             </template>
             <div x-show="allAvailableModels().length === 0" class="text-xs text-neutral-400 dark:text-neutral-500 px-3 py-2">No models yet -- add an endpoint and detect models on the Models page.</div>
         </div>
@@ -729,7 +913,7 @@
 
 <!-- WORKSPACE POPUP -->
 <div x-show="workspacePopupOpen" x-cloak @click.self="workspacePopupOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-[420px] shadow-2xl">
+    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-[420px] surface-modal">
         <h3 class="font-semibold text-sm mb-2">Workspace</h3>
         <p class="text-xs text-neutral-500 dark:text-neutral-400 mb-3">File creation/editing tools only activate when a workspace is set. Choose "None" to keep Athena read-only.</p>
 
@@ -761,7 +945,7 @@
 
 <!-- SAVE NOTE AS FILE POPUP -->
 <div x-show="saveNoteFilePopupOpen" x-cloak @click.self="saveNoteFilePopupOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-[420px] shadow-2xl">
+    <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-[420px] surface-modal">
         <h3 class="font-semibold text-sm mb-2">Save Note As</h3>
         <p class="text-xs text-neutral-500 dark:text-neutral-400 mb-3">Choose a folder and filename to save this note as a file.</p>
         <div class="flex items-center gap-2 mb-2 text-xs">
@@ -798,7 +982,7 @@
 
 <!-- ADD ENDPOINT POPUP -->
 <div x-show="addEndpointOpen" x-cloak @click.self="addEndpointOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-    <div class="bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-96 shadow-2xl">
+    <div class="bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-96 surface-modal">
         <h3 class="font-semibold text-sm mb-3">Add Endpoint</h3>
         <div class="flex gap-1 bg-neutral-100 dark:bg-neutral-800 rounded-lg p-1 mb-4">
             <button @click="newEndpointType = 'local'" class="flex-1 px-3 py-1.5 rounded-md text-xs font-medium" :class="newEndpointType === 'local' ? 'bg-white dark:bg-neutral-700 shadow-sm' : 'text-neutral-500'">Local</button>
@@ -814,11 +998,14 @@
             <input type="text" x-model="newEndpointName" placeholder="Name (e.g. My OpenAI Key)" class="w-full text-sm bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
             <select x-model="newEndpointProvider" class="w-full text-sm bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                 <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
                 <option value="anthropic">Anthropic</option>
-                <option value="custom">Custom</option>
+                <option value="google">Google Gemini</option>
+                <option value="custom">Custom (OpenAI-compatible)</option>
             </select>
             <input type="password" x-model="newEndpointApiKey" placeholder="API key" class="w-full text-sm bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
             <input x-show="newEndpointProvider === 'custom'" type="text" x-model="newEndpointUrl" placeholder="Base URL" class="w-full text-sm bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
+            <div class="text-xs text-neutral-400 dark:text-neutral-500">Models are detected automatically after adding -- use "Detect Models" on the endpoint's card.</div>
         </div>
 
         <button @click="addEndpoint()" class="w-full mt-4 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Add</button>
@@ -828,19 +1015,22 @@
 <script src="/static/js/app.js"></script>
     <!-- FILE PREVIEW MODAL -->
     <div x-show="filePreviewOpen" x-cloak @click.self="filePreviewOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-[36rem] max-w-[90vw] max-h-[80vh] flex flex-col p-4">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-[36rem] max-w-[90vw] max-h-[80vh] flex flex-col p-4">
             <div class="flex items-center justify-between mb-2 gap-2">
                 <span class="text-xs font-mono truncate text-neutral-600 dark:text-neutral-300" x-text="filePreviewPath"></span>
                 <button @click="filePreviewOpen = false" class="p-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-400 shrink-0">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
             </div>
-            <pre class="flex-1 overflow-auto text-xs bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 rounded-lg p-3 whitespace-pre-wrap" x-text="filePreviewContent"></pre>
+            <div class="file-preview-pre-wrap relative flex-1 min-h-0 overflow-auto rounded-lg">
+                <pre class="text-xs bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 p-3 whitespace-pre-wrap" x-text="filePreviewContent"></pre>
+                <button @click="copyMessage(filePreviewContent, $event)" class="copy-btn">Copy</button>
+            </div>
         </div>
     </div>
     <!-- DELETE CHAT CONFIRM MODAL -->
     <div x-show="deleteConfirmSessionId" x-cloak @click.self="deleteConfirmSessionId = null" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-80 p-5">
             <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-2">Delete this chat?</div>
             <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">This permanently removes its messages from memory. This can't be undone.</div>
             <div class="flex gap-2">
@@ -852,7 +1042,7 @@
 
     <!-- RENAME CHAT MODAL -->
     <div x-show="renameModalOpen" x-cloak @click.self="renameModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-80 p-5">
             <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3">Rename chat</div>
             <input x-model="renameModalValue" @keydown.enter="confirmRename()" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] mb-4" placeholder="Chat name">
             <div class="flex gap-2">
@@ -861,9 +1051,165 @@
             </div>
         </div>
     </div>
+
+    <!-- FORK CHAT MODAL -->
+    <div x-show="forkModalOpen" x-cloak @click.self="forkModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-80 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3">Fork chat</div>
+            <input x-model="forkModalValue" @keydown.enter="confirmFork()" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] mb-4" placeholder="Fork name">
+            <div class="flex gap-2">
+                <button @click="forkModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="confirmFork()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Fork</button>
+            </div>
+        </div>
+    </div>
+    <!-- TASK CREATE/EDIT MODAL -->
+    <div x-show="taskModalOpen" x-cloak @click.self="taskModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-full max-w-lg max-h-[85vh] overflow-y-auto p-6" x-show="taskDraft">
+            <div class="text-base font-semibold text-neutral-800 dark:text-neutral-100 mb-5" x-text="editingTaskId ? 'Edit task' : 'New task'"></div>
+
+            <div class="mb-5">
+                <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                    Prompt
+                </label>
+                <textarea x-model="taskDraft.prompt" rows="3" class="w-full text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition resize-none" placeholder="What should this task do each time it runs?"></textarea>
+            </div>
+
+            <div class="mb-5">
+                <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Posts results into
+                </label>
+                <select x-model="taskDraft.session_id" @change="if (taskDraft.session_id) { const s = sessions.find(x => x.id === taskDraft.session_id); if (s) taskDraft.session_label = s.label; }" class="w-full text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition mb-2">
+                    <option :value="null">New session</option>
+                    <template x-for="s in sessions" :key="s.id">
+                        <option :value="s.id" x-text="s.label"></option>
+                    </template>
+                </select>
+                <input x-show="!taskDraft.session_id" x-model="taskDraft.session_label" type="text" class="w-full text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition" placeholder="Session name">
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 mb-5">
+                <div>
+                    <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">Model</label>
+                    <select x-model="taskDraft.model" class="w-full text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition">
+                        <template x-for="m in allAvailableModels()" :key="m.value">
+                            <option :value="m.value" x-text="m.label"></option>
+                        </template>
+                    </select>
+                </div>
+                <div>
+                    <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">Workspace <span class="font-normal normal-case text-neutral-400">(optional)</span></label>
+                    <input x-model="taskDraft.workspace" type="text" class="w-full text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition" placeholder="Only for agentic coding">
+                </div>
+            </div>
+
+            <div class="mb-5 surface-raised rounded-xl p-3.5">
+                <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                    Schedule
+                </label>
+                <div class="flex gap-2 mb-3">
+                    <button @click="taskDraft.schedule_type = 'recurring'" class="flex-1 py-1.5 rounded-lg text-xs font-medium transition" :class="taskDraft.schedule_type === 'recurring' ? 'bg-[var(--accent)] text-white' : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400'">Recurring</button>
+                    <button @click="taskDraft.schedule_type = 'once'" class="flex-1 py-1.5 rounded-lg text-xs font-medium transition" :class="taskDraft.schedule_type === 'once' ? 'bg-[var(--accent)] text-white' : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400'">One-time</button>
+                </div>
+
+                <div x-show="taskDraft.schedule_type === 'once'">
+                    <input type="datetime-local" :value="taskDraft.run_at ? new Date(taskDraft.run_at * 1000).toISOString().slice(0,16) : ''" @change="taskDraft.run_at = new Date($event.target.value).getTime() / 1000" class="w-full text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition">
+                </div>
+
+                <div x-show="taskDraft.schedule_type === 'recurring'" class="space-y-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-neutral-500 dark:text-neutral-400">Every</span>
+                        <input x-model.number="taskDraft.recurrence.interval" type="number" min="1" class="text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-2.5 py-1.5 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition w-16">
+                        <select x-model="taskDraft.recurrence.frequency" class="text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-2.5 py-1.5 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition">
+                            <option value="daily">day(s)</option>
+                            <option value="weekly">week(s)</option>
+                            <option value="monthly">month(s)</option>
+                        </select>
+                    </div>
+
+                    <div x-show="taskDraft.recurrence.frequency === 'weekly'" class="flex gap-1">
+                        <template x-for="d in ['SU','MO','TU','WE','TH','FR','SA']" :key="d">
+                            <button @click="toggleTaskDayOfWeek(d)" class="h-7 w-7 rounded-full text-[11px] font-medium transition" :class="taskDraft.recurrence.days_of_week.includes(d) ? 'bg-[var(--accent)] text-white shadow-sm' : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-600'" x-text="d[0]"></button>
+                        </template>
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-neutral-500 dark:text-neutral-400">At</span>
+                        <input x-model="taskDraft.recurrence.time_of_day" type="time" class="text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-2.5 py-1.5 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition">
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-neutral-500 dark:text-neutral-400">Ends</span>
+                        <select x-model="taskDraft.recurrence.end.type" class="text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-2.5 py-1.5 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition">
+                            <option value="never">Never</option>
+                            <option value="until">On date</option>
+                        </select>
+                        <input x-show="taskDraft.recurrence.end.type === 'until'" type="date" :value="taskDraft.recurrence.end.until ? new Date(taskDraft.recurrence.end.until * 1000).toISOString().slice(0,10) : ''" @change="taskDraft.recurrence.end.until = new Date($event.target.value).getTime() / 1000" class="text-sm bg-transparent border border-neutral-200 dark:border-neutral-700 rounded-lg px-2.5 py-1.5 outline-none focus:border-[var(--accent-border-focus)] focus:ring-1 focus:ring-[var(--accent-border-focus)] transition">
+                    </div>
+                </div>
+            </div>
+
+            <div class="mb-4">
+                <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                    Tools this task can use
+                </label>
+                <div class="space-y-0.5 max-h-40 overflow-y-auto surface-raised rounded-lg p-1.5">
+                    <template x-for="t in taskCapabilities.tools" :key="t.name">
+                        <label class="flex items-start gap-2 py-1.5 px-1.5 rounded-md cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700/50 transition">
+                            <input type="checkbox" :checked="taskDraft.enabled_tools.includes(t.name)" @change="toggleTaskTool(t.name)" class="mt-0.5 appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] cursor-pointer shrink-0 transition">
+                            <span class="text-xs leading-relaxed">
+                                <span class="font-medium text-neutral-700 dark:text-neutral-300" x-text="t.name"></span>
+                                <span class="text-neutral-400 dark:text-neutral-500" x-text="' -- ' + t.description"></span>
+                            </span>
+                        </label>
+                    </template>
+                </div>
+            </div>
+
+            <div class="mb-6" x-show="taskCapabilities.skills.length > 0">
+                <label class="text-xs font-semibold text-neutral-500 dark:text-neutral-400 mb-1.5 flex items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+                    Skills this task can load
+                </label>
+                <div class="space-y-0.5 max-h-32 overflow-y-auto surface-raised rounded-lg p-1.5">
+                    <template x-for="s in taskCapabilities.skills" :key="s.name">
+                        <label class="flex items-start gap-2 py-1.5 px-1.5 rounded-md cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700/50 transition">
+                            <input type="checkbox" :checked="taskDraft.enabled_skills.includes(s.name)" @change="toggleTaskSkill(s.name)" class="mt-0.5 appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] cursor-pointer shrink-0 transition">
+                            <span class="text-xs leading-relaxed">
+                                <span class="font-medium text-neutral-700 dark:text-neutral-300" x-text="s.name"></span>
+                                <span class="text-neutral-400 dark:text-neutral-500" x-text="' -- ' + s.description"></span>
+                            </span>
+                        </label>
+                    </template>
+                </div>
+            </div>
+
+            <div x-show="taskModalError" x-text="taskModalError" class="text-xs text-red-500 mb-3"></div>
+
+            <div class="flex gap-2">
+                <button @click="taskModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700 transition">Cancel</button>
+                <button @click="saveTaskDraft()" class="flex-1 py-2 rounded-lg bubble-user text-white text-sm font-medium transition">Save</button>
+            </div>
+        </div>
+    </div>
+    <!-- DELETE TASK CONFIRM MODAL -->
+    <div x-show="deleteTaskConfirmId" x-cloak @click.self="deleteTaskConfirmId = null" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-80 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-2">Delete this task?</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">This can't be undone. Its session and past results are not deleted.</div>
+            <div class="flex gap-2">
+                <button @click="deleteTaskConfirmId = null" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="confirmDeleteTask()" class="flex-1 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">Delete</button>
+            </div>
+        </div>
+    </div>
     <!-- MOBILE SETTINGS BOTTOM SHEET -->
     <div x-show="mobileSettingsSheetOpen" x-cloak @click.self="mobileSettingsSheetOpen = false" class="md:hidden fixed inset-0 bg-black/40 flex items-end justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-t-2xl shadow-xl w-full p-4 pb-6">
+        <div class="bg-white dark:bg-neutral-800 rounded-t-2xl surface-modal w-full p-4 pb-6">
             <div class="w-10 h-1 rounded-full bg-neutral-300 dark:bg-neutral-600 mx-auto mb-4"></div>
             <div class="space-y-1">
                 <button @click="mobileSettingsSheetOpen = false; modelPopupOpen = true" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left">
@@ -888,11 +1234,19 @@
                     <span class="text-xs truncate max-w-[9rem]" :class="workspace ? 'text-[var(--accent-icon)]' : 'text-neutral-400 dark:text-neutral-500'" x-text="workspace || 'none'"></span>
                 </button>
             </div>
+            <div x-show="pinnedMessages().length > 0" class="mt-3 pt-3 border-t border-neutral-200 dark:border-neutral-700">
+                <div class="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">Pinned messages</div>
+                <div class="space-y-0.5 max-h-48 overflow-y-auto">
+                    <template x-for="p in pinnedMessages()" :key="p.idx">
+                        <button @click="mobileSettingsSheetOpen = false; scrollToPinnedMessage(p.idx)" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-sm text-neutral-700 dark:text-neutral-300 truncate" x-text="(p.msg.content || '').slice(0, 80)"></button>
+                    </template>
+                </div>
+            </div>
         </div>
     </div>
     <!-- 2FA SETUP MODAL -->
     <div x-show="totp2FASetupModalOpen" x-cloak @click.self="totp2FASetupModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-96 p-5">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-96 p-5">
             <template x-if="!totp2FABackupCodes.length">
                 <div>
                     <h3 class="font-semibold text-sm mb-3">Set up two-factor authentication</h3>
@@ -926,7 +1280,7 @@
 
     <!-- 2FA DISABLE MODAL -->
     <div x-show="disable2FAModalOpen" x-cloak @click.self="disable2FAModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl w-80 p-5">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-80 p-5">
             <h3 class="font-semibold text-sm mb-3">Disable two-factor authentication</h3>
             <input x-model="disable2FAPasswordInput" type="password" placeholder="Confirm your password" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 mb-2">
             <div x-show="disable2FAError" class="text-xs text-red-400 mb-2" x-text="disable2FAError"></div>
@@ -952,7 +1306,7 @@
 
     <!-- MANUAL THEME MODAL -->
     <div x-show="manualThemeModalOpen" x-cloak @click.self="manualThemeModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl shadow-2xl w-full max-w-md max-h-[85vh] overflow-y-auto p-5">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-full max-w-md max-h-[85vh] overflow-y-auto p-5">
             <h3 class="font-semibold text-sm mb-1">Customize theme colors</h3>
             <div class="text-xs text-neutral-400 dark:text-neutral-500 mb-1">Fine-tune every color individually, for light and dark mode separately.</div>
             <div class="flex items-center gap-2 text-[10px] text-neutral-400 dark:text-neutral-500 mb-2 justify-end">
