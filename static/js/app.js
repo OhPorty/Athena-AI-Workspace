@@ -9,8 +9,44 @@ function athenaApp() {
     return {
         // --- navigation ---
         currentPage: "chat",
+        bots: [],
+        activeBotId: null,
+        activeRoomId: null,
+        roomMessages: [],
+        botMenuOpen: null,
+        botModalOpen: false,
+        botModalEditingId: null,
+        botDraft: {name: "", model: "", selectedEndpointId: "", description: ""},
+        vllmWarningOpen: false,
+        vllmWarnedBotDraft: false,
+        botEndpointPopupOpen: false,
+        botModelPopupOpen: false,
+        pickerTarget: "bot",
+        agentDefaultsModalOpen: false,
+        agentDefaultsDraft: {selectedEndpointId: "", model: "", naming_guidance: ""},
+        athenaAgentModel: "",
+        athenaAgentModelLabel: "Choose model",
+        athenaAgentModelEndpointUrl: "",
+        athenaAgentModelProvider: "",
+        athenaAgentModelApiKey: "",
+        modelPopupTarget: "main",
+        athenaMenuOpen: null,
+        activeRoom: null,
+        groupRooms: [],
+        groupModalOpen: false,
+        groupDraft: {label: "", memberBotIds: []},
+        mentionPopupOpen: false,
+        mentionQuery: "",
+        mentionStartIndex: null,
+        mentionActiveIndex: 0,
+        botToastMessage: "",
+        botToastTimer: null,
+        activeAthenaAgent: false,
+        botComposerText: "",
+        botConversationLoading: false,
         pages: [
             {id: "chat", label: "Chat", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'},
+            {id: "bots", label: "Bots", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="9" width="16" height="11" rx="2"/><path d="M12 9V5"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/><path d="M4 14H2"/><path d="M22 14h-2"/></svg>'},
             {id: "memory", label: "Memory", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H8m4-11A2.5 2.5 0 0 1 14.5 2h.01A2.5 2.5 0 0 1 17 4.5v15a2.5 2.5 0 0 1-4.96.5"/></svg>'},
             {id: "skills", label: "Skills", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.2H22l-6 4.6 2.3 7.2-6.3-4.6-6.3 4.6 2.3-7.2-6-4.6h7.6z"/></svg>'},
             {id: "tasks", label: "Tasks", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>'},
@@ -214,6 +250,9 @@ function athenaApp() {
                     ttsLabel: "Play",
                     rating: null,
                     model: m.role === "assistant" ? (m.model || this.getStoredMsgModel(m.messageId)) : undefined,
+                    thinkingOpen: false,
+                    toolCalls: m.toolCalls || [],
+                    toolsOpen: false,
                 }));
                 await this.loadRatingsForSession(id);
                 await this.loadPinsForSession(id);
@@ -569,6 +608,460 @@ function athenaApp() {
             this.expandedForkSessions[id] = !this.expandedForkSessions[id];
         },
 
+        async loadBots() {
+            try {
+                const resp = await fetch("/api/bots");
+                this.bots = await resp.json();
+            } catch (e) {
+                console.error("Failed to load bots:", e);
+            }
+        },
+        openNewBotModal() {
+            this.botModalEditingId = null;
+            this.botDraft = {name: "", model: "", selectedEndpointId: "", description: ""};
+            this.botModalOpen = true;
+        },
+        openEditBotModal(bot) {
+            this.botModalEditingId = bot.id;
+            const matchingEp = this.endpoints.find(ep => ep.url === bot.endpoint_url && !ep.apiKey);
+            this.botDraft = {
+                name: bot.name, model: bot.model,
+                selectedEndpointId: matchingEp ? matchingEp.id : "",
+                description: bot.description || "",
+            };
+            this.botMenuOpen = null;
+            this.botModalOpen = true;
+        },
+        localBotEndpoints() {
+            return this.endpoints.filter(ep => !ep.apiKey);
+        },
+        botModelOptionsForSelectedEndpoint() {
+            const ep = this.endpoints.find(e => e.id === this.currentPickerDraft().selectedEndpointId);
+            return ep ? (ep.enabledModels || []) : [];
+        },
+        onBotEndpointChange() {
+            this.botDraft.model = "";
+        },
+        currentPickerDraft() {
+            return this.pickerTarget === "agentDefaults" ? this.agentDefaultsDraft : this.botDraft;
+        },
+        selectPickerEndpoint(ep) {
+            const draft = this.currentPickerDraft();
+            draft.selectedEndpointId = ep.id;
+            draft.model = "";
+            this.botEndpointPopupOpen = false;
+        },
+        selectPickerModel(m) {
+            this.currentPickerDraft().model = m;
+            this.botModelPopupOpen = false;
+        },
+        async openAgentDefaultsModal() {
+            try {
+                const resp = await fetch("/api/settings");
+                const data = await resp.json();
+                const defaults = data.bot_creation_defaults || {};
+                const matchingEp = this.endpoints.find(ep => ep.url === defaults.endpoint_url && !ep.apiKey);
+                this.agentDefaultsDraft = {
+                    selectedEndpointId: matchingEp ? matchingEp.id : "",
+                    model: defaults.model || "",
+                    naming_guidance: defaults.naming_guidance || "",
+                };
+            } catch (e) {
+                this.agentDefaultsDraft = {selectedEndpointId: "", model: "", naming_guidance: ""};
+            }
+            this.agentDefaultsModalOpen = true;
+        },
+        async saveAgentDefaults() {
+            const ep = this.endpoints.find(e => e.id === this.agentDefaultsDraft.selectedEndpointId);
+            const body = JSON.stringify({
+                bot_creation_defaults: {
+                    endpoint_url: ep ? (ep.url || null) : null,
+                    provider: ep ? (ep.provider || "") : "",
+                    model: this.agentDefaultsDraft.model || null,
+                    naming_guidance: this.agentDefaultsDraft.naming_guidance.trim() || null,
+                },
+            });
+            try {
+                await fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body});
+                this.agentDefaultsModalOpen = false;
+            } catch (e) {
+                this.showBotToast("Failed to save agent defaults: " + e.message);
+            }
+        },
+        checkVllmWarning() {
+            if (this.botDraft.unload_strategy === "vllm_sleep" && !this.vllmWarnedBotDraft) {
+                this.vllmWarnedBotDraft = true;
+                this.vllmWarningOpen = true;
+            }
+        },
+        async saveBotDraft() {
+            if (!this.botDraft.name.trim() || !this.botDraft.selectedEndpointId || !this.botDraft.model) {
+                this.showBotToast("Name, endpoint, and model are required.");
+                return;
+            }
+            const ep = this.endpoints.find(e => e.id === this.botDraft.selectedEndpointId);
+            const body = JSON.stringify({
+                name: this.botDraft.name.trim(),
+                model: this.botDraft.model,
+                endpoint_url: ep ? (ep.url || null) : null,
+                provider: ep ? (ep.provider || "") : "",
+                unload_strategy: "ollama_keep_alive",
+                description: this.botDraft.description.trim() || null,
+                allowed_tools: [],
+            });
+            try {
+                const url = this.botModalEditingId ? `/api/bots/${this.botModalEditingId}` : "/api/bots";
+                const method = this.botModalEditingId ? "PUT" : "POST";
+                const resp = await fetch(url, {method, headers: {"Content-Type": "application/json"}, body});
+                const data = await resp.json();
+                if (data.error) {
+                    this.showBotToast("Failed to save bot: " + data.error);
+                    return;
+                }
+                this.botModalOpen = false;
+                await this.loadBots();
+            } catch (e) {
+                this.showBotToast("Failed to save bot: " + e.message);
+            }
+        },
+        async deleteBot(id) {
+            this.botMenuOpen = null;
+            try {
+                await fetch(`/api/bots/${id}`, {method: "DELETE"});
+                if (this.activeBotId === id) {
+                    this.activeBotId = null;
+                    this.activeRoomId = null;
+                    this.roomMessages = [];
+                }
+                await this.loadBots();
+            } catch (e) {
+                this.showBotToast("Failed to delete bot: " + e.message);
+            }
+        },
+        async openBotDM(botId) {
+            this.activeBotId = botId;
+            this.activeAthenaAgent = false;
+            this.botConversationLoading = true;
+            try {
+                const resp = await fetch("/api/rooms/find_or_create", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({kind: "dm", human_party: "user", member_bot_ids: [botId], label: "DM"}),
+                });
+                const room = await resp.json();
+                if (room.error) {
+                    this.showBotToast("Failed to open conversation: " + room.error);
+                    return;
+                }
+                this.activeRoom = room;
+                this.activeRoomId = room.id;
+                await this.loadRoomMessages(room.id);
+            } catch (e) {
+                this.showBotToast("Failed to open conversation: " + e.message);
+            } finally {
+                this.botConversationLoading = false;
+            }
+        },
+        async openGroupRoom(room) {
+            this.activeBotId = null;
+            this.activeAthenaAgent = false;
+            this.activeRoom = room;
+            this.activeRoomId = room.id;
+            this.botConversationLoading = true;
+            try {
+                await this.loadRoomMessages(room.id);
+            } finally {
+                this.botConversationLoading = false;
+            }
+        },
+        async loadGroupRooms() {
+            try {
+                const resp = await fetch("/api/rooms");
+                const data = await resp.json();
+                this.groupRooms = (data || []).filter(r => r.kind === "group" && !r.is_everyone_room);
+            } catch (e) {
+                this.groupRooms = [];
+            }
+        },
+        async openEveryoneRoom() {
+            this.activeBotId = null;
+            this.activeAthenaAgent = false;
+            this.botConversationLoading = true;
+            try {
+                const resp = await fetch("/api/rooms/everyone", {method: "POST"});
+                const room = await resp.json();
+                if (room.error) {
+                    this.showBotToast("Failed to open group: " + room.error);
+                    return;
+                }
+                this.activeRoom = room;
+                this.activeRoomId = room.id;
+                await this.loadRoomMessages(room.id);
+            } catch (e) {
+                this.showBotToast("Failed to open group: " + e.message);
+            } finally {
+                this.botConversationLoading = false;
+            }
+        },
+        openNewGroupModal() {
+            this.groupDraft = {label: "", memberBotIds: []};
+            this.groupModalOpen = true;
+        },
+        toggleGroupMember(botId) {
+            const idx = this.groupDraft.memberBotIds.indexOf(botId);
+            if (idx === -1) this.groupDraft.memberBotIds.push(botId);
+            else this.groupDraft.memberBotIds.splice(idx, 1);
+        },
+        mentionSuggestions() {
+            const q = this.mentionQuery.toLowerCase();
+            const botMatches = this.bots.filter(b => b.name.toLowerCase().startsWith(q));
+            const results = [];
+            if ("athena".startsWith(q)) {
+                results.push({id: "athena", name: "Athena", isAthena: true});
+            }
+            return results.concat(botMatches).slice(0, 6);
+        },
+        onComposerInput(event) {
+            const text = event.target.value;
+            const cursorPos = event.target.selectionStart;
+            const textBeforeCursor = text.slice(0, cursorPos);
+            const atMatch = textBeforeCursor.match(/@([A-Za-z0-9_-]*)$/);
+            if (atMatch) {
+                this.mentionQuery = atMatch[1];
+                this.mentionStartIndex = cursorPos - atMatch[0].length;
+                this.mentionPopupOpen = true;
+                this.mentionActiveIndex = 0;
+            } else {
+                this.mentionPopupOpen = false;
+            }
+        },
+        onComposerKeydown(event) {
+            if (this.mentionPopupOpen) {
+                const suggestions = this.mentionSuggestions();
+                if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    this.mentionActiveIndex = Math.min(this.mentionActiveIndex + 1, Math.max(suggestions.length - 1, 0));
+                    return;
+                }
+                if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    this.mentionActiveIndex = Math.max(this.mentionActiveIndex - 1, 0);
+                    return;
+                }
+                if ((event.key === "Enter" || event.key === "Tab") && suggestions.length > 0) {
+                    event.preventDefault();
+                    this.selectMention(suggestions[this.mentionActiveIndex]);
+                    return;
+                }
+                if (event.key === "Escape") {
+                    event.preventDefault();
+                    this.mentionPopupOpen = false;
+                    return;
+                }
+            }
+            if (event.key === "Enter") {
+                event.preventDefault();
+                this.sendBotComposerMessage();
+            }
+        },
+        selectMention(bot) {
+            const before = this.botComposerText.slice(0, this.mentionStartIndex);
+            const after = this.botComposerText.slice(this.mentionStartIndex + 1 + this.mentionQuery.length);
+            this.botComposerText = before + "@" + bot.name + " " + after;
+            this.mentionPopupOpen = false;
+            this.$nextTick(() => {
+                const ta = this.$refs.botComposerTextarea;
+                if (ta) {
+                    ta.focus();
+                    const newPos = before.length + bot.name.length + 2;
+                    ta.setSelectionRange(newPos, newPos);
+                }
+            });
+        },
+        async createGroupRoom() {
+            if (!this.groupDraft.label.trim()) {
+                this.showBotToast("Give the group a name.");
+                return;
+            }
+            if (this.groupDraft.memberBotIds.length < 2) {
+                this.showBotToast("Pick at least two bots for a group.");
+                return;
+            }
+            try {
+                const resp = await fetch("/api/rooms/find_or_create", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({kind: "group", human_party: null, member_bot_ids: this.groupDraft.memberBotIds, label: this.groupDraft.label.trim()}),
+                });
+                const room = await resp.json();
+                if (room.error) {
+                    this.showBotToast("Failed to create group: " + room.error);
+                    return;
+                }
+                this.groupModalOpen = false;
+                await this.loadGroupRooms();
+                await this.openGroupRoom(room);
+            } catch (e) {
+                this.showBotToast("Failed to create group: " + e.message);
+            }
+        },
+        async openAthenaAgent() {
+            this.activeBotId = null;
+            this.activeAthenaAgent = true;
+            this.activeRoomId = null;
+            if (!this.athenaAgentModel) {
+                try {
+                    const settingsResp = await fetch("/api/settings");
+                    const settingsData = await settingsResp.json();
+                    const saved = settingsData.athena_agent_model;
+                    if (saved && saved.model) {
+                        this.athenaAgentModel = saved.model;
+                        this.athenaAgentModelLabel = saved.label || saved.model;
+                        this.athenaAgentModelEndpointUrl = saved.endpoint_url || "";
+                        this.athenaAgentModelProvider = saved.provider || "";
+                        this.athenaAgentModelApiKey = saved.api_key || "";
+                    }
+                } catch (e) {
+                    console.error("Failed to load Athena's saved model:", e);
+                }
+            }
+            this.botConversationLoading = true;
+            try {
+                const resp = await fetch(`/api/history/athena-bots-agent`);
+                const data = await resp.json();
+                this.roomMessages = data.map(m => ({
+                    sender_type: m.role === "assistant" ? "athena" : "user",
+                    content: m.content,
+                    thinking: m.thinking || "",
+                    thinkingOpen: false,
+                    toolCalls: m.toolCalls || [],
+                    toolsOpen: false,
+                }));
+            } catch (e) {
+                this.roomMessages = [];
+            } finally {
+                this.botConversationLoading = false;
+            }
+            this.checkAthenaAgentBackgroundGeneration();
+        },
+        async checkAthenaAgentBackgroundGeneration() {
+            // Same mechanism as main chat's checkBackgroundGeneration --
+            // Athena2 goes through the identical /api/chat pipeline, just
+            // under the fixed "athena-bots-agent" session id, so a
+            // generation she started can keep running after the tab
+            // closed and this picks it back up the same way.
+            try {
+                const resp = await fetch(`/api/chat/status/athena-bots-agent`);
+                const data = await resp.json();
+                if (!this.activeAthenaAgent) return; // navigated away since this check started
+                if (data.generating) {
+                    this.botConversationLoading = true;
+                    setTimeout(() => this.checkAthenaAgentBackgroundGeneration(), 2000);
+                } else {
+                    const wasGenerating = this.botConversationLoading;
+                    this.botConversationLoading = false;
+                    if (wasGenerating) {
+                        await this.openAthenaAgent();
+                    }
+                }
+            } catch (e) {
+                this.botConversationLoading = false;
+            }
+        },
+        showBotToast(msg) {
+            this.botToastMessage = msg;
+            clearTimeout(this.botToastTimer);
+            this.botToastTimer = setTimeout(() => { this.botToastMessage = ""; }, 4000);
+        },
+        closeBotConversation() {
+            this.activeAthenaAgent = false;
+            this.activeRoomId = null;
+            this.activeBotId = null;
+            this.roomMessages = [];
+        },
+        async loadRoomMessages(roomId) {
+            try {
+                const resp = await fetch(`/api/rooms/${roomId}/messages`);
+                this.roomMessages = await resp.json();
+            } catch (e) {
+                this.roomMessages = [];
+            }
+        },
+        async sendBotComposerMessage() {
+            const text = this.botComposerText.trim();
+            if (!text) return;
+            this.botComposerText = "";
+            if (this.activeAthenaAgent) {
+                this.roomMessages.push({sender_type: "user", content: text});
+                this.botConversationLoading = true;
+                try {
+                    const resp = await fetch("/api/chat", {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({session_id: "athena-bots-agent", message: text, model: this.athenaAgentModel || this.model, endpoint_url: this.athenaAgentModelEndpointUrl || "", provider: this.athenaAgentModelProvider || ""}),
+                    });
+                    const reader = resp.body.getReader();
+                    const decoder = new TextDecoder();
+                    let full = "";
+                    const msgIndex = this.roomMessages.length;
+                    this.roomMessages.push({sender_type: "athena", content: "", thinking: "", thinkingOpen: true, toolCalls: []});
+                    while (true) {
+                        const {done, value} = await reader.read();
+                        if (done) break;
+                        for (const line of decoder.decode(value).split("\n")) {
+                            if (!line.startsWith("data: ")) continue;
+                            try {
+                                const obj = JSON.parse(line.slice(6));
+                                if (obj.thinking) {
+                                    this.roomMessages[msgIndex].thinking += obj.thinking;
+                                }
+                                if (obj.delta) {
+                                    this.roomMessages[msgIndex].thinkingOpen = false;
+                                    full += obj.delta;
+                                    this.roomMessages[msgIndex].content = full;
+                                }
+                                if (obj.type === "tool_start") {
+                                    this.roomMessages[msgIndex].toolCalls.push({tool: obj.tool, status: "running", output: null, open: true});
+                                }
+                                if (obj.type === "tool_output") {
+                                    const tc = this.roomMessages[msgIndex].toolCalls.find(t => t.tool === obj.tool && t.status === "running");
+                                    if (tc) {
+                                        tc.status = "done";
+                                        tc.output = obj.output;
+                                        tc.open = false;
+                                    }
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                } catch (e) {
+                    this.showBotToast("Failed to message Athena: " + e.message);
+                } finally {
+                    this.botConversationLoading = false;
+                }
+            } else if (this.activeRoomId) {
+                this.roomMessages.push({sender_type: "user", content: text});
+                this.botConversationLoading = true;
+                try {
+                    const resp = await fetch(`/api/rooms/${this.activeRoomId}/send`, {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({sender_type: "user", content: text}),
+                    });
+                    const data = await resp.json();
+                    if (data.error) {
+                        this.showBotToast("Failed to send: " + data.error);
+                        return;
+                    }
+                    await this.loadRoomMessages(this.activeRoomId);
+                } catch (e) {
+                    this.showBotToast("Failed to send: " + e.message);
+                } finally {
+                    this.botConversationLoading = false;
+                }
+            }
+        },
+
         newChat() {
             this.sessionId = generateUUID();
             localStorage.setItem("athena_session", this.sessionId);
@@ -703,11 +1196,22 @@ function athenaApp() {
         },
 
         selectModel(m) {
-            this.model = m.value;
-            this.modelLabel = m.label;
-            this.modelEndpointUrl = m.endpointUrl || "";
-            this.modelProvider = m.provider || "";
-            this.modelApiKey = m.apiKey || "";
+            if (this.modelPopupTarget === "athena") {
+                this.athenaAgentModel = m.value;
+                this.athenaAgentModelLabel = m.label;
+                this.athenaAgentModelEndpointUrl = m.endpointUrl || "";
+                this.athenaAgentModelProvider = m.provider || "";
+                this.athenaAgentModelApiKey = m.apiKey || "";
+                fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+                    athena_agent_model: {model: m.value, label: m.label, endpoint_url: m.endpointUrl || "", provider: m.provider || "", api_key: m.apiKey || ""}
+                })}).catch(e => console.error("Failed to save Athena's model:", e));
+            } else {
+                this.model = m.value;
+                this.modelLabel = m.label;
+                this.modelEndpointUrl = m.endpointUrl || "";
+                this.modelProvider = m.provider || "";
+                this.modelApiKey = m.apiKey || "";
+            }
             this.modelPopupOpen = false;
         },
 

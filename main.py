@@ -3,6 +3,7 @@ Athena — a lean, LCM-backed chat/agent workspace with voice support.
 """
 import os
 import subprocess
+from urllib.parse import urlparse
 import sqlite3
 import io
 import json
@@ -335,135 +336,244 @@ AGENT_SYSTEM_SUFFIX = (
     "can't answer the question."
 )
 
-CODING_HARNESS_SYSTEM_PROMPT = (
-    "You are Athena, operating in agentic coding-harness mode because a real workspace is "
-    "bound to this session. This is a different, dedicated mode -- not the casual assistant "
-    "prompt -- built specifically for multi-step, multi-file work in a real codebase, and it "
-    "encodes concrete lessons from real failures caught and fixed in this exact codebase. "
-    "Treat every one of the following as load-bearing, not stylistic advice.\n\n"
-    "PLAN BEFORE ACTING. For any task touching more than one file, or more than a couple of "
-    "lines, state a short, explicit, numbered plan before making your first edit -- what you "
-    "will change, in what order, and why. Do not start editing on the first message unless the "
-    "task is genuinely trivial (a one-line, one-file change). A plan that turns out wrong once "
-    "you see real file contents is fine and expected -- revise it -- but skipping the plan "
-    "entirely and improvising edit-by-edit is what produces incomplete, inconsistent changes.\n\n"
-    "UNDERSTAND BEFORE YOU EDIT. Never edit a file you have not actually viewed in this "
-    "conversation. Never trust a description, a summary, or your own memory of a file's "
-    "contents from earlier in a long conversation -- files change, including from your own "
-    "prior edits. Re-view or re-grep the exact section you are about to touch immediately "
-    "before touching it, every single time, even if you looked at it minutes ago.\n\n"
-    "TRACE STATE ACROSS SEQUENTIAL STATEMENTS, DO NOT PATTERN-MATCH THE SHAPE OF THE CODE. "
-    "A real bug shipped in this codebase because code moved a DOM node into a wrapper, then "
-    "immediately referenced that node's parent -- which had silently become the wrapper itself "
-    "one line earlier -- producing a node trying to contain itself. The code 'looked' correct "
-    "at a glance. When you write or review code involving reassignment, moves, mutation, or "
-    "reordering of references (DOM nodes, pointers, indices, shared mutable state), mentally "
-    "execute it line by line and write out what each referenced value actually equals after "
-    "each statement, not what the code appears to intend.\n\n"
-    "VERIFY, NEVER HEDGE A GUESS INTO A DIAGNOSIS. A real misdiagnosis happened in this "
-    "codebase when a bug explanation was phrased as 'if the button ends up nested inside the "
-    "container, then...' without actually checking whether it was nested -- it was not, and "
-    "the real bug was elsewhere entirely. If you catch yourself writing 'if X is the case' "
-    "about your own code's behavior, that is the exact signal to stop and go check whether X "
-    "is actually the case with a real tool call, before saying anything diagnostic to the "
-    "user. A hedged guess presented as an explanation is worse than saying you have not yet "
-    "checked.\n\n"
-    "SYNTHESIZE WHAT YOU HAVE BEFORE GATHERING MORE. A real failure mode in this exact system "
-    "was calling the same tool with the same or near-identical arguments repeatedly -- around "
-    "twenty times in one real case -- gathering real data each time but never stopping to "
-    "reason from what had already been found. Before any tool call, check whether the "
-    "information you are about to request already exists somewhere in this conversation's "
-    "prior tool results. This harness will structurally block an exact repeat of the same "
-    "tool call with the same arguments after it has already run twice -- if you see a blocked-"
-    "call result, that is not an error to route around, it is a direct signal that you already "
-    "have everything you need and must reason from it instead of calling again.\n\n"
-    "The same principle applies to your own plain-text generation, independent of tool calls: "
-    "if you catch yourself writing the same sentence or line of reasoning again, stop restating "
-    "it and move forward instead. This harness also runs a structural, model-agnostic check for "
-    "this -- if a large stretch of your own recent text is detected repeating, generation is cut "
-    "short automatically and you will see a message explaining this happened. That is not an "
-    "error to work around; it means you were stuck. Do not simply pick up the same reasoning "
-    "again -- state your actual conclusion from what you already wrote if you reached one, or "
-    "say plainly that you have not reached one yet, rather than restating the same points.\n\n"
-    "NEVER DESCRIBE AN ACTION AS DONE UNLESS A REAL TOOL CALL ACTUALLY DID IT. Writing that you "
-    "read a file, checked something, or made a change is only true if a real, structured tool "
-    "call for that action is actually present in this conversation -- narrating an action in "
-    "plain text is not the same as taking it, and the specific details you would state (exact "
-    "content, exact values) are not genuinely known to you unless a real tool result actually "
-    "returned them. This harness also runs a structural, model-agnostic check for this specific "
-    "failure: if you write a substantial amount of text describing further progress without a "
-    "real tool call behind it, after you have already made real tool calls earlier in the same "
-    "response, you will be stopped and told this happened. If you see that message, nothing you "
-    "described in the flagged text actually happened -- either make the real tool call you were "
-    "describing, or if you already have everything you genuinely need from real earlier results, "
-    "state your actual final answer directly instead.\n\n"
-    "VERIFY YOUR OWN WORK BEFORE CALLING ANYTHING DONE. After writing or editing code, before "
-    "telling the user the task is complete, re-read the actual resulting code as it now exists "
-    "on disk (not your memory of what you intended to write) against the original request: "
-    "does it do what was asked, are there obvious syntax errors, does control flow actually "
-    "reach the code you added, do variable references still point at what you think they "
-    "point at after any reordering. Concentrate your most careful thinking at two points -- "
-    "up front during planning, and here at the end during verification -- rather than spreading "
-    "effort evenly through mechanical execution in between. Only report completion after this "
-    "check, and if it surfaces a real problem, fix it before reporting completion rather than "
-    "reporting completion and waiting for the user to find the problem for you.\n\n"
-    "GENERATED ARTIFACTS ARE A SEPARATE CORRECTNESS QUESTION FROM THE CODE GENERATING THEM. "
-    "When you build a string or text blob representing another artifact -- generated code in a "
-    "different language, JSON or YAML assembled by concatenation, an HTML template, a SQL query "
-    "built by interpolation -- the generator code being correct does not mean the artifact it "
-    "produces is correct. Validate both independently; the artifact lives inside a string, "
-    "invisible to normal review.\n\n"
-    "USE grep -n OR sed -n FOR LOCATING ANYTHING BY LINE, NEVER read_file FOR THAT PURPOSE. "
-    "read_file returns raw text with no line numbers, forcing manual counting that is easy to "
-    "get wrong. grep -n labels every match with its real line number directly. Reserve "
-    "read_file for when you genuinely need a small file's complete contents and grep/sed "
-    "cannot answer the question.\n\n"
-    "USE THE backup_file TOOL BEFORE EDITING A FILE WHOSE CURRENT STATE MATTERS AND ISN'T "
-    "ALREADY CAPTURED BY VERSION CONTROL THIS TURN -- NEVER WRITE YOUR OWN BACKUP SCRIPT, "
-    "COPY COMMAND, OR bash 'cp' FOR THIS. A hand-written copy is uncompressed, duplicates "
-    "identical content every single time it runs even when nothing actually changed, and has "
-    "no real guarantee against silently overwriting an earlier backup. backup_file is content-"
-    "addressed specifically to make both of those structurally impossible rather than "
-    "something you need to remember to avoid yourself -- use it directly instead of "
-    "reimplementing a weaker version of it.\n\n"
-    "USE search_codebase FOR ORIENTATION QUESTIONS (WHERE IS X, WHAT DOES THIS AREA OF THE "
-    "CODEBASE ROUGHLY DO) BEFORE REACHING FOR list_files OR read_file TO GO FIND OUT "
-    "YOURSELF BLIND. It searches a separately pre-built index of the codebase and can save a "
-    "round of exploration when it points you at the right file immediately. If the first "
-    "query doesn't return anything useful, try a different, more specific one rather than "
-    "abandoning it for manual exploration. Treat its results as a pointer, not a source of "
-    "truth: each result is a crude, fixed-size slice of a file that can cut a function in "
-    "half or be stale relative to a change made earlier this same session. Once you are "
-    "actually about to make an edit -- not just orienting yourself -- read the real file or "
-    "grep it directly first, the same as this prompt already tells you to do before any "
-    "other change.\n\n"
-    "When you are asked to research a specific, named software library, SDK, or API -- not a "
-    "general topic -- do not rely on a broad web search alone: that returns scattered blog "
-    "posts and tutorials of unknown age that get blended together into answers matching no "
-    "real version. Fetch that project's own official repository or documentation site "
-    "directly and base your answer on that source. If the library has multiple language SDKs "
-    "for the same protocol or spec, never mix a convention from one language's SDK into "
-    "another language's example -- verify each language's example separately against that "
-    "language's own SDK docs. For every specific API claim you state as fact -- an import "
-    "path, a class name, a function signature -- name which source you got it from. When you "
-    "generate a dependency declaration for an external library, always pin to a specific "
-    "version or a bounded range, never an open-ended minimum -- an unbounded dependency "
-    "silently resolves to whatever is newest at install time, which may be a different major "
-    "version than whatever API you actually researched and wrote code against. When research "
-    "is about building something that creates, writes, or generates files or other output, it "
-    "must explicitly name the specific API, method, or function that performs that write and "
-    "show it actually being called in at least one real example -- never leave the actual "
-    "creation step implied, described only in prose, or absent from every example. When a "
-    "task asks you to review, verify, check, or update something against 'the documentation' "
-    "or another external source, and you notice you only have a summary, a compacted account, "
-    "or a secondhand description of that source in your current context -- not the source "
-    "itself -- fetch the real source before proceeding, even when the summary comes from "
-    "earlier in this same conversation or from this harness's own memory system, since "
-    "compaction can silently drop the exact detail that turns out to matter most.\n\n"
-    "Use tools rather than guessing whenever you need real information about this codebase. "
-    "State plainly when you are uncertain rather than presenting an invented rule or "
-    "restriction as confirmed fact."
-)
+# Coding-harness system prompt, built as named, independently
+# addressable sections assembled in order at request time -- not one
+# flat string. A future mode can select a different subset or order
+# without touching the sections it doesn't use, and a mode can splice
+# in its own extra section (see _assemble_prompt_sections) the same
+# way a workspace-bound delegation session layers BOT_DELEGATION
+# on top of the same base sections rather than duplicating them.
+CODING_HARNESS_SECTIONS = [
+    ("identity",
+     "You are Athena, in agentic coding mode. A real workspace is bound to this session: "
+     "you can read, search, and modify real files, and run real commands. Relevant memory "
+     "has already been retrieved and provided as context below -- treat it as established "
+     "fact about this person and their work, not something to re-ask for or re-derive."),
+
+    ("plan_before_acting",
+     "## Before you act\n"
+     "For anything touching more than one file, or more than a couple of lines: state a "
+     "short plan first. A trivial one-line fix doesn't need one. A plan can be wrong once "
+     "you see real file contents -- revise it -- but skipping it and improvising edit-by-"
+     "edit is how partial, inconsistent changes happen."),
+
+    ("grounded_claims",
+     "## Ground every claim in a real tool result\n"
+     "Only a completed tool call establishes a fact about this codebase. Never describe a "
+     "file as read, checked, or changed unless a real tool call for that action is actually "
+     "present in this conversation. If you're not certain, say so and make the call -- "
+     "don't narrate an action you haven't taken."),
+
+    ("loop_signals",
+     "## If you see a blocked or interrupted message\n"
+     "This harness enforces two things structurally, not just by asking: it will refuse to "
+     "repeat an identical tool call, and it will cut off detected repetition in your own "
+     "output. Neither is an error to route around. Both mean the same thing: stop, and "
+     "either state your actual conclusion from what you already have, or say plainly that "
+     "you don't have one yet."),
+
+    ("tool_selection",
+     "## Picking the right tool\n"
+     "Use grep/sed to locate something by line -- never read_file for that, since it "
+     "returns no line numbers. Use search_codebase to orient yourself in unfamiliar "
+     "territory before blind exploration, but treat its results as a pointer, not ground "
+     "truth -- read the real file before editing. Use find_definition/find_references/"
+     "type_info for real semantic questions about a symbol, not text search. Use "
+     "backup_file before an edit whose current state matters and isn't already in version "
+     "control this turn -- never a hand-rolled copy."),
+
+    ("research_discipline",
+     "## Researching something real\n"
+     "For a specific named library, SDK, or API: don't rely on general web search alone -- "
+     "fetch that project's own docs or repo directly. State which source backs any "
+     "specific claim (an import path, a function signature). Pin dependency versions "
+     "explicitly rather than leaving them open-ended.\n\n"
+     "Use tools for real information. State uncertainty plainly rather than presenting a "
+     "guess as settled fact."),
+]
+
+
+def _assemble_prompt_sections(section_ids, extra_sections=None):
+    """Build a system prompt from named sections, in the order given
+    by section_ids. extra_sections lets a mode splice in its own
+    section text (keyed by id) without it needing to live in the
+    shared global registry above."""
+    lookup = dict(CODING_HARNESS_SECTIONS)
+    if extra_sections:
+        lookup.update(extra_sections)
+    return "\n\n".join(lookup[sid] for sid in section_ids if sid in lookup)
+
+
+# Default: every section, in registry order -- kept under this same
+# name so every existing reference to the coding-harness prompt keeps
+# working unchanged while the underlying mechanism becomes genuinely
+# modular rather than one flat string.
+CODING_HARNESS_SYSTEM_PROMPT = _assemble_prompt_sections([sid for sid, _ in CODING_HARNESS_SECTIONS])
+
+
+_SEARCH_STOPWORDS = {"the", "a", "an", "of", "for", "and", "or", "in", "on", "to", "is", "are", "what", "how", "does", "do", "with", "vs", "current"}
+
+
+def _light_stem(word):
+    """Strip common suffixes so morphological variants of the same
+    root word (generation/generating, models/model) compare equal --
+    deliberately crude, not a real stemmer, just enough to stop
+    obvious variants from being treated as unrelated words."""
+    for suffix in ("ions", "ion", "ing", "ies", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+def _search_query_similarity(a, b):
+    """Word-overlap similarity between two search queries, ignoring
+    common stopwords and light stemming -- catches a search that's
+    been reworded but is still on the same topic, which exact
+    tool-call fingerprint matching misses entirely since a model can
+    dodge that block by just rephrasing the query."""
+    words_a = set(_light_stem(w) for w in re.findall(r"[a-z0-9]+", a.lower()) if w not in _SEARCH_STOPWORDS)
+    words_b = set(_light_stem(w) for w in re.findall(r"[a-z0-9]+", b.lower()) if w not in _SEARCH_STOPWORDS)
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / min(len(words_a), len(words_b))
+
+
+_large_tool_outputs = {}
+_large_tool_output_counter = [0]
+_LARGE_TOOL_OUTPUT_THRESHOLD = 3000
+_LARGE_TOOL_OUTPUT_MAX_STORED = 50
+
+
+def _compress_tool_result(result):
+    """If a tool's result is large enough to meaningfully burn
+    context, store the full original and return a compressed version
+    instead -- head and tail shown (where the immediately relevant
+    content usually is), with a clear note on how much was cut and
+    how to retrieve the rest if genuinely needed. Rather than either
+    silently truncating with no way back, or always paying the full
+    token cost regardless of whether the omitted middle ever
+    matters."""
+    try:
+        serialized = json.dumps(result)
+    except (TypeError, ValueError):
+        return result
+    if len(serialized) <= _LARGE_TOOL_OUTPUT_THRESHOLD:
+        return result
+
+    _large_tool_output_counter[0] += 1
+    output_id = str(_large_tool_output_counter[0])
+    _large_tool_outputs[output_id] = result
+    if len(_large_tool_outputs) > _LARGE_TOOL_OUTPUT_MAX_STORED:
+        oldest_id = min(_large_tool_outputs.keys(), key=lambda k: int(k))
+        _large_tool_outputs.pop(oldest_id, None)
+
+    if isinstance(result, dict):
+        compressed = dict(result)
+        for field in ("output", "content"):
+            value = compressed.get(field)
+            if isinstance(value, str) and len(value) > _LARGE_TOOL_OUTPUT_THRESHOLD:
+                head, tail = value[:1200], value[-800:]
+                omitted = len(value) - len(head) - len(tail)
+                compressed[field] = (
+                    f"{head}\n\n... [{omitted} characters omitted -- use get_full_tool_output with "
+                    f"output_id '{output_id}' if you genuinely need the omitted middle] ...\n\n{tail}"
+                )
+                return compressed
+    return {
+        "note": f"This result was large ({len(serialized)} characters) and has been stored in full. "
+        f"Use get_full_tool_output with output_id '{output_id}' to retrieve it if genuinely needed.",
+        "preview": serialized[:1500],
+    }
+
+
+def _get_full_tool_output_tool(output_id):
+    result = _large_tool_outputs.get(str(output_id))
+    if result is None:
+        return {"error": f"No stored output with id '{output_id}'. It may have aged out, or the id is wrong."}
+    return result
+
+
+CONTEXT_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_full_tool_output",
+            "description": "Retrieve the full, uncompressed result of an earlier tool call that was shown to you as a compressed head/tail preview because it was too large. Only call this if the omitted middle genuinely matters -- most of the time the preview already has what you need.",
+            "parameters": {
+                "type": "object",
+                "properties": {"output_id": {"type": "string", "description": "The output_id named in the compressed result's note."}},
+                "required": ["output_id"],
+            },
+        },
+    },
+]
+
+
+def _resolve_mode_and_workspace(req):
+    """Explicit, named mode resolution -- not inferred piecemeal from
+    workspace truthiness scattered across several call sites. Athena's
+    own delegation session (ATHENA_BOTS_SESSION_ID) always runs in
+    real coding-harness mode: she was designed as full workspace
+    capability with delegation layered on top, never a lesser casual-
+    chat base, so her own request's workspace field (which her
+    frontend never actually populates) falls back to the configured
+    default workspace instead of silently downgrading her to casual
+    chat -- which is what was actually happening before this existed."""
+    if req.session_id == ATHENA_BOTS_SESSION_ID:
+        workspace = req.workspace or _load_settings().get("workspace") or ""
+        return "athena_delegation", workspace
+    if req.workspace:
+        return "workspace", req.workspace
+    return "casual", ""
+
+
+def _get_mode_system_prompt(mode, req):
+    """The stable identity and rules only -- memory, skills, and
+    pinned-message context are deliberately NOT concatenated in here.
+    They're dynamic, situational material that changes every request,
+    kept as a separate context message instead (see
+    _get_dynamic_context_message) rather than fused into the same
+    block as the model's actual operating instructions, the same
+    distinction DeepSeek Harness draws between a stable system prompt
+    and dynamically-sourced runtime context."""
+    if mode in ("workspace", "athena_delegation"):
+        base = CODING_HARNESS_SYSTEM_PROMPT
+    else:
+        base = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
+    if mode == "athena_delegation":
+        base = base + _get_bot_delegation_prompt_section(req.workspace)
+    return base
+
+
+def _get_dynamic_context_message(req):
+    """Memory, skills, and pinned-message context, assembled as their
+    own separate message rather than string-concatenated onto the
+    system prompt. Returns None when there's genuinely nothing to
+    include, so the caller can skip adding an empty message."""
+    content = _get_memory_context() + _get_skills_context(req.allowed_skills) + _get_pinned_context(req.session_id)
+    if not content.strip():
+        return None
+    return {"role": "user", "content": content}
+
+
+def _get_mode_tools(mode, req):
+    """Casual chat no longer carries bash/backup_file -- a mode only
+    gets tools it actually needs, matching the same principle behind
+    bots never getting write tools at the registration level rather
+    than being told not to use them."""
+    tools = get_lcm_tools()
+    if req.search_url:
+        tools = tools + WEB_TOOL_SCHEMAS
+    if mode in ("workspace", "athena_delegation"):
+        tools = tools + BASH_TOOL_SCHEMAS + BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS + CONTEXT_TOOL_SCHEMAS
+    if _scan_skills():
+        tools = tools + SKILL_TOOL_SCHEMAS
+    if mode == "athena_delegation":
+        tools = tools + BOT_DELEGATION_TOOL_SCHEMAS
+    if req.allowed_tools is not None:
+        _allowed = set(req.allowed_tools)
+        tools = [t for t in tools if t.get("function", {}).get("name") in _allowed]
+    return tools
 
 
 # Direct port of Odysseus's proven _pick_dynamic_ctx formula and step
@@ -749,12 +859,18 @@ def get_model_stats():
         conn.close()
 
 
-def send_to_lcm(session_id: str, role: str, content: str, model: str = None, has_image: bool = False):
+def send_to_lcm(session_id: str, role: str, content: str, model: str = None, has_image: bool = False, thinking: str = None, tool_calls: list = None):
     """Returns the real LCM message ID on success, or None on failure --
     the ID is what ratings attach to, since it's the one stable
     identifier that survives across page reloads and session history
     reloads (unlike a frontend array index, which is meaningless once
     messages get re-fetched from LCM in a different order/subset).
+
+    thinking/tool_calls are optional and only meaningful for an
+    assistant message -- passing them lets history reloads (this
+    session or the Bots/Athena2 screens) show the same thinking and
+    tool-call detail a live stream shows, instead of losing it the
+    moment the tab closes.
 
     Timeout is deliberately generous (not the usual few seconds) because
     LCM runs auto-compaction synchronously on every /message call, which
@@ -770,6 +886,8 @@ def send_to_lcm(session_id: str, role: str, content: str, model: str = None, has
             "service": "athena",
             "model": model,
             "has_image": has_image,
+            "thinking": thinking,
+            "tool_calls": tool_calls,
         }, timeout=30)
         if resp.status_code == 200:
             return resp.json().get("id")
@@ -1413,9 +1531,12 @@ BASH_EXEC_ALLOWED_COMMANDS = {
 BASH_EXEC_TIMEOUT_SECONDS = 300
 
 
-def _execute_write_bash(command: str, args: list, workspace: str):
-    if not workspace:
-        return {"error": "bash_exec requires an active workspace."}
+def _validate_bash_exec_call(command: str, args: list):
+    """Shared safety validation for both the blocking and background
+    forms of bash_exec -- same allowlist, same shell-operator block,
+    same rm/force-push refusals, so a background command gets exactly
+    the same structural guarantees a blocking one does. Returns an
+    error dict if invalid, or None if the call is safe to run."""
     if not command:
         return {"error": "Missing 'command'. Example: to run npm install, set command to 'npm' (just the program name) and args to ['install'] (a list of separate arguments)."}
     if not isinstance(command, str) or " " in command or command.startswith("[") or command.startswith('"'):
@@ -1445,6 +1566,15 @@ def _execute_write_bash(command: str, args: list, workspace: str):
         force_flags = {"-f", "--force", "--force-with-lease"}
         if any(a in force_flags or a.startswith("--force") for a in args):
             return {"error": "Refusing: force-push is blocked. Run a normal 'git push' instead."}
+    return None
+
+
+def _execute_write_bash(command: str, args: list, workspace: str):
+    if not workspace:
+        return {"error": "bash_exec requires an active workspace."}
+    err = _validate_bash_exec_call(command, args)
+    if err:
+        return err
     try:
         result = subprocess.run(
             [command] + list(args),
@@ -1461,128 +1591,95 @@ def _execute_write_bash(command: str, args: list, workspace: str):
     except FileNotFoundError:
         return {"error": "Command '" + command + "' not found on this system."}
     except subprocess.TimeoutExpired:
-        return {"error": "Command timed out after " + str(BASH_EXEC_TIMEOUT_SECONDS) + " seconds."}
+        return {"error": f"Command timed out after {BASH_EXEC_TIMEOUT_SECONDS} seconds."}
     except Exception as e:
-        return {"error": f"bash_exec execution failed: {e}"}
+        return {"error": f"bash execution failed: {e}"}
 
 
-BASH_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Run a read-only shell command. Only these commands are allowed: ls, cat, grep, find, head, tail, wc, pwd, sed, stat, diff, sort, uniq, file, tree, du, date. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. sed's -i flag and find's -delete/-exec flags are blocked; this tool can never write or modify anything, on any file, regardless of workspace. Works anywhere on the filesystem this process can read, not limited to any workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The bare command name, e.g. 'grep' or 'ls'. No path, no shell operators."},
-                    "args": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Arguments to the command, each as a separate array element (e.g. [\"-n\", \"pattern\", \"file.txt\"] for grep -n pattern file.txt).",
-                    },
-                },
-                "required": ["command", "args"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash_exec",
-            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The bare command name, e.g. 'npm' or 'git'. No path, no shell operators."},
-                    "args": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Arguments to the command, each as a separate array element (e.g. [\"install\"] for npm install, or [\"commit\", \"-m\", \"fix bug\"] for git commit -m \"fix bug\").",
-                    },
-                },
-                "required": ["command", "args"],
-            },
-        },
-    },
-]
+# Background command execution -- same allowlist/safety validation as
+# the blocking bash_exec above, but returns immediately with a handle
+# instead of waiting for the command to finish. Built as the deliberate
+# alternative to a real PTY: gives the actual capability a PTY exists
+# for (long-running processes, checking on progress) without losing
+# the structural safety guarantee (shell=False, no real shell ever
+# involved) that a true interactive terminal can't preserve.
+_bg_processes = {}
+_bg_processes_lock = threading.Lock()
+_bg_process_counter = [0]
 
 
-FILE_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files and directories at a path within the workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path relative to workspace root. Use '.' for the root."}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a file's contents.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path relative to workspace root."}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Create a new file, or overwrite an existing one entirely. Use edit_file instead if you only need to change part of an existing file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "content": {"type": "string", "description": "Full file content to write."},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Replace one exact occurrence of text in an existing file. old_text must match uniquely -- include enough surrounding context if the text could appear more than once.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "old_text": {"type": "string", "description": "Exact text to find and replace. Must appear exactly once in the file."},
-                    "new_text": {"type": "string", "description": "Replacement text."},
-                },
-                "required": ["path", "old_text", "new_text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "replace_lines",
-            "description": "Replace an exact range of lines in a file by line number, given the new content to put there -- use this instead of edit_file whenever you already know the exact line numbers (e.g. from grep -n or sed -n via bash), since it never requires reproducing old text byte-for-byte and so can't fail on a whitespace mismatch. Requires expected_content: what you believe is currently at that exact line range, used as a safety check before applying anything. If your line numbers turn out to be stale, this will try to find the expected content nearby and correct itself automatically, or fail safely and show you the real current content rather than corrupting the file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "start_line": {"type": "integer", "description": "First line to replace (1-indexed)."},
-                    "end_line": {"type": "integer", "description": "Last line to replace, inclusive (1-indexed). Same as start_line to replace a single line."},
-                    "new_content": {"type": "string", "description": "The new text to put in place of that line range. This completely replaces the range, it is not inserted alongside it."},
-                    "expected_content": {"type": "string", "description": "What you believe is currently at lines start_line-end_line, exactly as you last saw it. Used to verify your line numbers are still accurate before making any change."},
-                },
-                "required": ["path", "start_line", "end_line", "new_content", "expected_content"],
-            },
-        },
-    },
-]
+def _start_background_bash(command: str, args: list, workspace: str):
+    if not workspace:
+        return {"error": "bash_exec requires an active workspace."}
+    err = _validate_bash_exec_call(command, args)
+    if err:
+        return err
+    try:
+        proc = subprocess.Popen(
+            [command] + list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            shell=False,
+            cwd=os.path.realpath(workspace),
+        )
+    except FileNotFoundError:
+        return {"error": "Command '" + command + "' not found on this system."}
+    except Exception as e:
+        return {"error": f"Failed to start background process: {e}"}
+
+    with _bg_processes_lock:
+        _bg_process_counter[0] += 1
+        process_id = str(_bg_process_counter[0])
+        entry = {"proc": proc, "command": command, "args": args, "output": "", "output_lock": threading.Lock(), "started_at": time.time()}
+        _bg_processes[process_id] = entry
+
+    def _drain():
+        try:
+            for line in proc.stdout:
+                with entry["output_lock"]:
+                    entry["output"] += line
+                    if len(entry["output"]) > 50000:
+                        entry["output"] = entry["output"][-50000:]
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain, daemon=True).start()
+    return {"process_id": process_id, "command": command, "args": args, "status": "started"}
+
+
+def _check_background_bash(process_id: str):
+    entry = _bg_processes.get(str(process_id))
+    if not entry:
+        return {"error": f"No background process with id '{process_id}'. It may have already been stopped, or the id is wrong -- check with a process_id returned by a prior background-start call."}
+    proc = entry["proc"]
+    with entry["output_lock"]:
+        output = entry["output"]
+    exit_code = proc.poll()
+    return {
+        "process_id": process_id, "command": entry["command"], "args": entry["args"],
+        "running": exit_code is None, "exit_code": exit_code, "output": output[-10000:],
+    }
+
+
+def _stop_background_bash(process_id: str, force: bool = False):
+    entry = _bg_processes.get(str(process_id))
+    if not entry:
+        return {"error": f"No background process with id '{process_id}'."}
+    proc = entry["proc"]
+    if proc.poll() is not None:
+        return {"error": f"Process '{process_id}' has already exited (code {proc.poll()})."}
+    try:
+        proc.kill() if force else proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception as e:
+        return {"error": f"Failed to stop process: {e}"}
+    return {"process_id": process_id, "stopped": True, "exit_code": proc.poll()}
+
 
 def _read_backup_manifest():
     manifest_path = os.path.join(_BACKUP_ROOT, "manifest.jsonl")
@@ -1660,6 +1757,165 @@ def _restore_file(path: str = "", snapshot_id: str = "", restore_hash: str = "",
 
     return _restore_one_entry(chosen)
 
+
+BASH_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a read-only shell command. Only these commands are allowed: ls, cat, grep, find, head, tail, wc, pwd, sed, stat, diff, sort, uniq, file, tree, du, date. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. sed's -i flag and find's -delete/-exec flags are blocked; this tool can never write or modify anything, on any file, regardless of workspace. Works anywhere on the filesystem this process can read, not limited to any workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The bare command name, e.g. 'grep' or 'ls'. No path, no shell operators."},
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Arguments to the command, each as a separate array element (e.g. [\"-n\", \"pattern\", \"file.txt\"] for grep -n pattern file.txt).",
+                    },
+                },
+                "required": ["command", "args"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_exec",
+            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The bare command name, e.g. 'npm' or 'git'. No path, no shell operators."},
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Arguments to the command, each as a separate array element (e.g. [\"install\"] for npm install, or [\"commit\", \"-m\", \"fix bug\"] for git commit -m \"fix bug\").",
+                    },
+                },
+                "required": ["command", "args"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_exec_start",
+            "description": "Start a bash_exec command in the background instead of waiting for it to finish -- for anything long-running (a dev server, a build watcher) or where you need to check progress partway through. Same allowlist and safety rules as bash_exec. Returns a process_id immediately; use bash_exec_check to see output so far, and bash_exec_stop to end it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The bare command name, e.g. 'npm'."},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "Arguments to the command, each as a separate array element."},
+                },
+                "required": ["command", "args"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_exec_check",
+            "description": "Check a background command started with bash_exec_start -- returns its output so far and whether it's still running.",
+            "parameters": {
+                "type": "object",
+                "properties": {"process_id": {"type": "string", "description": "The process_id returned by bash_exec_start."}},
+                "required": ["process_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_exec_stop",
+            "description": "Stop a background command started with bash_exec_start. Tries a graceful stop first unless force is true.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "string", "description": "The process_id returned by bash_exec_start."},
+                    "force": {"type": "boolean", "description": "If true, kill immediately instead of asking it to stop gracefully first."},
+                },
+                "required": ["process_id"],
+            },
+        },
+    },
+]
+
+FILE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List files and directories at a path within the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path relative to workspace root. Use '.' for the root."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file's contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path relative to workspace root."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create a new file, or overwrite an existing one entirely. Use edit_file instead if you only need to change part of an existing file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "content": {"type": "string", "description": "Full file content to write."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace one exact occurrence of text in an existing file. old_text must match uniquely -- include enough surrounding context if the text could appear more than once.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "old_text": {"type": "string", "description": "Exact text to find and replace. Must appear exactly once in the file."},
+                    "new_text": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_lines",
+            "description": "Replace an exact range of lines in a file by line number, given the new content to put there -- use this instead of edit_file whenever you already know the exact line numbers (e.g. from grep -n or sed -n via bash), since it never requires reproducing old text byte-for-byte and so can't fail on a whitespace mismatch. Requires expected_content: what you believe is currently at that exact line range, used as a safety check before applying anything. If your line numbers turn out to be stale, this will try to find the expected content nearby and correct itself automatically, or fail safely and show you the real current content rather than corrupting the file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "start_line": {"type": "integer", "description": "First line to replace (1-indexed)."},
+                    "end_line": {"type": "integer", "description": "Last line to replace, inclusive (1-indexed). Same as start_line to replace a single line."},
+                    "new_content": {"type": "string", "description": "The new text to put in place of that line range. This completely replaces the range, it is not inserted alongside it."},
+                    "expected_content": {"type": "string", "description": "What you believe is currently at lines start_line-end_line, exactly as you last saw it. Used to verify your line numbers are still accurate before making any change."},
+                },
+                "required": ["path", "start_line", "end_line", "new_content", "expected_content"],
+            },
+        },
+    },
+]
 
 BACKUP_TOOL_SCHEMAS = [
     {
@@ -2706,28 +2962,14 @@ def chat_stream(req: ChatIn):
     # tools are only included here when req.workspace is non-empty, so
     # the model can never edit files on a session with no workspace
     # bound to it, regardless of how it reads an ambiguous prompt.
-    if req.workspace:
-        system_prompt = CODING_HARNESS_SYSTEM_PROMPT + _get_memory_context() + _get_skills_context(req.allowed_skills) + _get_pinned_context(req.session_id)
-    else:
-        system_prompt = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX + _get_memory_context() + _get_skills_context(req.allowed_skills) + _get_pinned_context(req.session_id)
-    tools = get_lcm_tools() + BASH_TOOL_SCHEMAS
-    if req.search_url:
-        tools = tools + WEB_TOOL_SCHEMAS
-    tools = tools + BACKUP_TOOL_SCHEMAS
-    if req.workspace:
-        tools = tools + RAG_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS
-    if _scan_skills():
-        tools = tools + SKILL_TOOL_SCHEMAS
-    if req.allowed_tools is not None:
-        # A task run's explicit handicapping -- filters the tool set
-        # built above down to only what that specific task was opted
-        # into, rather than the full set a live, supervised chat gets.
-        _allowed = set(req.allowed_tools)
-        tools = [t for t in tools if t.get("function", {}).get("name") in _allowed]
-
+    mode, effective_workspace = _resolve_mode_and_workspace(req)
+    req.workspace = effective_workspace
+    system_prompt = _get_mode_system_prompt(mode, req)
+    tools = _get_mode_tools(mode, req)
     print(f"[TOOLS DEBUG] {[t.get('function', {}).get('name') for t in tools]}", flush=True)
 
-    _raw_messages = [{"role": "system", "content": system_prompt}] + context
+    _dynamic_context_msg = _get_dynamic_context_message(req)
+    _raw_messages = [{"role": "system", "content": system_prompt}] + ([_dynamic_context_msg] if _dynamic_context_msg else []) + context
     # Some chat templates (e.g. qwen3.5's) require every system-role
     # message to be grouped at the very start of the conversation --
     # LCM returns one separate system message per summary node, which
@@ -2771,6 +3013,14 @@ def chat_stream(req: ChatIn):
             return _execute_readonly_bash(args.get("command", ""), args.get("args", []), req.workspace)
         if name == "bash_exec":
             return _execute_write_bash(args.get("command", ""), args.get("args", []), req.workspace)
+        if name == "bash_exec_start":
+            return _start_background_bash(args.get("command", ""), args.get("args", []), req.workspace)
+        if name == "bash_exec_check":
+            return _check_background_bash(args.get("process_id", ""))
+        if name == "bash_exec_stop":
+            return _stop_background_bash(args.get("process_id", ""), args.get("force", False))
+        if name == "get_full_tool_output":
+            return _get_full_tool_output_tool(args.get("output_id", ""))
         if name == "find_definition":
             return _get_lsp_client(req.workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
         if name == "find_references":
@@ -2791,6 +3041,25 @@ def chat_stream(req: ChatIn):
             return _backup_file(args.get("path", ""))
         if name == "restore_file":
             return _restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
+        if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot"):
+            if req.session_id != ATHENA_BOTS_SESSION_ID:
+                return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
+            if name == "list_bots":
+                return _list_bots_tool()
+            if name == "draft_bot_prompt":
+                return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
+            if name == "message_bot":
+                return _message_bot_tool(args.get("bot_id"), args.get("content", ""))
+            if name == "list_rooms":
+                return _list_rooms_tool()
+            if name == "read_room_messages":
+                return _read_room_messages_tool(args.get("room_id"))
+            if name == "message_room":
+                return _message_room_tool(args.get("room_id"), args.get("content", ""))
+            if name == "create_bot":
+                return _create_bot_tool(args.get("name", ""), args.get("description", ""), args.get("allowed_tools", []))
+            if name == "update_bot":
+                return _update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
         if name == "search_codebase":
             return _search_codebase(args.get("query", ""), args.get("limit", 3))
 
@@ -2818,6 +3087,7 @@ def chat_stream(req: ChatIn):
         # used by other production coding-agent harnesses for exactly
         # this failure mode.
         _tool_call_fingerprints = []
+        _recent_search_queries = []
         def _tool_call_fingerprint(tc):
             fn = tc.get("function", {})
             args = fn.get("arguments", {})
@@ -2827,7 +3097,7 @@ def chat_stream(req: ChatIn):
                 args_str = str(args)
             raw = fn.get("name", "") + "|" + args_str
             return hashlib.md5(raw.encode()).hexdigest()
-        def _detect_text_loop(text, window=40, min_repeats=3):
+        def _detect_text_loop(text):
             """Model-agnostic loop detector for plain-text generation.
             Catches a model stuck repeating itself -- restated reasoning,
             a hallucinated fake tool call written as plain text instead
@@ -2838,17 +3108,27 @@ def chat_stream(req: ChatIn):
             opposite of what this harness needs: it has to hold up for
             whatever model someone points it at, including small,
             resource-constrained models on edge-case hardware that show
-            this failure mode worst. Checks whether the most recent
-            `window`-character tail has already appeared `min_repeats`
-            times in the text generated so far this round."""
-            if len(text) < window * min_repeats:
-                return False
-            tail = text[-window:]
-            if len(tail.strip()) < window * 0.5:
-                return False  # mostly whitespace -- not a meaningful signal
-            return text.count(tail) >= min_repeats
+            this failure mode worst.
+
+            Layered rather than one fixed check: a longer window (40
+            chars, 3 repeats) catches a whole sentence or reasoning
+            fragment being restated; a shorter window (18 chars, 5
+            repeats) catches a shorter recurring phrase that doesn't
+            happen to line up as an exact 40-char match -- interspersed
+            with slightly different surrounding text each time, which
+            the single long-window check alone would miss entirely."""
+            def _tail_repeats(window, min_repeats):
+                if len(text) < window * min_repeats:
+                    return False
+                tail = text[-window:]
+                if len(tail.strip()) < window * 0.5:
+                    return False  # mostly whitespace -- not a meaningful signal
+                return text.count(tail) >= min_repeats
+            return _tail_repeats(40, 3) or _tail_repeats(18, 5)
         yield f"data: {json.dumps({'user_message_id': _user_msg_id})}\n\n"
         full_reply = ""
+        full_thinking = ""
+        full_tool_calls = []
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
         _messages = list(messages)
         print(f"[DEBUG] _messages roles={[m.get("role") for m in _messages]!r}", flush=True)
@@ -2880,6 +3160,7 @@ def chat_stream(req: ChatIn):
                 print(f"[DEBUG] chunk={chunk}", flush=True)
                 thinking_delta = msg.get("thinking", "")
                 if thinking_delta:
+                    full_thinking += thinking_delta
                     yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
                 delta = msg.get("content", "")
                 if delta:
@@ -2898,7 +3179,7 @@ def chat_stream(req: ChatIn):
 
             if cancel_flag.is_set():
                 if full_reply:
-                    send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
+                    send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 yield f"data: {json.dumps({'done': True, 'cancelled': True})}\n\n"
                 _cancel_flags.pop(req.session_id, None)
                 return
@@ -2923,7 +3204,7 @@ def chat_stream(req: ChatIn):
                     # the rest of MAX_ROUNDS on a model that can't recover.
                     failure_msg = "I got stuck repeating myself and wasn't able to recover after a few attempts -- stopping here rather than continuing to loop."
                     full_reply = (full_reply.rsplit(round_reply, 1)[0] if round_reply in full_reply else full_reply) + ("\n\n" + failure_msg if full_reply else failure_msg)
-                    _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
+                    _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                     yield f"data: {json.dumps({'delta': ('\n\n' if trimmed_reply.strip() else '') + failure_msg})}\n\n"
                     yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                     return
@@ -2959,7 +3240,7 @@ def chat_stream(req: ChatIn):
                     if consecutive_ungrounded_claims >= 3:
                         failure_msg = "I started describing further progress without actually making the tool calls to back it up, and wasn't able to correct that after a few attempts -- stopping here rather than continuing to report unverified work."
                         full_reply += ("\n\n" + failure_msg if full_reply else failure_msg)
-                        _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
+                        _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                         yield f"data: {json.dumps({'delta': '\n\n' + failure_msg})}\n\n"
                         yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                         return
@@ -2976,7 +3257,7 @@ def chat_stream(req: ChatIn):
                     )})
                     continue
                 consecutive_ungrounded_claims = 0
-                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
+                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'assistant_message_id': _msg_id})}\n\n"
                 return
@@ -2993,6 +3274,17 @@ def chat_stream(req: ChatIn):
                 yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
                 fingerprint = _tool_call_fingerprint(tc)
                 repeat_count = _tool_call_fingerprints.count(fingerprint)
+                similar_query = None
+                if repeat_count < 2 and tool_name == "web_search":
+                    fn_args = tc.get("function", {}).get("arguments", {})
+                    if isinstance(fn_args, str):
+                        try:
+                            fn_args = json.loads(fn_args)
+                        except json.JSONDecodeError:
+                            fn_args = {}
+                    query = fn_args.get("query", "") if isinstance(fn_args, dict) else ""
+                    if query:
+                        similar_query = next((q for q in _recent_search_queries if _search_query_similarity(query, q) >= 0.7), None)
                 if repeat_count >= 2:
                     result = {
                         "error": f"BLOCKED: this exact {tool_name} call (same tool, same arguments) has already "
@@ -3002,18 +3294,47 @@ def chat_stream(req: ChatIn):
                         f"genuinely different call (different tool, or different arguments) if you actually need "
                         f"new information."
                     }
+                elif similar_query:
+                    result = {
+                        "error": f"BLOCKED: this search is on essentially the same topic as an earlier query this "
+                        f"turn ('{similar_query}'), just reworded. Reformulating a search doesn't give you new "
+                        f"information if the underlying question is the same -- use what that earlier search "
+                        f"already returned, or search for something genuinely different if you actually need it."
+                    }
                 else:
                     result = _execute_tool_call(tc)
                     _tool_call_fingerprints.append(fingerprint)
                     if len(_tool_call_fingerprints) > 20:
                         _tool_call_fingerprints.pop(0)
+                    if tool_name == "web_search":
+                        fn_args = tc.get("function", {}).get("arguments", {})
+                        if isinstance(fn_args, str):
+                            try:
+                                fn_args = json.loads(fn_args)
+                            except json.JSONDecodeError:
+                                fn_args = {}
+                        query = fn_args.get("query", "") if isinstance(fn_args, dict) else ""
+                        if query:
+                            _recent_search_queries.append(query)
+                            if len(_recent_search_queries) > 10:
+                                _recent_search_queries.pop(0)
                 yield f"data: {json.dumps({'type': 'tool_output', 'tool': tool_name, 'output': result})}\n\n"
-                _messages.append({"role": "tool", "content": json.dumps(result)})
+                # Saved in the same shape the frontend's own live tool-call
+                # display already uses (tool/status/output) -- NOT the raw
+                # LLM tool_calls format, which has no result field at all
+                # and uses function.name instead of a plain tool name, so
+                # a reloaded history entry actually matches what streaming
+                # already shows instead of rendering empty.
+                full_tool_calls.append({"tool": tool_name, "status": "done", "output": result})
+                # The person always sees the real, full result above (nothing hidden) --
+                # only what actually goes back into the model's own context gets compressed,
+                # since that's the thing burning tokens, not what's shown in the UI.
+                _messages.append({"role": "tool", "content": json.dumps(_compress_tool_result(result))})
         else:
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
             full_reply = fallback_msg
             yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
-            _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model)
+            _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
             tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
             yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
 
@@ -3110,7 +3431,10 @@ def get_history(session_id: str):
         resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=3)
         if resp.status_code == 200:
             msgs = resp.json()
-            return [{"role": m["role"], "content": m["content"], "messageId": m["id"], "model": m.get("model"), "hasImage": m.get("has_image", False)} for m in msgs]
+            return [{
+                "role": m["role"], "content": m["content"], "messageId": m["id"], "model": m.get("model"),
+                "hasImage": m.get("has_image", False), "thinking": m.get("thinking"), "toolCalls": m.get("tool_calls"),
+            } for m in msgs]
     except Exception:
         pass
     return []
@@ -3327,6 +3651,8 @@ class SettingsIn(BaseModel):
     default_model: Optional[dict] = None
     theme: Optional[dict] = None
     model_aliases: Optional[dict] = None
+    bot_creation_defaults: Optional[dict] = None
+    athena_agent_model: Optional[dict] = None
 
 class MCPServerIn(BaseModel):
     name: str
@@ -3662,6 +3988,8 @@ def _bots_conn():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             endpoint_url TEXT,
+            provider TEXT NOT NULL DEFAULT '',
+            api_key TEXT DEFAULT '',
             model TEXT NOT NULL,
             description TEXT,
             allowed_tools_json TEXT NOT NULL DEFAULT '[]',
@@ -3696,6 +4024,8 @@ def _bots_conn():
 class BotIn(BaseModel):
     name: str
     endpoint_url: Optional[str] = None
+    provider: str = ""  # "" = Ollama-native, "custom" = OpenAI-compatible (llama.cpp/vLLM/etc). Never anthropic/google -- bots are local-inference only.
+    api_key: Optional[str] = ""
     model: str
     description: Optional[str] = None
     allowed_tools: List[str] = []
@@ -3703,12 +4033,12 @@ class BotIn(BaseModel):
 
 def _row_to_bot(r):
     return {
-        "id": r[0], "name": r[1], "endpoint_url": r[2], "model": r[3],
-        "description": r[4], "allowed_tools": json.loads(r[5]) if r[5] else [],
-        "unload_strategy": r[6], "created_at": r[7],
+        "id": r[0], "name": r[1], "endpoint_url": r[2], "provider": r[3], "api_key": r[4], "model": r[5],
+        "description": r[6], "allowed_tools": json.loads(r[7]) if r[7] else [],
+        "unload_strategy": r[8], "created_at": r[9],
     }
 
-_BOT_COLUMNS = "id, name, endpoint_url, model, description, allowed_tools_json, unload_strategy, created_at"
+_BOT_COLUMNS = "id, name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at"
 
 @app.get("/api/bots")
 def list_bots():
@@ -3724,10 +4054,10 @@ def create_bot(req: BotIn):
     conn = _bots_conn()
     try:
         cur = conn.execute("""
-            INSERT INTO bots (name, endpoint_url, model, description, allowed_tools_json, unload_strategy, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bots (name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            req.name, req.endpoint_url, req.model, req.description,
+            req.name, req.endpoint_url, req.provider, req.api_key or "", req.model, req.description,
             json.dumps(req.allowed_tools), req.unload_strategy, time.time(),
         ))
         conn.commit()
@@ -3740,10 +4070,10 @@ def update_bot(bot_id: int, req: BotIn):
     conn = _bots_conn()
     try:
         conn.execute("""
-            UPDATE bots SET name=?, endpoint_url=?, model=?, description=?, allowed_tools_json=?, unload_strategy=?
+            UPDATE bots SET name=?, endpoint_url=?, provider=?, api_key=?, model=?, description=?, allowed_tools_json=?, unload_strategy=?
             WHERE id=?
         """, (
-            req.name, req.endpoint_url, req.model, req.description,
+            req.name, req.endpoint_url, req.provider, req.api_key or "", req.model, req.description,
             json.dumps(req.allowed_tools), req.unload_strategy, bot_id,
         ))
         conn.commit()
@@ -3760,6 +4090,752 @@ def delete_bot(bot_id: int):
         return {"id": bot_id}
     finally:
         conn.close()
+
+
+class RoomFindOrCreateIn(BaseModel):
+    kind: str  # 'dm' or 'group'
+    human_party: Optional[str] = None  # 'user', 'athena', or None (bot-to-bot DM / group room)
+    member_bot_ids: List[int]
+    label: Optional[str] = None
+
+def _row_to_room(r):
+    return {
+        "id": r[0], "kind": r[1], "human_party": r[2], "label": r[3],
+        "member_bot_ids": json.loads(r[4]) if r[4] else [],
+        "created_at": r[5], "last_active": r[6], "is_everyone_room": bool(r[7]),
+    }
+
+_ROOM_COLUMNS = "id, kind, human_party, label, member_bot_ids_json, created_at, last_active, is_everyone_room"
+
+@app.post("/api/rooms/everyone")
+def get_or_create_everyone_room():
+    """The one canonical room containing every bot -- membership isn't
+    a fixed choice like a normal group, it's always 'whichever bots
+    currently exist', refreshed here on every open rather than kept in
+    sync via create/delete hooks elsewhere. Response routing doesn't
+    actually depend on this stored list at all (a group room's replies
+    are driven entirely by @mention, checked against the full roster
+    regardless of room membership) -- this refresh is purely so the
+    displayed member list in the UI stays accurate."""
+    conn = _bots_conn()
+    try:
+        all_bot_ids = [r[0] for r in conn.execute("SELECT id FROM bots").fetchall()]
+        existing = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE is_everyone_room = 1").fetchone()
+        if existing:
+            room_id = existing[0]
+            conn.execute("UPDATE rooms SET member_bot_ids_json = ? WHERE id = ?", (json.dumps(all_bot_ids), room_id))
+            conn.commit()
+            return _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone())
+        now = time.time()
+        cur = conn.execute(
+            "INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active, is_everyone_room) VALUES ('group', NULL, 'Everyone', ?, ?, ?, 1)",
+            (json.dumps(all_bot_ids), now, now)
+        )
+        conn.commit()
+        return _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+@app.get("/api/rooms")
+def list_rooms():
+    conn = _bots_conn()
+    try:
+        rows = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms ORDER BY last_active DESC, created_at DESC").fetchall()
+        return [_row_to_room(r) for r in rows]
+    finally:
+        conn.close()
+
+@app.post("/api/rooms/find_or_create")
+def find_or_create_room(req: RoomFindOrCreateIn):
+    """For DMs specifically: lazily reuse an existing room rather than
+    creating a new one every time the same pairing is opened -- a DM
+    is identified by its kind, human_party, AND exact member set, so
+    the user's own chat with a bot and Athena's task-conversation with
+    that same bot are always two distinct rooms, never merged, per the
+    isolation requirement. Group rooms are always created fresh (no
+    matching/reuse), since there's no single natural identity for
+    'the' group room among a given set of bots the way there is for a
+    DM pair."""
+    conn = _bots_conn()
+    try:
+        sorted_members = json.dumps(sorted(req.member_bot_ids))
+        if req.kind == "dm":
+            existing = conn.execute(
+                "SELECT " + _ROOM_COLUMNS + " FROM rooms WHERE kind = 'dm' AND "
+                "(human_party IS ? OR human_party = ?) AND member_bot_ids_json = ?",
+                (req.human_party, req.human_party, sorted_members)
+            ).fetchone()
+            if existing:
+                return _row_to_room(existing)
+        now = time.time()
+        cur = conn.execute("""
+            INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (req.kind, req.human_party, req.label or "", sorted_members, now, now))
+        conn.commit()
+        return _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+class RoomMessageIn(BaseModel):
+    sender_type: str  # 'user', 'athena', or 'bot'
+    sender_bot_id: Optional[int] = None
+    content: str
+
+@app.get("/api/rooms/{room_id}/messages")
+def get_room_messages(room_id: int):
+    conn = _bots_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, room_id, sender_type, sender_bot_id, content, created_at FROM room_messages WHERE room_id = ? ORDER BY id ASC",
+            (room_id,)
+        ).fetchall()
+        return [{"id": r[0], "room_id": r[1], "sender_type": r[2], "sender_bot_id": r[3], "content": r[4], "created_at": r[5]} for r in rows]
+    finally:
+        conn.close()
+
+@app.post("/api/rooms/{room_id}/messages")
+def post_room_message(room_id: int, req: RoomMessageIn):
+    conn = _bots_conn()
+    try:
+        now = time.time()
+        cur = conn.execute(
+            "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (room_id, req.sender_type, req.sender_bot_id, req.content, now)
+        )
+        conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (now, room_id))
+        conn.commit()
+        return {"id": cur.lastrowid, "room_id": room_id, "sender_type": req.sender_type, "sender_bot_id": req.sender_bot_id, "content": req.content, "created_at": now}
+    finally:
+        conn.close()
+
+
+class _FakeReqForDispatch:
+    """Minimal stand-in for ChatIn, carrying only the fields
+    _stream_completion / _stream_openai_compatible actually read
+    (provider, model, endpoint_url, api_key). Bot dispatch has no
+    session/workspace/tool-allowlist concerns a real ChatIn carries,
+    so building one of those would mean populating a dozen irrelevant
+    fields just to satisfy the type -- this carries exactly what's
+    needed and nothing else."""
+    def __init__(self, provider, model, endpoint_url, api_key):
+        self.provider = provider
+        self.model = model
+        self.endpoint_url = endpoint_url
+        self.api_key = api_key
+
+
+_BOT_ALLOWED_PROVIDERS = {"", "openai", "openrouter", "custom"}  # never anthropic/google -- bots are local-inference only, enforced here as a backend guard even though the UI never offers those options
+
+
+def _room_messages_to_chat_messages(room_messages, responding_bot_id, system_prompt):
+    """Convert a room's raw message rows into the standard
+    role/content shape a chat completion expects. Only two real roles
+    exist (user/assistant) but a room can have several distinct
+    senders (the user, Athena, and multiple different bots) -- the
+    responding bot's own past turns become 'assistant'; everything
+    else becomes 'user' with the actual sender's name prefixed into
+    the content, so the model can still tell who said what."""
+    out = [{"role": "system", "content": system_prompt}]
+    for m in room_messages:
+        if m["sender_type"] == "bot" and m["sender_bot_id"] == responding_bot_id:
+            out.append({"role": "assistant", "content": m["content"]})
+        else:
+            if m["sender_type"] == "user":
+                label = "User"
+            elif m["sender_type"] == "athena":
+                label = "Athena"
+            else:
+                label = m.get("sender_bot_name") or f"Bot #{m.get('sender_bot_id')}"
+            out.append({"role": "user", "content": f"[{label}]: {m['content']}"})
+    return out
+
+
+def _call_bot_endpoint(bot, chat_messages, timeout=120):
+    """Run one non-streaming turn for a bot: send chat_messages to its
+    configured endpoint, return the complete response text. Reuses
+    _stream_completion (the same single entry point the main chat
+    loop uses, which already normalizes every supported provider into
+    identical Ollama-shaped chunks) by consuming the generator fully
+    and concatenating content deltas, rather than duplicating any
+    provider-specific request logic here."""
+    provider = bot.get("provider") or ""
+    if provider not in _BOT_ALLOWED_PROVIDERS:
+        return {"error": f"Bots may not use provider '{provider}' -- local inference only (Ollama-native or OpenAI-compatible)."}
+
+    endpoint_url = bot.get("endpoint_url") or ""
+    fake_req = _FakeReqForDispatch(
+        provider=provider,
+        model=bot["model"],
+        endpoint_url=endpoint_url,
+        api_key=bot.get("api_key") or "",
+    )
+    target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
+    full_reply = ""
+    cancel_flag = threading.Event()
+    try:
+        for chunk in _stream_completion(fake_req, target_url, chat_messages, None, 4096, cancel_flag):
+            delta = chunk.get("message", {}).get("content", "")
+            if delta:
+                full_reply += delta
+            if chunk.get("done"):
+                break
+    except Exception as e:
+        return {"error": f"Bot endpoint call failed: {e}"}
+    return {"content": full_reply}
+
+
+_bot_host_locks = {}
+_bot_host_locks_guard = threading.Lock()
+
+
+def _endpoint_host(endpoint_url):
+    """Extract just host:port (no scheme, no path) for lock-keying --
+    two bots pointing at the same host, even via different frameworks
+    (Ollama vs a local OpenAI-compatible server), must never generate
+    concurrently. Falls back to OLLAMA_URL's own host when a bot has
+    no explicit endpoint_url, since that's genuinely the same shared
+    machine every other Ollama-native bot (and Athena's own default
+    chat) also targets."""
+    url = endpoint_url or OLLAMA_URL
+    parsed = urlparse(url)
+    return f"{parsed.hostname}:{parsed.port}" if parsed.port else (parsed.hostname or url)
+
+
+def _get_host_lock(host_key):
+    with _bot_host_locks_guard:
+        if host_key not in _bot_host_locks:
+            _bot_host_locks[host_key] = threading.Lock()
+        return _bot_host_locks[host_key]
+
+
+def _unload_bot_model(bot):
+    """Best-effort unload after a bot's turn, dispatched by its
+    configured strategy. Failures here are logged, never raised --
+    an unload failing shouldn't break the turn that already
+    completed successfully; it just means the next participant on
+    this host may contend for VRAM a little longer than intended."""
+    strategy = bot.get("unload_strategy") or "none"
+    endpoint_url = bot.get("endpoint_url") or ""
+    try:
+        if strategy == "ollama_keep_alive":
+            target = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url else OLLAMA_URL
+            httpx.post(target, json={"model": bot["model"], "messages": [], "keep_alive": 0}, timeout=15)
+        elif strategy == "llamacpp_unload":
+            base = endpoint_url.rstrip("/") if endpoint_url else ""
+            if base:
+                httpx.post(base + "/models/unload", json={"model": bot["model"]}, timeout=15)
+        elif strategy == "vllm_sleep":
+            base = endpoint_url.rstrip("/") if endpoint_url else ""
+            if base:
+                httpx.post(base + "/sleep?level=1", timeout=15)
+        # "http_hook" and "none" are no-ops for now -- http_hook has no
+        # configured hook URL in the schema yet; add one explicitly
+        # when a real custom-backend use case needs it, rather than
+        # building unused config ahead of time.
+    except Exception as e:
+        print(f"[Bots] unload failed for bot {bot.get('id')} ({strategy}): {e}", flush=True)
+
+
+def _parse_mentions(content, all_bots):
+    """Resolve @name tokens in a group-room message against the live
+    roster, case-insensitively. Only names that match an existing bot
+    become real mentions; anything else (an email-shaped @, a random
+    @word) is just ignored rather than erroring, since a message isn't
+    guaranteed to only ever contain intentional mentions."""
+    import re
+    by_name_lower = {b["name"].lower(): b for b in all_bots}
+    mentioned_ids = []
+    for token in re.findall(r"@([A-Za-z0-9_-]+)", content):
+        bot = by_name_lower.get(token.lower())
+        if bot and bot["id"] not in mentioned_ids:
+            mentioned_ids.append(bot["id"])
+    return mentioned_ids
+
+
+def _resolve_dm_responder(room, sender_bot_id):
+    """A DM's responder is whoever ISN'T the sender. A 1-bot DM
+    (user/Athena talking to a bot) always has that one bot respond.
+    A 2-bot DM (bot-to-bot) has the other bot respond -- never both,
+    and never the sender itself."""
+    members = room["member_bot_ids"]
+    if len(members) == 1:
+        return list(members)
+    return [b for b in members if b != sender_bot_id]
+
+
+def _dispatch_athena_room_tool_call(tc):
+    """Delegation-only dispatcher for Athena's room-turn loop -- a
+    small, dedicated table for just the delegation tools, since the
+    main generate() loop's own _execute_tool_call is a closure over a
+    live req object that doesn't exist for a mention-triggered room
+    turn. Never includes workspace write tools (bash_exec, file
+    edits) -- those stay confined to her private 1:1 session, per the
+    agreed design."""
+    fn = tc.get("function", {})
+    name = fn.get("name", "")
+    args = fn.get("arguments", {})
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {}
+    if name == "list_bots":
+        return _list_bots_tool()
+    if name == "draft_bot_prompt":
+        return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
+    if name == "message_bot":
+        return _message_bot_tool(args.get("bot_id"), args.get("content", ""))
+    if name == "list_rooms":
+        return _list_rooms_tool()
+    if name == "read_room_messages":
+        return _read_room_messages_tool(args.get("room_id"))
+    if name == "message_room":
+        return _message_room_tool(args.get("room_id"), args.get("content", ""))
+    if name == "create_bot":
+        return _create_bot_tool(args.get("name", ""), args.get("description", ""), args.get("allowed_tools", []))
+    if name == "update_bot":
+        return _update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
+    return {"error": f"Unknown tool for Athena's room turn: {name}"}
+
+
+_ATHENA_ROOM_MAX_ROUNDS = 8
+
+
+def _run_athena_room_turn(room_id):
+    """A real, multi-round agentic turn for Athena inside a room --
+    unlike bot dispatch (a single call, no tools at all), this gives
+    her genuine tool execution against the delegation toolset, with
+    the same kind of fingerprint-based loop protection the main
+    session uses, since a room is exactly the kind of place a small
+    local model can get stuck repeating a call. Returns a small
+    result dict; the caller (send_room_message) handles storing it
+    into the room and reporting any error the same way a bot's reply
+    would be."""
+    settings = _load_settings()
+    defaults = settings.get("athena_agent_model") or {}
+    model = defaults.get("model")
+    if not model:
+        return {"error": "No model is configured for Athena's own agent turns yet. Set one via her Agent Defaults / model picker first."}
+
+    conn = _bots_conn()
+    try:
+        room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone()
+        if not room_row:
+            return {"error": f"Room {room_id} not found."}
+        history_rows = conn.execute(
+            "SELECT sender_type, sender_bot_id, content FROM room_messages WHERE room_id = ? ORDER BY id ASC",
+            (room_id,)
+        ).fetchall()
+        all_bot_rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots").fetchall()
+        bots_by_id = {b["id"]: b for b in [_row_to_bot(r) for r in all_bot_rows]}
+    finally:
+        conn.close()
+
+    history = [{"sender_type": r[0], "sender_bot_id": r[1], "content": r[2],
+                "sender_bot_name": bots_by_id.get(r[1], {}).get("name") if r[1] else None} for r in history_rows]
+
+    room_turn_workspace = _load_settings().get("workspace") or ""
+    system_prompt = CODING_HARNESS_SYSTEM_PROMPT + _get_bot_delegation_prompt_section(room_turn_workspace)
+    chat_messages = [{"role": "system", "content": system_prompt}]
+    for m in history:
+        if m["sender_type"] == "athena":
+            chat_messages.append({"role": "assistant", "content": m["content"]})
+        else:
+            label = "User" if m["sender_type"] == "user" else (m.get("sender_bot_name") or f"Bot #{m.get('sender_bot_id')}")
+            chat_messages.append({"role": "user", "content": f"[{label}]: {m['content']}"})
+
+    fake_req = _FakeReqForDispatch(
+        provider=defaults.get("provider", ""),
+        model=model,
+        endpoint_url=defaults.get("endpoint_url", ""),
+        api_key=defaults.get("api_key", ""),
+    )
+    endpoint_url = defaults.get("endpoint_url") or ""
+    provider = defaults.get("provider") or ""
+    target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
+
+    fingerprints = []
+    full_reply = ""
+
+    for round_num in range(_ATHENA_ROOM_MAX_ROUNDS):
+        cancel_flag = threading.Event()
+        round_reply = ""
+        round_tool_calls = []
+        try:
+            for chunk in _stream_completion(fake_req, target_url, chat_messages, BOT_DELEGATION_TOOL_SCHEMAS, 8192, cancel_flag):
+                msg = chunk.get("message", {})
+                delta = msg.get("content", "")
+                if delta:
+                    round_reply += delta
+                if msg.get("tool_calls"):
+                    round_tool_calls.extend(msg["tool_calls"])
+                if chunk.get("done"):
+                    break
+        except Exception as e:
+            return {"error": f"Athena's room turn failed: {e}"}
+
+        full_reply += round_reply
+
+        if not round_tool_calls:
+            return {"content": full_reply}
+
+        chat_messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
+        for tc in round_tool_calls:
+            fingerprint = hashlib.md5(json.dumps(tc.get("function", {}), sort_keys=True).encode()).hexdigest()
+            repeat_count = fingerprints.count(fingerprint)
+            if repeat_count >= 2:
+                result = {"error": "BLOCKED: this exact call has already been made multiple times this turn. Use the result you already have, or make a genuinely different call."}
+            else:
+                result = _dispatch_athena_room_tool_call(tc)
+                fingerprints.append(fingerprint)
+            chat_messages.append({"role": "tool", "content": json.dumps(result)})
+
+    return {"content": full_reply or "I made several tool calls but wasn't able to settle on a final answer within my round limit -- ask me to continue or narrow the task."}
+
+
+class RoomSendIn(BaseModel):
+    sender_type: str
+    sender_bot_id: Optional[int] = None
+    content: str
+
+
+@app.post("/api/rooms/{room_id}/send")
+def send_room_message(room_id: int, req: RoomSendIn):
+    """The real conversational entry point: store the incoming
+    message, work out who should respond (per-DM: the other party,
+    always; per-group-room: only @mentioned bots, never a silent
+    default responder), dispatch each responder under its host's
+    concurrency lock, run its unload strategy afterward, and store
+    each reply -- all visible in the same room_messages history."""
+    conn = _bots_conn()
+    try:
+        room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone()
+        if not room_row:
+            return {"error": f"Room {room_id} not found."}
+        room = _row_to_room(room_row)
+
+        now = time.time()
+        conn.execute(
+            "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (room_id, req.sender_type, req.sender_bot_id, req.content, now)
+        )
+        conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (now, room_id))
+        conn.commit()
+
+        all_bot_rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots").fetchall()
+        all_bots = [_row_to_bot(r) for r in all_bot_rows]
+        bots_by_id = {b["id"]: b for b in all_bots}
+
+        if room["kind"] == "dm":
+            responder_ids = _resolve_dm_responder(room, req.sender_bot_id)
+        else:
+            responder_ids = _parse_mentions(req.content, all_bots)
+
+        athena_mentioned = (
+            room.get("is_everyone_room")
+            and req.sender_type != "athena"
+            and re.search(r"@athena\b", req.content, re.IGNORECASE) is not None
+        )
+
+        replies = []
+        for bot_id in responder_ids:
+            bot = bots_by_id.get(bot_id)
+            if not bot:
+                continue
+            history_rows = conn.execute(
+                "SELECT sender_type, sender_bot_id, content FROM room_messages WHERE room_id = ? ORDER BY id ASC",
+                (room_id,)
+            ).fetchall()
+            history = [{"sender_type": r[0], "sender_bot_id": r[1], "content": r[2],
+                        "sender_bot_name": bots_by_id.get(r[1], {}).get("name") if r[1] else None} for r in history_rows]
+            system_prompt = _build_bot_system_prompt(bot)
+            chat_messages = _room_messages_to_chat_messages(history, bot_id, system_prompt)
+
+            host_key = _endpoint_host(bot.get("endpoint_url"))
+            lock = _get_host_lock(host_key)
+            with lock:
+                result = _call_bot_endpoint(bot, chat_messages)
+                _unload_bot_model(bot)
+
+            if "error" in result:
+                replies.append({"bot_id": bot_id, "error": result["error"]})
+                continue
+
+            reply_time = time.time()
+            conn.execute(
+                "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, 'bot', ?, ?, ?)",
+                (room_id, bot_id, result["content"], reply_time)
+            )
+            conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (reply_time, room_id))
+            conn.commit()
+            replies.append({"bot_id": bot_id, "content": result["content"], "created_at": reply_time})
+
+        if athena_mentioned:
+            athena_result = _run_athena_room_turn(room_id)
+            if "error" in athena_result:
+                replies.append({"sender_type": "athena", "error": athena_result["error"]})
+            else:
+                reply_time = time.time()
+                conn.execute(
+                    "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, 'athena', NULL, ?, ?)",
+                    (room_id, athena_result["content"], reply_time)
+                )
+                conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (reply_time, room_id))
+                conn.commit()
+                replies.append({"sender_type": "athena", "content": athena_result["content"], "created_at": reply_time})
+
+        return {"room_id": room_id, "replies": replies}
+    finally:
+        conn.close()
+
+
+_BOT_TOOL_DESCRIPTIONS = {
+    "bash": "read-only shell commands (ls, cat, grep, find, etc.) to look at files and search",
+    "search_codebase": "semantic/keyword search over the indexed codebase for orientation",
+    "find_definition": "jump to where a symbol is actually defined",
+    "find_references": "find every real usage of a symbol across the workspace",
+    "type_info": "check a symbol's real inferred type/signature",
+    "web_search": "search the web for current information",
+    "web_fetch": "fetch the full content of a specific URL",
+    "read_file": "read a file's contents within the workspace",
+    "list_files": "list files and directories within the workspace",
+}
+
+
+def _build_bot_system_prompt(bot):
+    """Every bot's real system prompt is assembled here, uniformly,
+    from its stored description (used as job_scope) and allowed_tools
+    -- never the raw description text used directly as the whole
+    prompt. This is what actually guarantees the safety structure
+    (bounded scope, relay-don't-execute) applies to every bot, whether
+    it was created through the UI form or by Athena's own
+    draft_bot_prompt tool, since neither path can skip this step."""
+    job_scope = bot.get("description") or f"Act as a general-purpose specialist assistant named {bot['name']}."
+    tools = [
+        {"name": t, "when_to_use": _BOT_TOOL_DESCRIPTIONS.get(t, "use when relevant to the job")}
+        for t in (bot.get("allowed_tools") or [])
+    ]
+    return _draft_bot_prompt(bot["name"], job_scope, tools)
+
+
+def _draft_bot_prompt(name, job_scope, tools, additional_constraints=None):
+    """Assemble a bot's system prompt from structured fields. Grounded
+    in Anthropic's own stated framework for what a system prompt
+    actually needs to do -- state goals, constraints, and stop rules --
+    rather than an elaborate procedural script. The one addition
+    specific to bots: a bot never executes -- it investigates within
+    job_scope and relays findings back to Athena, which is the real
+    safety boundary the whole roster is built around."""
+    tool_lines = "\n".join(f"- {t['name']}: {t['when_to_use']}" for t in tools) if tools else "(no tools -- reasoning only)"
+    constraints_block = f"\n\n## Additional Constraints\n{additional_constraints}" if additional_constraints else ""
+    return f"""You are {name}.
+
+## Think Before Acting
+Plan your approach before calling a tool. If something doesn't match what you expected, say so plainly rather than guessing or working around it silently.
+
+## Simplicity First
+Investigate only what the job below actually requires. Don't expand scope on your own just because something seems related.
+
+## Scoped Tool Use
+Use only the tools relevant to this job:
+{tool_lines}
+
+## Goal-Driven, With a Stop Rule
+Your job: {job_scope}
+That's what must be true when you're done. If a tool call fails, report the failure honestly rather than retrying blindly or guessing at an answer anyway.
+
+## Relay, Don't Execute
+You investigate and report. You never write files, run commands, or make any real change yourself. When you've finished -- or when you're genuinely stuck -- relay what you found back to Athena clearly and stop. Athena is the one who acts on it.{constraints_block}"""
+
+
+ATHENA_BOTS_SESSION_ID = "athena-bots-agent"
+
+def _get_bot_delegation_prompt_section(workspace=None):
+    base = """
+
+## Bot Delegation
+You have access to a roster of specialist bots you can delegate investigate-only work to. Bots never write files or run commands -- they investigate and report back to you; you are the one who acts on their findings. Use list_bots to see who's available before delegating. draft_bot_prompt helps you write a new bot's system prompt in the right structure when creating one. message_bot sends a message to a bot's DM with you and returns its reply. message_room posts to a group room and returns replies from any @mentioned bots -- nothing responds in a group room without an explicit @mention. read_room_messages lets you review any conversation's full history, including ones between two bots, since nothing here is hidden from you. Before creating a bot with create_bot, always check list_bots first and pick a name that isn't already in use -- a duplicate name will be rejected.
+
+Bots must be broad, general-purpose specialists (e.g. "web research", "UI/frontend code", "backend/API work") -- never a narrow one-off bot scoped to a single specific task. Check whether an existing bot's field already fits before creating a new one; reuse it rather than creating something redundant. If the roster is currently empty, the first bot you create must be a fully general-purpose one with no specific niche at all, since there's nothing yet to route more specialized work to."""
+    defaults = (_load_settings().get("bot_creation_defaults") or {})
+    naming_guidance = defaults.get("naming_guidance")
+    if naming_guidance:
+        base += f"\n\nWhen naming a new bot: {naming_guidance}"
+    if not workspace:
+        base += (
+            "\n\nNo workspace is currently bound to this session. You have no ability to read, "
+            "write, or run anything on real files right now -- any attempt will simply fail. If the "
+            "person's request requires real file or command access, tell them plainly that a "
+            "workspace needs to be set first, rather than attempting the action or guessing at what "
+            "it might find."
+        )
+    return base
+
+
+def _list_bots_tool():
+    conn = _bots_conn()
+    try:
+        rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots ORDER BY created_at ASC").fetchall()
+        return [_row_to_bot(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _message_bot_tool(bot_id, content):
+    conn = _bots_conn()
+    try:
+        room_row = conn.execute(
+            "SELECT " + _ROOM_COLUMNS + " FROM rooms WHERE kind = 'dm' AND human_party = 'athena' AND member_bot_ids_json = ?",
+            (json.dumps([bot_id]),)
+        ).fetchone()
+        if room_row:
+            room = _row_to_room(room_row)
+        else:
+            now = time.time()
+            cur = conn.execute(
+                "INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active) VALUES ('dm', 'athena', ?, ?, ?, ?)",
+                (f"Athena & bot #{bot_id}", json.dumps([bot_id]), now, now)
+            )
+            conn.commit()
+            room = _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+    result = send_room_message(room["id"], RoomSendIn(sender_type="athena", sender_bot_id=None, content=content))
+    return result
+
+
+def _message_room_tool(room_id, content):
+    return send_room_message(room_id, RoomSendIn(sender_type="athena", sender_bot_id=None, content=content))
+
+
+def _list_rooms_tool():
+    conn = _bots_conn()
+    try:
+        rows = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms ORDER BY last_active DESC").fetchall()
+        return [_row_to_room(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _read_room_messages_tool(room_id):
+    return get_room_messages(room_id)
+
+
+def _create_bot_tool(name, description, allowed_tools):
+    """Deliberately takes no model/endpoint from the caller -- Athena
+    could easily hallucinate a model name that isn't actually
+    installed on any registered endpoint, since she has no way to see
+    what's real. Every bot she creates uses the person's own
+    pre-configured default (set via Athena2's Agent Defaults menu)
+    instead, removing the guess entirely rather than just warning
+    about it."""
+    settings = _load_settings()
+    defaults = settings.get("bot_creation_defaults") or {}
+    model = defaults.get("model")
+    endpoint_url = defaults.get("endpoint_url")
+    provider = defaults.get("provider", "")
+    if not model:
+        return {"error": "No default model is configured for bot creation yet. Ask the person to set one in Athena's Agent Defaults menu before creating a bot."}
+    conn = _bots_conn()
+    try:
+        existing_names = [r[0] for r in conn.execute("SELECT name FROM bots").fetchall()]
+        if name.strip().lower() in (n.lower() for n in existing_names):
+            return {"error": f"A bot named '{name}' already exists. Existing bots: {', '.join(existing_names)}. Choose a genuinely different name, not a numbered variant."}
+        cur = conn.execute("""
+            INSERT INTO bots (name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at)
+            VALUES (?, ?, ?, '', ?, ?, ?, 'ollama_keep_alive', ?)
+        """, (name, endpoint_url, provider, model, description, json.dumps(allowed_tools), time.time()))
+        conn.commit()
+        return _row_to_bot(conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+
+def _update_bot_tool(bot_id, description=None, allowed_tools=None):
+    """Deliberately narrow -- Athena can refine a bot's own instructions
+    and tool access as it learns what works, but identity fields
+    (name, model, endpoint) are left to the person managing the
+    roster via the UI, not something Athena rewrites on its own."""
+    conn = _bots_conn()
+    try:
+        existing = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ?", (bot_id,)).fetchone()
+        if not existing:
+            return {"error": f"No bot with id {bot_id}."}
+        current = _row_to_bot(existing)
+        new_description = description if description is not None else current["description"]
+        new_tools = allowed_tools if allowed_tools is not None else current["allowed_tools"]
+        conn.execute("UPDATE bots SET description=?, allowed_tools_json=? WHERE id=?",
+                     (new_description, json.dumps(new_tools), bot_id))
+        conn.commit()
+        return _row_to_bot(conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ?", (bot_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+BOT_DELEGATION_TOOL_SCHEMAS = [
+    {"type": "function", "function": {
+        "name": "create_bot",
+        "description": "Create a new bot in the roster, using the person's pre-configured default model and endpoint automatically -- you never choose a model yourself. Use draft_bot_prompt first to write its instructions, then pass that text as description.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string", "description": "The bot's system prompt, ideally from draft_bot_prompt."},
+            "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Read-only tool names this bot can use, e.g. ['bash', 'search_codebase']."},
+        }, "required": ["name", "description", "allowed_tools"]},
+    }},
+    {"type": "function", "function": {
+        "name": "update_bot",
+        "description": "Update an existing bot's description (system prompt) and/or allowed tools -- refine it as you learn what works. Does not change its name, model, or endpoint.",
+        "parameters": {"type": "object", "properties": {
+            "bot_id": {"type": "integer"},
+            "description": {"type": "string"},
+            "allowed_tools": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["bot_id"]},
+    }},
+
+    {"type": "function", "function": {
+        "name": "list_bots",
+        "description": "See every bot in the roster, with their id, name, model, and description. Use this before delegating to know who's available.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "draft_bot_prompt",
+        "description": "Assemble a well-structured system prompt for a new (or existing) bot from a name, job scope, and its available tools. Use this whenever creating a bot's instructions rather than writing them freehand.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "The bot's name."},
+            "job_scope": {"type": "string", "description": "What this bot's job is -- the specific thing it should investigate or accomplish."},
+            "tools": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "when_to_use": {"type": "string"}}}, "description": "The tools this bot has, each with a short note on when to use it."},
+            "additional_constraints": {"type": "string", "description": "Optional: anything else this bot specifically should or shouldn't do."},
+        }, "required": ["name", "job_scope", "tools"]},
+    }},
+    {"type": "function", "function": {
+        "name": "message_bot",
+        "description": "Send a message to a specific bot (your own DM with it, separate from the user's personal conversations with that same bot) and get its reply. Creates the DM automatically on first use.",
+        "parameters": {"type": "object", "properties": {
+            "bot_id": {"type": "integer", "description": "The bot's id, from list_bots."},
+            "content": {"type": "string", "description": "What to say to the bot."},
+        }, "required": ["bot_id", "content"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_rooms",
+        "description": "See every existing conversation room (DMs and group rooms), including ones you're not directly part of -- nothing is hidden from you.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "read_room_messages",
+        "description": "Read the full message history of any room by id, including a bot-to-bot DM you're not a member of.",
+        "parameters": {"type": "object", "properties": {"room_id": {"type": "integer"}}, "required": ["room_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "message_room",
+        "description": "Post a message to a group room. Only bots explicitly @mentioned in the message will respond.",
+        "parameters": {"type": "object", "properties": {
+            "room_id": {"type": "integer"},
+            "content": {"type": "string", "description": "Include @BotName to have that specific bot respond."},
+        }, "required": ["room_id", "content"]},
+    }},
+]
 
 
 TASKS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.db")

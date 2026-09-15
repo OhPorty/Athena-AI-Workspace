@@ -26,7 +26,7 @@
 
     <!-- ICON RAIL -->
     <div x-show="mobileNavOpen" x-cloak @click="mobileNavOpen = false" class="fixed inset-0 bg-black/40 z-30 md:hidden"></div>
-    <button x-show="!mobileNavOpen" x-cloak @click="mobileNavOpen = true" title="Menu" class="md:hidden fixed top-2 left-3 z-20 flex items-center justify-center h-10 w-10 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400 shadow-md border border-neutral-200 dark:border-neutral-700">
+    <button x-show="!mobileNavOpen && !(currentPage === 'bots' && (activeAthenaAgent || activeRoomId))" x-cloak @click="mobileNavOpen = true" title="Menu" class="md:hidden fixed top-2 left-3 z-20 flex items-center justify-center h-10 w-10 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400 shadow-md border border-neutral-200 dark:border-neutral-700">
         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <nav class="fixed md:static inset-y-0 left-0 z-40 w-16 shrink-0 flex flex-col items-center py-4 gap-1 border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 surface transition-transform duration-200 md:translate-x-0 overflow-y-auto" :class="mobileNavOpen ? 'translate-x-0' : '-translate-x-full'">
@@ -578,6 +578,333 @@
             </div>
         </div>
     </template>
+
+    <!-- BOTS PAGE -->
+    <template x-if="currentPage === 'bots'">
+        <div class="flex-1 flex flex-col min-h-0 relative" x-init="loadBots(); loadGroupRooms()" :class="(activeAthenaAgent || activeRoomId) ? 'bot-conversation-active' : ''">
+            <div x-show="botToastMessage" x-cloak class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-red-500 text-white text-sm px-4 py-2.5 rounded-lg surface-modal max-w-xs text-center" x-text="botToastMessage"></div>
+            <template x-if="!activeAthenaAgent && !activeRoomId">
+                <div class="flex-1 flex flex-col min-h-0">
+                    <div class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-3 max-w-2xl w-full mx-auto">
+                        <div class="athena-hero-card relative flex flex-col items-center text-center rounded-3xl p-9 bg-[var(--accent-soft)] border border-[var(--accent-border)] dark:border-[var(--accent-border)]">
+                            <div class="absolute top-4 right-4" @click.stop>
+                                <button @click="athenaMenuOpen = !athenaMenuOpen" class="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-neutral-500 dark:text-neutral-400">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                                </button>
+                                <div x-show="athenaMenuOpen" @click.outside="athenaMenuOpen = null" x-cloak
+                                    class="absolute right-0 top-8 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg surface-modal py-1 w-32 text-xs text-left">
+                                    <div @click="athenaMenuOpen = false; modelPopupTarget = 'athena'; modelPopupOpen = true" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-600 cursor-pointer">Model</div>
+                                    <div @click="athenaMenuOpen = false; openAgentDefaultsModal()" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-600 cursor-pointer">Agent Defaults</div>
+                                </div>
+                            </div>
+                            <div class="athena-avatar-elevated w-28 h-28 rounded-full bg-white flex items-center justify-center">
+                            <div class="athena-icon-mask" style="width: 96px; height: 96px;"></div>
+                                  </div>
+                            <div class="text-neutral-800 dark:text-neutral-100 font-semibold text-xl mt-4">Athena</div>
+                            <div class="text-neutral-500 dark:text-neutral-400 text-sm mt-2 max-w-xs">Give her a job and she'll delegate the work across your bots, then relay what they find back to you.</div>
+                            <div class="flex items-center gap-8 mt-6">
+                                <div class="flex flex-col items-center gap-1.5">
+                                    <button @click="openAthenaAgent()" title="Chat with Athena" class="athena-avatar-elevated w-14 h-14 rounded-full bg-[var(--accent)] text-white flex items-center justify-center hover:bg-[var(--accent-hover)] transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                    </button>
+                                    <span class="text-xs text-neutral-500 dark:text-neutral-400">Chat</span>
+                                </div>
+                                <div class="flex flex-col items-center gap-1.5">
+                                    <button @click="openNewBotModal()" title="New bot" class="athena-avatar-elevated w-14 h-14 rounded-full bg-white dark:bg-neutral-700 text-neutral-600 dark:text-neutral-300 flex items-center justify-center hover:bg-neutral-50 dark:hover:bg-neutral-600 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                    </button>
+                                    <span class="text-xs text-neutral-500 dark:text-neutral-400">New Bot</span>
+                                </div>
+                                <div class="flex flex-col items-center gap-1.5">
+                                    <button @click="openEveryoneRoom()" title="Everyone" class="athena-avatar-elevated w-14 h-14 rounded-full bg-white dark:bg-neutral-700 text-neutral-600 dark:text-neutral-300 flex items-center justify-center hover:bg-neutral-50 dark:hover:bg-neutral-600 transition">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                                    </button>
+                                    <span class="text-xs text-neutral-500 dark:text-neutral-400">Everyone</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div x-show="bots.length === 0" class="text-center text-sm text-neutral-400 dark:text-neutral-500 mt-8">No bots yet.<br>Tap + to add one.</div>
+
+                        <template x-for="bot in bots" :key="bot.id">
+                            <div class="rounded-2xl p-4 flex items-center gap-3.5 cursor-pointer surface-raised bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition group relative"
+                                 @click="openBotDM(bot.id)">
+                                <div class="w-12 h-12 rounded-xl bg-[var(--accent)] text-white flex items-center justify-center text-base font-semibold shrink-0" x-text="bot.name.charAt(0).toUpperCase()"></div>
+                                <div class="flex-1 min-w-0">
+                                    <div class="font-medium text-neutral-800 dark:text-neutral-100 truncate" x-text="bot.name"></div>
+                                    <div class="text-xs text-neutral-400 dark:text-neutral-500" x-text="bot.description || bot.model" style="max-width: 200px; overflow-x: auto; white-space: nowrap; display: block;"></div>
+                                </div>
+                                <div class="relative" @click.stop>
+                                    <button @click="botMenuOpen = botMenuOpen === bot.id ? null : bot.id" class="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded-lg">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                                    </button>
+                                    <div x-show="botMenuOpen === bot.id" @click.outside="botMenuOpen = null" x-cloak
+                                        class="absolute right-0 top-8 z-20 bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg surface-modal py-1 w-32 text-xs">
+                                        <div @click="openEditBotModal(bot)" class="px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 cursor-pointer">Edit</div>
+                                        <div @click="deleteBot(bot.id)" class="px-3 py-1.5 hover:bg-red-50 dark:hover:bg-red-500/10 text-red-500 cursor-pointer">Delete</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <div class="flex items-center justify-between mt-2 px-1">
+                            <div class="text-xs font-medium text-neutral-400 dark:text-neutral-500">Groups</div>
+                            <button @click="openNewGroupModal()" class="text-xs text-[var(--accent)] font-medium hover:underline">+ New Group</button>
+                        </div>
+                        <template x-for="room in groupRooms" :key="room.id">
+                            <div class="rounded-2xl p-4 flex items-center gap-3.5 cursor-pointer surface-raised bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition"
+                                 @click="openGroupRoom(room)">
+                                <div class="w-12 h-12 rounded-xl bg-neutral-200 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-300 flex items-center justify-center shrink-0">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                                </div>
+                                <div class="flex-1 min-w-0">
+                                    <div class="font-medium text-neutral-800 dark:text-neutral-100 truncate" x-text="room.label"></div>
+                                    <div class="text-xs text-neutral-400 dark:text-neutral-500 truncate" x-text="(room.member_bot_ids || []).map(id => bots.find(b => b.id === id)?.name || '?').join(', ')"></div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+            <template x-if="activeAthenaAgent || activeRoomId">
+                <div class="flex-1 flex flex-col min-h-0">
+                    <div class="h-14 shrink-0 flex items-center gap-3 px-2 border-b border-neutral-200 dark:border-neutral-800 surface-bar">
+                        <button @click="closeBotConversation()" title="Back" class="p-2 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500 dark:text-neutral-400 shrink-0">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                        </button>
+                        <div class="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-white">
+                            <template x-if="activeAthenaAgent">
+                                <div class="athena-icon-mask" style="width: 38px; height: 38px;"></div>
+                            </template>
+                            <template x-if="!activeAthenaAgent && activeRoom && activeRoom.kind !== 'group'">
+                                <span class="text-sm font-semibold" x-text="(bots.find(b => b.id === activeBotId)?.name || '?').charAt(0).toUpperCase()"></span>
+                            </template>
+                            <template x-if="!activeAthenaAgent && activeRoom && activeRoom.kind === 'group'">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-neutral-600"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                            </template>
+                        </div>
+                        <div class="text-[15px] font-medium text-neutral-800 dark:text-neutral-100 flex-1 min-w-0 truncate" x-text="activeAthenaAgent ? 'Athena' : (activeRoom && activeRoom.kind === 'group' ? activeRoom.label : (bots.find(b => b.id === activeBotId)?.name || ''))"></div>
+                        <span x-show="activeAthenaAgent" class="text-xs text-neutral-400 dark:text-neutral-500 overflow-x-auto whitespace-nowrap max-w-[35%] shrink-0" x-text="athenaAgentModel ? athenaAgentModelLabel : modelLabel"></span>
+                    </div>
+                    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-3" x-ref="botMsgList">
+                        <template x-for="(msg, idx) in roomMessages" :key="idx">
+                            <div class="flex flex-col gap-1.5 group" :class="msg.sender_type === 'user' ? 'items-end' : 'items-start'">
+                                <div class="text-[10px] text-neutral-400 dark:text-neutral-500 px-1"
+                                     x-show="msg.sender_type !== 'user'"
+                                     x-text="msg.sender_type === 'athena' ? 'Athena' : (bots.find(b => b.id === msg.sender_bot_id)?.name || 'Bot')"></div>
+                                <template x-if="msg.thinking">
+                                    <div class="inline-flex flex-col max-w-full">
+                                        <div @click="msg.thinkingOpen = !msg.thinkingOpen" class="inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 rounded-full bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400 transition">
+                                            <span class="font-medium shrink-0" x-text="msg.content ? 'Thinking' : 'Thinking...'"></span>
+                                            <span x-show="msg.content" class="truncate min-w-0 max-w-[220px] text-neutral-400 dark:text-neutral-500" x-text="msg.thinking"></span>
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 transition-transform" :class="msg.thinkingOpen ? 'rotate-90' : ''"><polyline points="9 18 15 12 9 6"/></svg>
+                                        </div>
+                                        <div x-show="msg.thinkingOpen" class="mt-1 px-3 py-2 text-xs text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap max-h-48 overflow-y-auto border border-neutral-200 dark:border-neutral-700 rounded-xl" x-text="msg.thinking"></div>
+                                    </div>
+                                </template>
+                                <template x-if="msg.toolCalls && msg.toolCalls.length">
+                                    <div class="w-full border border-neutral-200 dark:border-neutral-700 rounded-xl overflow-hidden">
+                                        <div @click="msg.toolsOpen = !msg.toolsOpen" class="flex items-center justify-between px-3 py-2 bg-neutral-50 dark:bg-neutral-800 cursor-pointer text-xs text-neutral-500 dark:text-neutral-400">
+                                            <span class="flex items-center gap-1.5 flex-wrap">
+                                                <span x-show="msg.toolCalls.some(t => t.status === 'running')" class="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+                                                <span x-show="!msg.toolCalls.some(t => t.status === 'running')" class="inline-block h-2 w-2 rounded-full bg-green-500 shrink-0"></span>
+                                                <span>Explored</span>
+                                                <template x-for="(tc, tcIdx) in msg.toolCalls.slice(0, 2)" :key="tcIdx">
+                                                    <span class="font-mono bg-neutral-200 dark:bg-neutral-700 rounded px-1.5 py-0.5" x-text="tc.tool"></span>
+                                                </template>
+                                                <span x-show="msg.toolCalls.length > 2" x-text="(msg.toolCalls.length - 2) + ' more'"></span>
+                                            </span>
+                                            <span x-text="msg.toolsOpen ? '▲' : '▼'"></span>
+                                        </div>
+                                        <div x-show="msg.toolsOpen" class="divide-y divide-neutral-200 dark:divide-neutral-700">
+                                            <template x-for="(tc, tcIdx) in msg.toolCalls" :key="tcIdx">
+                                                <div>
+                                                    <div @click="tc.open = !tc.open" class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-800/50">
+                                                        <span class="flex items-center gap-1.5 text-xs">
+                                                            <span x-show="tc.status === 'running'" class="inline-block h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+                                                            <span x-show="tc.status !== 'running'" class="inline-block h-1.5 w-1.5 rounded-full bg-green-500 shrink-0"></span>
+                                                            <span class="font-mono text-neutral-500 dark:text-neutral-400" x-text="tc.tool"></span>
+                                                        </span>
+                                                        <span class="text-[10px] text-neutral-400" x-text="tc.open ? '▲' : '▼'"></span>
+                                                    </div>
+                                                    <div x-show="tc.open" class="px-3 pb-2 text-xs text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div :class="msg.sender_type === 'user' ? 'bubble-user text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100 surface-raised px-4 py-3'"
+                                     class="text-[15px] leading-relaxed prose-msg max-w-[85%]" x-show="msg.content" x-html="renderMarkdown(msg.content)"></div>
+                                <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 opacity-0 group-hover:opacity-100 transition">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                </button>
+                            </div>
+                        </template>
+                        <div x-show="botConversationLoading" class="text-xs text-neutral-400 dark:text-neutral-500 px-1">Thinking...</div>
+                    </div>
+                    <div class="shrink-0 p-3 relative">
+                        <div x-show="mentionPopupOpen" x-cloak class="absolute bottom-full left-3 right-3 mb-2 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl surface-modal max-h-52 overflow-y-auto py-1.5">
+                            <template x-for="(bot, mIdx) in mentionSuggestions()" :key="bot.id">
+                                <div @click="selectMention(bot)" @mouseenter="mentionActiveIndex = mIdx"
+                                    class="flex items-center gap-2.5 px-3 py-2 mx-1.5 rounded-xl cursor-pointer transition"
+                                    :class="mIdx === mentionActiveIndex ? 'bg-[var(--accent-soft)]' : ''">
+                                    <div x-show="!bot.isAthena" class="w-8 h-8 rounded-lg bg-[var(--accent)] text-white flex items-center justify-center text-xs font-semibold shrink-0" x-text="bot.name.charAt(0).toUpperCase()"></div>
+                                    <div x-show="bot.isAthena" class="w-8 h-8 rounded-lg bg-white flex items-center justify-center shrink-0">
+                                        <div class="athena-icon-mask" style="width: 30px; height: 30px;"></div>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 truncate" x-text="bot.name"></div>
+                                        <div x-show="!bot.isAthena" class="text-xs text-neutral-400 dark:text-neutral-500 truncate" x-text="bot.description || bot.model"></div>
+                                    </div>
+                                </div>
+                            </template>
+                            <div x-show="mentionSuggestions().length === 0" class="px-4 py-3 text-sm text-neutral-400 dark:text-neutral-500 text-center">No matching bots.</div>
+                        </div>
+                        <div class="rounded-2xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 shadow-sm focus-within:border-[var(--accent-border-focus)] dark:focus-within:border-[var(--accent-border-focus)] transition">
+                            <div class="flex items-end gap-2 p-2">
+                                <textarea x-ref="botComposerTextarea" x-model="botComposerText" @input="onComposerInput($event)" @keydown="onComposerKeydown($event)" rows="1"
+                                    class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 px-1 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"
+                                    :placeholder="activeAthenaAgent ? 'Give Athena a job...' : 'Message this bot...'"></textarea>
+                                <button @click="sendBotComposerMessage()" class="p-2.5 rounded-xl bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </template>
+        </div>
+    </template>
+
+    <!-- BOT CREATE/EDIT MODAL -->
+    <div x-show="botModalOpen" x-cloak @click.self="botModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-96 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3" x-text="botModalEditingId ? 'Edit bot' : 'New bot'"></div>
+            <div class="space-y-3">
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Name</label>
+                    <input x-model="botDraft.name" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]" placeholder="e.g. ResearchBot">
+                </div>
+                
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Endpoint</label>
+                    <button type="button" @click="pickerTarget = 'bot'; botEndpointPopupOpen = true" class="w-full text-sm text-left bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]"
+                        x-text="(localBotEndpoints().find(ep => ep.id === botDraft.selectedEndpointId)?.name) || 'Select an endpoint...'"></button>
+                </div>
+                <div x-show="botDraft.selectedEndpointId">
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Model</label>
+                    <button type="button" @click="pickerTarget = 'bot'; botModelPopupOpen = true" class="w-full text-sm text-left bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]"
+                        x-text="botDraft.model || 'Select a model...'"></button>
+                </div>
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Description / role (used as its system prompt)</label>
+                    <textarea x-model="botDraft.description" rows="3" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] resize-none" placeholder="What this bot is good for and how it should behave."></textarea>
+                </div>
+            </div>
+            <div class="flex gap-2 mt-4">
+                <button @click="botModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="saveBotDraft()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- VLLM UNLOAD WARNING MODAL (shown once per bot, when vllm_sleep is picked) -->
+    <div x-show="vllmWarningOpen" x-cloak @click.self="vllmWarningOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-96 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-2">vLLM unload requires server flags</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">vLLM only supports unloading a model when its server was launched with <code class="text-[11px]">VLLM_SERVER_DEV_MODE=1</code> and <code class="text-[11px]">--enable-sleep-mode</code>. If this endpoint isn't running with those flags, its model will stay resident in VRAM and can't be freed before another bot on the same machine tries to load -- which can constrain available VRAM.</div>
+            <button @click="vllmWarningOpen = false" class="w-full py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Understood</button>
+        </div>
+    </div>
+
+    <!-- BOT/AGENT-DEFAULTS ENDPOINT PICKER POPUP (shared, targeted via pickerTarget) -->
+    <div x-show="botEndpointPopupOpen" x-cloak @click.self="botEndpointPopupOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]">
+        <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-80 max-h-[70vh] flex flex-col surface-modal">
+            <h3 class="font-semibold text-sm mb-3 shrink-0">Select an endpoint</h3>
+            <div class="space-y-1 overflow-y-auto">
+                <div x-show="localBotEndpoints().length === 0" class="text-sm text-neutral-400 dark:text-neutral-500 text-center py-4">No local endpoints configured yet. Add one in Settings.</div>
+                <template x-for="ep in localBotEndpoints()" :key="ep.id">
+                    <div @click="selectPickerEndpoint(ep)"
+                        class="px-3 py-2.5 rounded-lg text-sm cursor-pointer"
+                        :class="ep.id === currentPickerDraft().selectedEndpointId ? 'bg-[var(--accent)] text-white' : 'text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-700'"
+                        x-text="ep.name"></div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <!-- BOT/AGENT-DEFAULTS MODEL PICKER POPUP (shared, targeted via pickerTarget) -->
+    <div x-show="botModelPopupOpen" x-cloak @click.self="botModelPopupOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]">
+        <div class="bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-5 w-80 max-h-[70vh] flex flex-col surface-modal">
+            <h3 class="font-semibold text-sm mb-3 shrink-0">Select a model</h3>
+            <div class="space-y-1 overflow-y-auto">
+                <div x-show="botModelOptionsForSelectedEndpoint().length === 0" class="text-sm text-neutral-400 dark:text-neutral-500 text-center py-4">No models enabled for this endpoint yet.</div>
+                <template x-for="m in botModelOptionsForSelectedEndpoint()" :key="m">
+                    <div @click="selectPickerModel(m)"
+                        class="px-3 py-2.5 rounded-lg text-sm cursor-pointer"
+                        :class="m === currentPickerDraft().model ? 'bg-[var(--accent)] text-white' : 'text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-700'"
+                        x-text="m"></div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <!-- AGENT DEFAULTS MODAL -->
+    <div x-show="agentDefaultsModalOpen" x-cloak @click.self="agentDefaultsModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-96 p-5">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3">Agent Defaults</div>
+            <div class="space-y-3">
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Default endpoint (used for every bot Athena creates)</label>
+                    <button type="button" @click="pickerTarget = 'agentDefaults'; botEndpointPopupOpen = true" class="w-full text-sm text-left bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]"
+                        x-text="(localBotEndpoints().find(ep => ep.id === agentDefaultsDraft.selectedEndpointId)?.name) || 'Select an endpoint...'"></button>
+                </div>
+                <div x-show="agentDefaultsDraft.selectedEndpointId">
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Default model</label>
+                    <button type="button" @click="pickerTarget = 'agentDefaults'; botModelPopupOpen = true" class="w-full text-sm text-left bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]"
+                        x-text="agentDefaultsDraft.model || 'Select a model...'"></button>
+                </div>
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Naming guidance (optional)</label>
+                    <textarea x-model="agentDefaultsDraft.naming_guidance" rows="2" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] resize-none" placeholder="e.g. Keep names short and one word."></textarea>
+                </div>
+            </div>
+            <div class="flex gap-2 mt-4">
+                <button @click="agentDefaultsModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="saveAgentDefaults()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- NEW GROUP MODAL -->
+    <div x-show="groupModalOpen" x-cloak @click.self="groupModalOpen = false" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-96 p-5 max-h-[80vh] flex flex-col">
+            <div class="text-sm font-medium text-neutral-800 dark:text-neutral-100 mb-3 shrink-0">New Group</div>
+            <div class="space-y-3 overflow-y-auto">
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Group name</label>
+                    <input x-model="groupDraft.label" type="text" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)]" placeholder="e.g. Frontend Team">
+                </div>
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Members (pick at least two)</label>
+                    <div class="space-y-1">
+                        <template x-for="bot in bots" :key="bot.id">
+                            <div @click="toggleGroupMember(bot.id)" class="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer"
+                                :class="groupDraft.memberBotIds.includes(bot.id) ? 'bg-[var(--accent-soft)]' : 'hover:bg-neutral-100 dark:hover:bg-neutral-700'">
+                                <div class="w-8 h-8 rounded-lg bg-[var(--accent)] text-white flex items-center justify-center text-xs font-semibold shrink-0" x-text="bot.name.charAt(0).toUpperCase()"></div>
+                                <div class="text-sm text-neutral-800 dark:text-neutral-100 flex-1 min-w-0 truncate" x-text="bot.name"></div>
+                                <svg x-show="groupDraft.memberBotIds.includes(bot.id)" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-[var(--accent)] shrink-0"><polyline points="20 6 9 17 4 12"/></svg>
+                            </div>
+                        </template>
+                        <div x-show="bots.length === 0" class="text-xs text-neutral-400 dark:text-neutral-500 text-center py-3">No bots yet -- create one first.</div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex gap-2 mt-4 shrink-0">
+                <button @click="groupModalOpen = false" class="flex-1 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                <button @click="createGroupRoom()" class="flex-1 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)]">Create</button>
+            </div>
+        </div>
+    </div>
 
     <!-- NOTES PAGE (fully functional, local) -->
     <template x-if="currentPage === 'notes'">

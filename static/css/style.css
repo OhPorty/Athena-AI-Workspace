@@ -156,7 +156,7 @@
    without needing per-page markup changes -- and it's scoped to mobile
    widths only, so desktop is completely unaffected. */
 @media (max-width: 767px) {
-    body > div.flex > template + div:not(#chat-page-root) {
+    body > div.flex > template + div:not(#chat-page-root):not(.bot-conversation-active) {
         padding-top: 3.5rem;
     }
 }
@@ -352,6 +352,18 @@
    which shifts whatever colors already exist in the source image
    through a rotation matrix and can leave visible traces of the
    original color rather than cleanly becoming the target hue. */
+.athena-icon-mask {
+    display: inline-block;
+    mask-image: url('/static/svg/athena-icon.svg');
+    mask-size: contain;
+    mask-repeat: no-repeat;
+    mask-position: center;
+    -webkit-mask-image: url('/static/svg/athena-icon.svg');
+    -webkit-mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    background-color: var(--athena-logo-color, #265152);
+}
 .logo-mask {
     display: inline-block;
     mask-image: url('/static/svg/spear.svg');

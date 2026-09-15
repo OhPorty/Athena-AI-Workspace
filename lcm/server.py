@@ -46,6 +46,8 @@ class MessageIn(BaseModel):
     service: str = "unknown"
     model: Optional[str] = None
     has_image: bool = False
+    thinking: Optional[str] = None
+    tool_calls: Optional[list] = None
 
 class SummarizeIn(BaseModel):
     session_id: str
@@ -67,7 +69,7 @@ AUTO_COMPACT_FOLD_THRESHOLD = int(os.environ.get("LCM_AUTO_COMPACT_FOLD_THRESHOL
 
 @app.post("/message")
 def add_message(msg: MessageIn):
-    row_id = lcm.add_message(msg.session_id, msg.role, msg.content, msg.service, msg.model, msg.has_image)
+    row_id = lcm.add_message(msg.session_id, msg.role, msg.content, msg.service, msg.model, msg.has_image, msg.thinking, msg.tool_calls)
     # Auto-compact after every write so callers never have to remember
     # to call /compact themselves -- mirrors how a real compactor runs
     # transparently as part of normal request handling.
@@ -83,11 +85,14 @@ def add_message(msg: MessageIn):
 def get_messages(session_id: str):
     conn = lcm._conn()
     rows = conn.execute(
-        "SELECT id, role, content, covered_by_node, model, has_image FROM messages WHERE session_id = ? ORDER BY id",
+        "SELECT id, role, content, covered_by_node, model, has_image, thinking, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id",
         (session_id,)
     ).fetchall()
     conn.close()
-    return [{"id": r[0], "role": r[1], "content": r[2], "covered_by_node": r[3], "model": r[4], "has_image": bool(r[5])} for r in rows]
+    return [{
+        "id": r[0], "role": r[1], "content": r[2], "covered_by_node": r[3], "model": r[4], "has_image": bool(r[5]),
+        "thinking": r[6], "tool_calls": json.loads(r[7]) if r[7] else None,
+    } for r in rows]
 
 @app.delete("/session/{session_id}")
 def delete_session(session_id: str):

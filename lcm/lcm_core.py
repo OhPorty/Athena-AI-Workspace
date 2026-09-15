@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 
@@ -34,6 +35,10 @@ class LCM:
             conn.execute("ALTER TABLE messages ADD COLUMN model TEXT DEFAULT NULL")
         if "has_image" not in existing_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN has_image INTEGER DEFAULT 0")
+        if "thinking" not in existing_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN thinking TEXT DEFAULT NULL")
+        if "tool_calls_json" not in existing_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT DEFAULT NULL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,11 +101,12 @@ class LCM:
         conn.commit()
         conn.close()
 
-    def add_message(self, session_id, role, content, service="unknown", model=None, has_image=False):
+    def add_message(self, session_id, role, content, service="unknown", model=None, has_image=False, thinking=None, tool_calls=None):
         conn = self._conn()
+        tool_calls_json = json.dumps(tool_calls) if tool_calls else None
         cur = conn.execute(
-            "INSERT INTO messages (session_id, role, content, created_at, service, model, has_image) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, role, content, time.time(), service, model, 1 if has_image else 0)
+            "INSERT INTO messages (session_id, role, content, created_at, service, model, has_image, thinking, tool_calls_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, role, content, time.time(), service, model, 1 if has_image else 0, thinking, tool_calls_json)
         )
         conn.commit()
         row_id = cur.lastrowid
