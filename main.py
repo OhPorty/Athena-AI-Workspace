@@ -1569,20 +1569,72 @@ def _validate_bash_exec_call(command: str, args: list):
     return None
 
 
+ATHENA_SANDBOX_IMAGE = "athena-sandbox:latest"
+
+
+def _docker_sandbox_available():
+    """Checked live on every call rather than cached -- a stale cached
+    'yes' would be exactly the false-confidence failure mode a sandbox
+    can't afford: if Docker or the image genuinely isn't there right
+    now, bash_exec must say so plainly and refuse, never silently run
+    unsandboxed."""
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", ATHENA_SANDBOX_IMAGE],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _build_docker_sandbox_cmd(command, args, workspace):
+    """Every bash_exec command runs inside this container, not
+    directly on the host -- allowlisting/pattern-blocking in
+    _validate_bash_exec_call decides WHETHER a command runs; this
+    decides what it can actually reach once it does. Hardened per
+    DeepSeek Harness's own real-world Docker practice: dropped
+    capabilities, no privilege escalation, read-only root filesystem
+    (only the mounted workspace and /tmp are writable), no Docker
+    socket, no credential paths, nothing beyond the workspace itself
+    visible. Network stays available (install-type commands need it);
+    filesystem containment is the actual protection here."""
+    real_workspace = os.path.realpath(workspace)
+    uid, gid = os.getuid(), os.getgid()
+    return [
+        "docker", "run", "--rm",
+        "--network", "bridge",
+        "-v", f"{real_workspace}:{real_workspace}",
+        "-w", real_workspace,
+        "--user", f"{uid}:{gid}",
+        "-e", "HOME=/tmp",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges=true",
+        "--read-only",
+        "--tmpfs", "/tmp",
+        "--memory", "512m",
+        "--cpus", "1",
+        "--pids-limit", "100",
+        ATHENA_SANDBOX_IMAGE,
+        command,
+    ] + list(args)
+
+
 def _execute_write_bash(command: str, args: list, workspace: str):
     if not workspace:
         return {"error": "bash_exec requires an active workspace."}
     err = _validate_bash_exec_call(command, args)
     if err:
         return err
+    if not _docker_sandbox_available():
+        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
     try:
         result = subprocess.run(
-            [command] + list(args),
+            _build_docker_sandbox_cmd(command, args, workspace),
             capture_output=True,
             text=True,
             timeout=BASH_EXEC_TIMEOUT_SECONDS,
             shell=False,
-            cwd=os.path.realpath(workspace),
         )
         output = result.stdout
         if result.stderr:
@@ -1614,15 +1666,16 @@ def _start_background_bash(command: str, args: list, workspace: str):
     err = _validate_bash_exec_call(command, args)
     if err:
         return err
+    if not _docker_sandbox_available():
+        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
     try:
         proc = subprocess.Popen(
-            [command] + list(args),
+            _build_docker_sandbox_cmd(command, args, workspace),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             shell=False,
-            cwd=os.path.realpath(workspace),
         )
     except FileNotFoundError:
         return {"error": "Command '" + command + "' not found on this system."}
