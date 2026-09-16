@@ -2402,6 +2402,40 @@ def cancel_chat(req: CancelIn):
 # whether it's currently running at all.
 _active_generations = {}
 
+# A continuously-updated live snapshot of an in-progress generation --
+# thinking so far, content so far, and each tool call's status/output --
+# kept separately from the single-consumer event queue above, so ANY
+# number of clients can ask "what's actually happening right now" via
+# a real status check, not just whoever happens to be the one actively
+# draining the queue. This is what makes "still generating" mean
+# something more than a boolean spinner.
+_generation_snapshots = {}
+
+
+def _update_snapshot(key, chunk):
+    """Parses one SSE-formatted chunk string (exactly what generate()
+    or an equivalent generator yields) and updates the live snapshot
+    for this session/room key in place."""
+    if not chunk.startswith("data: "):
+        return
+    try:
+        obj = json.loads(chunk[6:].strip())
+    except (json.JSONDecodeError, ValueError):
+        return
+    snap = _generation_snapshots.setdefault(key, {"thinking": "", "content": "", "tool_calls": []})
+    if obj.get("thinking"):
+        snap["thinking"] += obj["thinking"]
+    if obj.get("delta"):
+        snap["content"] += obj["delta"]
+    if obj.get("type") == "tool_start":
+        snap["tool_calls"].append({"tool": obj.get("tool"), "status": "running", "output": None})
+    if obj.get("type") == "tool_output":
+        for tc in reversed(snap["tool_calls"]):
+            if tc["tool"] == obj.get("tool") and tc["status"] == "running":
+                tc["status"] = "done"
+                tc["output"] = obj.get("output")
+                break
+
 def _drain_generator_to_queue(gen, event_queue, session_id):
     """Runs an existing SSE-yielding generator (Athena's own, completely
     unmodified agentic generation loop) to completion in a background
@@ -2415,12 +2449,14 @@ def _drain_generator_to_queue(gen, event_queue, session_id):
     is untouched -- this is purely an outer layer around it."""
     try:
         for chunk in gen:
+            _update_snapshot(session_id, chunk)
             event_queue.put(chunk)
     except Exception as e:
         print(f"[DEBUG] background generation for session {session_id!r} raised: {e!r}", flush=True)
     finally:
         event_queue.put(None)  # sentinel: no more chunks coming
         _active_generations.pop(session_id, None)
+        _generation_snapshots.pop(session_id, None)
 
 @app.get("/api/chat/status/{session_id}")
 def chat_status(session_id: str):
@@ -2428,8 +2464,13 @@ def chat_status(session_id: str):
     a generation for it is still running in the background (e.g. the
     tab was closed or navigated away mid-response) -- so it can show a
     "still running" placeholder and poll instead of just displaying
-    whatever partial state was last saved."""
-    return {"generating": session_id in _active_generations}
+    whatever partial state was last saved. Now also returns the live,
+    continuously-updated snapshot (thinking so far, content so far,
+    tool calls with status/output) so a reconnecting client can render
+    genuine in-progress state, not just a boolean spinner."""
+    generating = session_id in _active_generations
+    snapshot = _generation_snapshots.get(session_id) if generating else None
+    return {"generating": generating, "snapshot": snapshot}
 
 
 _last_activity_ts = time.time()
@@ -3398,6 +3439,7 @@ def chat_stream(req: ChatIn):
     gen = generate()
     event_queue = queue.Queue()
     _active_generations[req.session_id] = event_queue
+    _generation_snapshots[req.session_id] = {"thinking": "", "content": "", "tool_calls": []}
     threading.Thread(target=_drain_generator_to_queue, args=(gen, event_queue, req.session_id), daemon=True).start()
 
     def _stream_from_queue():
@@ -4455,27 +4497,40 @@ def _dispatch_athena_room_tool_call(tc):
 _ATHENA_ROOM_MAX_ROUNDS = 8
 
 
-def _run_athena_room_turn(room_id):
-    """A real, multi-round agentic turn for Athena inside a room --
-    unlike bot dispatch (a single call, no tools at all), this gives
-    her genuine tool execution against the delegation toolset, with
-    the same kind of fingerprint-based loop protection the main
-    session uses, since a room is exactly the kind of place a small
-    local model can get stuck repeating a call. Returns a small
-    result dict; the caller (send_room_message) handles storing it
-    into the room and reporting any error the same way a bot's reply
-    would be."""
+def _room_key(room_id):
+    """The generic string key used to track a room-turn's background
+    generation in the exact same _active_generations/_generation_snapshots
+    dicts main chat and Athena2 already use -- distinct from a real LCM
+    session_id (which is always a UUID), so no collision risk, and it
+    means zero new tracking infrastructure is needed for rooms at all."""
+    return f"room-{room_id}"
+
+
+def _run_athena_room_turn_gen(room_id):
+    """Generator version of Athena's room turn -- yields the exact same
+    SSE-shaped chunks generate() does (thinking/delta/tool_start/
+    tool_output/done), so it can run through the identical background-
+    thread + snapshot machinery main chat and Athena2 already use. Saves
+    her final reply into room_messages itself, right before yielding
+    done, the same way generate() calls send_to_lcm right before its
+    own done chunk -- so a real reply always lands in the room exactly
+    once generation actually finishes, whether anyone's still watching
+    or not."""
     settings = _load_settings()
     defaults = settings.get("athena_agent_model") or {}
     model = defaults.get("model")
     if not model:
-        return {"error": "No model is configured for Athena's own agent turns yet. Set one via her Agent Defaults / model picker first."}
+        yield f"data: {json.dumps({'error': "No model is configured for Athena's own agent turns yet. Set one via her Agent Defaults / model picker first."})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+        return
 
     conn = _bots_conn()
     try:
         room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone()
         if not room_row:
-            return {"error": f"Room {room_id} not found."}
+            yield f"data: {json.dumps({'error': f'Room {room_id} not found.'})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            return
         history_rows = conn.execute(
             "SELECT sender_type, sender_bot_id, content FROM room_messages WHERE room_id = ? ORDER BY id ASC",
             (room_id,)
@@ -4510,31 +4565,41 @@ def _run_athena_room_turn(room_id):
 
     fingerprints = []
     full_reply = ""
+    cancel_flag = threading.Event()
 
     for round_num in range(_ATHENA_ROOM_MAX_ROUNDS):
-        cancel_flag = threading.Event()
         round_reply = ""
         round_tool_calls = []
         try:
             for chunk in _stream_completion(fake_req, target_url, chat_messages, BOT_DELEGATION_TOOL_SCHEMAS, 8192, cancel_flag):
                 msg = chunk.get("message", {})
+                thinking_delta = msg.get("thinking", "")
+                if thinking_delta:
+                    yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
                 delta = msg.get("content", "")
                 if delta:
                     round_reply += delta
+                    yield f"data: {json.dumps({'delta': delta})}\n\n"
                 if msg.get("tool_calls"):
                     round_tool_calls.extend(msg["tool_calls"])
                 if chunk.get("done"):
                     break
         except Exception as e:
-            return {"error": f"Athena's room turn failed: {e}"}
+            yield f"data: {json.dumps({'error': f"Athena's room turn failed: {e}"})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            return
 
         full_reply += round_reply
 
         if not round_tool_calls:
-            return {"content": full_reply}
+            _save_athena_room_reply(room_id, full_reply)
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            return
 
         chat_messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
         for tc in round_tool_calls:
+            tool_name = tc.get("function", {}).get("name", "unknown")
+            yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
             fingerprint = hashlib.md5(json.dumps(tc.get("function", {}), sort_keys=True).encode()).hexdigest()
             repeat_count = fingerprints.count(fingerprint)
             if repeat_count >= 2:
@@ -4542,9 +4607,41 @@ def _run_athena_room_turn(room_id):
             else:
                 result = _dispatch_athena_room_tool_call(tc)
                 fingerprints.append(fingerprint)
+            yield f"data: {json.dumps({'type': 'tool_output', 'tool': tool_name, 'output': result})}\n\n"
             chat_messages.append({"role": "tool", "content": json.dumps(result)})
 
-    return {"content": full_reply or "I made several tool calls but wasn't able to settle on a final answer within my round limit -- ask me to continue or narrow the task."}
+    fallback = full_reply or "I made several tool calls but wasn't able to settle on a final answer within my round limit -- ask me to continue or narrow the task."
+    _save_athena_room_reply(room_id, fallback)
+    yield f"data: {json.dumps({'done': True})}\n\n"
+
+
+def _save_athena_room_reply(room_id, content):
+    reply_time = time.time()
+    conn = _bots_conn()
+    try:
+        conn.execute(
+            "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, 'athena', NULL, ?, ?)",
+            (room_id, content, reply_time)
+        )
+        conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (reply_time, room_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _start_athena_room_turn_background(room_id):
+    """Starts Athena's room turn in a background thread, reusing the
+    exact same queue/snapshot/active-generations machinery main chat
+    and Athena2 already use -- keyed by _room_key(room_id) instead of
+    a real session_id. Fire-and-forget: the caller doesn't wait for
+    this, since the whole point is that a room turn now survives the
+    requesting connection closing, same as everything else."""
+    key = _room_key(room_id)
+    gen = _run_athena_room_turn_gen(room_id)
+    event_queue = queue.Queue()
+    _active_generations[key] = event_queue
+    _generation_snapshots[key] = {"thinking": "", "content": "", "tool_calls": []}
+    threading.Thread(target=_drain_generator_to_queue, args=(gen, event_queue, key), daemon=True).start()
 
 
 class RoomSendIn(BaseModel):
@@ -4624,21 +4721,12 @@ def send_room_message(room_id: int, req: RoomSendIn):
             conn.commit()
             replies.append({"bot_id": bot_id, "content": result["content"], "created_at": reply_time})
 
+        athena_started = False
         if athena_mentioned:
-            athena_result = _run_athena_room_turn(room_id)
-            if "error" in athena_result:
-                replies.append({"sender_type": "athena", "error": athena_result["error"]})
-            else:
-                reply_time = time.time()
-                conn.execute(
-                    "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, 'athena', NULL, ?, ?)",
-                    (room_id, athena_result["content"], reply_time)
-                )
-                conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (reply_time, room_id))
-                conn.commit()
-                replies.append({"sender_type": "athena", "content": athena_result["content"], "created_at": reply_time})
+            _start_athena_room_turn_background(room_id)
+            athena_started = True
 
-        return {"room_id": room_id, "replies": replies}
+        return {"room_id": room_id, "replies": replies, "athena_started": athena_started}
     finally:
         conn.close()
 

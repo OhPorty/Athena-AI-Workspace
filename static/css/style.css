@@ -8,23 +8,40 @@
 .prose-msg { overflow-wrap: break-word; word-break: break-word; min-width: 0; max-width: 100%; }
 .prose-msg p { margin: 0 0 0.75em 0; }
 .prose-msg p:last-child { margin-bottom: 0; }
+/* Wide tables scroll horizontally within their own bounds rather
+   than squeezing every column to fit (which forced awkward cell
+   word-wrapping on anything past 2-3 columns). fade-left/fade-right
+   are toggled by JS based on real scroll position -- the gradient
+   only appears on a side that genuinely has more content to reveal,
+   not as a static always-on decoration. */
+.table-scroll-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0.75em 0;
+}
+.table-scroll-wrap.fade-left {
+    mask-image: linear-gradient(to right, transparent 0, black 24px, black 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, black 24px, black 100%);
+}
+.table-scroll-wrap.fade-right {
+    mask-image: linear-gradient(to left, transparent 0, black 24px, black 100%);
+    -webkit-mask-image: linear-gradient(to left, transparent 0, black 24px, black 100%);
+}
+.table-scroll-wrap.fade-left.fade-right {
+    mask-image: linear-gradient(to right, transparent 0, black 24px, black calc(100% - 24px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, black 24px, black calc(100% - 24px), transparent 100%);
+}
 .prose-msg table {
     border-collapse: collapse;
-    width: 100%;
-    table-layout: fixed;
-    margin: 0.75em 0;
+    margin: 0;
     font-size: 13.5px;
-}
-.prose-msg th, .prose-msg td {
-    overflow-wrap: break-word !important;
-    word-break: break-word !important;
-    white-space: normal !important;
-    max-width: 0;
+    white-space: nowrap;
 }
 .prose-msg th, .prose-msg td {
     border: 1px solid rgba(128, 128, 128, 0.3);
     padding: 6px 12px;
     text-align: left;
+    white-space: nowrap;
 }
 .prose-msg th {
     background: rgba(124, 58, 237, 0.1);
@@ -42,6 +59,7 @@
     overflow-x: auto;
     font-size: 13px;
     margin: 0.75em 0;
+    max-width: 100%;
 }
 .prose-msg pre code {
     color: inherit !important;

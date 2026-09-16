@@ -294,26 +294,106 @@ function athenaApp() {
                 console.error("Failed to load session history:", e);
             }
         },
+        _startLiveReveal(liveMsg) {
+            // A poll only arrives every 2s with however much the real
+            // server-side snapshot advanced in that whole window --
+            // displaying that instantly reads as chunky "sections
+            // spawning in" rather than live streaming. This runs
+            // continuously, always chasing whatever the LATEST known
+            // target (liveMsg._targetThinking/_targetContent) is, a
+            // few characters at a time -- so the display genuinely
+            // lags a couple seconds behind the real state, but reads
+            // as smooth, continuous generation instead of jumps.
+            //
+            // If the gap between displayed and target is far bigger
+            // than one normal poll window could ever produce (a tab
+            // resumed from background, a PWA suspend/resume that kept
+            // JS memory alive with a stale position rather than truly
+            // reloading), crawling from there at a few chars/tick
+            // would take a visibly long time to catch up, and reads
+            // as "stuck." Instead, re-anchor once: jump straight to
+            // (current - LAG_CHARS), preserving the same intentional
+            // lag-behind-live illusion, rather than either sitting on
+            // a stale position for a long time or snapping all the
+            // way to fully caught-up (which is what caused the
+            // earlier chunky "sections spawning in" look).
+            const LAG_CHARS = 120;
+            const SNAP_THRESHOLD = 400;
+            if (liveMsg._revealTimer) return; // already running
+            liveMsg._revealTimer = setInterval(() => {
+                const targetThinking = liveMsg._targetThinking || "";
+                const targetContent = liveMsg._targetContent || "";
+                const thinkingGap = targetThinking.length - liveMsg.thinking.length;
+                const contentGap = targetContent.length - liveMsg.content.length;
+                if (thinkingGap > SNAP_THRESHOLD) {
+                    liveMsg.thinking = targetThinking.slice(0, Math.max(liveMsg.thinking.length, targetThinking.length - LAG_CHARS));
+                } else if (thinkingGap > 0) {
+                    liveMsg.thinking = targetThinking.slice(0, liveMsg.thinking.length + 3);
+                } else if (contentGap > SNAP_THRESHOLD) {
+                    liveMsg.thinkingOpen = false;
+                    liveMsg.content = targetContent.slice(0, Math.max(liveMsg.content.length, targetContent.length - LAG_CHARS));
+                } else if (contentGap > 0) {
+                    liveMsg.thinkingOpen = false;
+                    liveMsg.content = targetContent.slice(0, liveMsg.content.length + 3);
+                }
+            }, 40);
+        },
+        _stopLiveReveal(liveMsg) {
+            if (liveMsg && liveMsg._revealTimer) {
+                clearInterval(liveMsg._revealTimer);
+                liveMsg._revealTimer = null;
+                // Snap to the true final state immediately once
+                // generation is actually done, rather than leaving
+                // the last few characters trickling in artificially.
+                liveMsg.thinking = liveMsg._targetThinking || liveMsg.thinking;
+                liveMsg.content = liveMsg._targetContent || liveMsg.content;
+            }
+        },
         async checkBackgroundGeneration(sessionId) {
             // A generation can keep running server-side after the tab
             // that started it closed or navigated away -- this checks
             // whether that's happening for the session now being
-            // viewed, shows a placeholder while it's still going, and
-            // reloads the real, completed message once it finishes.
-            // Re-polls on a timer rather than once, and bails out
-            // quietly if the user has since switched to a different
-            // session so it doesn't poll forever in the background.
+            // viewed, and shows the actual live snapshot (thinking,
+            // content-so-far, tool calls) while it's still going,
+            // rather than just a "still generating" placeholder --
+            // reusing the exact same message-bubble shape/rendering a
+            // real live stream uses, since the status endpoint now
+            // returns real snapshot data, not just a boolean. Reloads
+            // the real, completed message once it finishes. Re-polls
+            // on a timer rather than once, and bails out quietly if
+            // the user has since switched to a different session so
+            // it doesn't poll forever in the background.
             try {
                 const resp = await fetch(`/api/chat/status/${sessionId}`);
                 const data = await resp.json();
                 if (this.sessionId !== sessionId) return; // navigated away since this check started
                 if (data.generating) {
                     this.backgroundGenerating = true;
+                    const snap = data.snapshot;
+                    if (snap) {
+                        let liveMsg = this.messages[this.messages.length - 1];
+                        const isFreshReconnect = !liveMsg || !liveMsg._isLiveSnapshot;
+                        if (isFreshReconnect) {
+                            // Jump straight to wherever the real state already is on a
+                            // fresh reload/reconnect -- no reason to "type out" thousands
+                            // of already-existing characters from scratch. The gradual
+                            // reveal is only for genuinely NEW content arriving between
+                            // polls from here on.
+                            this.messages.push({role: "assistant", content: snap.content, thinking: snap.thinking, thinkingOpen: !snap.content, toolCalls: snap.tool_calls, toolsOpen: false, model: this.modelLabel, ttsLabel: "Play", rating: null, messageId: null, _isLiveSnapshot: true});
+                            liveMsg = this.messages[this.messages.length - 1]; // re-read the actual reactive object, not the pre-push reference
+                        }
+                        liveMsg._targetThinking = snap.thinking;
+                        liveMsg._targetContent = snap.content;
+                        liveMsg.toolCalls = snap.tool_calls;
+                        this._startLiveReveal(liveMsg);
+                    }
                     setTimeout(() => this.checkBackgroundGeneration(sessionId), 2000);
                 } else {
                     const wasGenerating = this.backgroundGenerating;
                     this.backgroundGenerating = false;
                     if (wasGenerating) {
+                        const liveMsg = this.messages[this.messages.length - 1];
+                        if (liveMsg && liveMsg._isLiveSnapshot) this._stopLiveReveal(liveMsg);
                         await this.loadSessionHistory(sessionId);
                     }
                 }
@@ -949,18 +1029,35 @@ function athenaApp() {
             // Athena2 goes through the identical /api/chat pipeline, just
             // under the fixed "athena-bots-agent" session id, so a
             // generation she started can keep running after the tab
-            // closed and this picks it back up the same way.
+            // closed and this picks it back up the same way. Now also
+            // renders the real live snapshot (thinking, content-so-far,
+            // tool calls) instead of just a "still generating" spinner.
             try {
                 const resp = await fetch(`/api/chat/status/athena-bots-agent`);
                 const data = await resp.json();
                 if (!this.activeAthenaAgent) return; // navigated away since this check started
                 if (data.generating) {
                     this.botConversationLoading = true;
+                    const snap = data.snapshot;
+                    if (snap) {
+                        let liveMsg = this.roomMessages[this.roomMessages.length - 1];
+                        const isFreshReconnect = !liveMsg || !liveMsg._isLiveSnapshot;
+                        if (isFreshReconnect) {
+                            this.roomMessages.push({sender_type: "athena", content: snap.content, thinking: snap.thinking, thinkingOpen: !snap.content, toolCalls: snap.tool_calls, toolsOpen: false, _isLiveSnapshot: true});
+                            liveMsg = this.roomMessages[this.roomMessages.length - 1]; // re-read the actual reactive object, not the pre-push reference
+                        }
+                        liveMsg._targetThinking = snap.thinking;
+                        liveMsg._targetContent = snap.content;
+                        liveMsg.toolCalls = snap.tool_calls;
+                        this._startLiveReveal(liveMsg);
+                    }
                     setTimeout(() => this.checkAthenaAgentBackgroundGeneration(), 2000);
                 } else {
                     const wasGenerating = this.botConversationLoading;
                     this.botConversationLoading = false;
                     if (wasGenerating) {
+                        const liveMsg = this.roomMessages[this.roomMessages.length - 1];
+                        if (liveMsg && liveMsg._isLiveSnapshot) this._stopLiveReveal(liveMsg);
                         await this.openAthenaAgent();
                     }
                 }
@@ -2172,6 +2269,21 @@ function athenaApp() {
         btn.style.top = "8px";
         btn.style.right = "8px";
         wrapper.appendChild(btn);
+                });
+                document.querySelectorAll(".prose-msg table:not(.scroll-wired)").forEach(table => {
+                    table.classList.add("scroll-wired");
+                    const wrap = document.createElement("div");
+                    wrap.className = "table-scroll-wrap";
+                    table.parentElement.replaceChild(wrap, table);
+                    wrap.appendChild(table);
+                    const updateFade = () => {
+                        const scrollable = wrap.scrollWidth > wrap.clientWidth + 1;
+                        wrap.classList.toggle("fade-left", scrollable && wrap.scrollLeft > 4);
+                        wrap.classList.toggle("fade-right", scrollable && wrap.scrollLeft < wrap.scrollWidth - wrap.clientWidth - 4);
+                    };
+                    wrap.addEventListener("scroll", updateFade);
+                    window.addEventListener("resize", updateFade);
+                    updateFade();
                 });
             });
             return html;

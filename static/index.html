@@ -293,10 +293,15 @@
                                 </div>
                             </div>
                         </template>
+                        <!-- Superseded by the live snapshot rendering in checkBackgroundGeneration
+                             (main.py's chat_status now returns real thinking/content/tool_calls,
+                             not just a boolean) -- kept here commented out as a simple fallback
+                             reference in case that mechanism ever needs to be reverted.
                         <div x-show="backgroundGenerating" x-cloak class="flex items-center gap-2 text-sm text-neutral-400 dark:text-neutral-500 py-2">
                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
                             Still generating in the background...
                         </div>
+                        -->
                     </div>
                 </div>
 
@@ -685,9 +690,11 @@
                         <div class="text-[15px] font-medium text-neutral-800 dark:text-neutral-100 flex-1 min-w-0 truncate" x-text="activeAthenaAgent ? 'Athena' : (activeRoom && activeRoom.kind === 'group' ? activeRoom.label : (bots.find(b => b.id === activeBotId)?.name || ''))"></div>
                         <span x-show="activeAthenaAgent" class="text-xs text-neutral-400 dark:text-neutral-500 overflow-x-auto whitespace-nowrap max-w-[35%] shrink-0" x-text="athenaAgentModel ? athenaAgentModelLabel : modelLabel"></span>
                     </div>
-                    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-3" x-ref="botMsgList">
+                    <div class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden" x-ref="botMsgList">
+                        <div class="max-w-[30rem] md:max-w-3xl mx-auto px-4 py-4 space-y-3">
                         <template x-for="(msg, idx) in roomMessages" :key="idx">
-                            <div class="flex flex-col gap-1.5 group" :class="msg.sender_type === 'user' ? 'items-end' : 'items-start'">
+                            <div class="flex gap-4 group" :class="msg.sender_type === 'user' ? 'justify-end' : 'justify-start'">
+                            <div class="flex flex-col gap-1.5 max-w-[95%] min-w-0" :class="msg.sender_type === 'user' ? 'items-end' : 'items-start'">
                                 <div class="text-[10px] text-neutral-400 dark:text-neutral-500 px-1"
                                      x-show="msg.sender_type !== 'user'"
                                      x-text="msg.sender_type === 'athena' ? 'Athena' : (bots.find(b => b.id === msg.sender_bot_id)?.name || 'Bot')"></div>
@@ -733,13 +740,15 @@
                                     </div>
                                 </template>
                                 <div :class="msg.sender_type === 'user' ? 'bubble-user text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100 surface-raised px-4 py-3'"
-                                     class="text-[15px] leading-relaxed prose-msg max-w-[85%]" x-show="msg.content" x-html="renderMarkdown(msg.content)"></div>
+                                     class="text-[15px] leading-relaxed prose-msg" x-show="msg.content" x-html="renderMarkdown(msg.content)"></div>
                                 <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 opacity-0 group-hover:opacity-100 transition">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                                 </button>
                             </div>
+                            </div>
                         </template>
                         <div x-show="botConversationLoading" class="text-xs text-neutral-400 dark:text-neutral-500 px-1">Thinking...</div>
+                        </div>
                     </div>
                     <div class="shrink-0 p-3 relative">
                         <div x-show="mentionPopupOpen" x-cloak class="absolute bottom-full left-3 right-3 mb-2 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl surface-modal max-h-52 overflow-y-auto py-1.5">
