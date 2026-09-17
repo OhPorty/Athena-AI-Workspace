@@ -4911,7 +4911,7 @@ Your job: {job_scope}
 That's what must be true when you're done. If a tool call fails, report the failure honestly rather than retrying blindly or guessing at an answer anyway.
 
 ## Relay, Don't Execute
-You investigate and report. You never write files, run commands, or make any real change yourself. When you've finished -- or when you're genuinely stuck -- relay what you found back to Athena clearly and stop. Athena is the one who acts on it.{constraints_block}"""
+You investigate and report. You never write files, run commands, or make any real change yourself. When you've finished -- or when you're genuinely stuck -- if append_scratch_note is one of your tools, that is how your findings actually reach Athena -- call it when you've finished, or when you're genuinely stuck, rather than replying with your findings in plain text. If append_scratch_note is not one of your tools, reply with your findings directly instead. Either way, Athena is the one who acts on what you report -- you never do.{constraints_block}"""
 
 
 ATHENA_BOTS_SESSION_ID = "athena-bots-agent"
@@ -5241,10 +5241,10 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "create_bot",
-        "description": "Create a new bot in the roster, using the person's pre-configured default model and endpoint automatically -- you never choose a model yourself. Use draft_bot_prompt first to write its instructions, then pass that text as description.",
+        "description": "Create a new bot in the roster, using the person's pre-configured default model and endpoint automatically -- you never choose a model yourself. description must be a SHORT job-scope sentence (what this bot's job is), never a full rendered system prompt -- the real system prompt is always assembled server-side from this sentence plus the bot's final allowed_tools. Use draft_bot_prompt first to see what the assembled prompt will look like and to help you write a good job-scope sentence, but never paste its full output here.",
         "parameters": {"type": "object", "properties": {
             "name": {"type": "string"},
-            "description": {"type": "string", "description": "The bot's system prompt, ideally from draft_bot_prompt."},
+            "description": {"type": "string", "description": "A short sentence describing this bot's job scope -- e.g. 'Investigates codebase structure and reports findings.' NOT a full system prompt; the real prompt is built from this plus allowed_tools automatically."},
             "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Read-only tool names this bot can use, e.g. ['bash', 'search_codebase']."},
         }, "required": ["name", "description", "allowed_tools"]},
     }},
@@ -5265,13 +5265,13 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "draft_bot_prompt",
-        "description": "Assemble a well-structured system prompt for a new (or existing) bot from a name, job scope, and its available tools. Use this whenever creating a bot's instructions rather than writing them freehand.",
+        "description": "Assemble a well-structured system prompt for a new (or existing) bot from a name, job scope, and its available tools. Use this whenever creating a bot's instructions rather than writing them freehand. A bot's real tool access is always determined separately by its allowed_tools list, enforced independently of anything in this prompt -- additional_constraints must never claim, imply, or grant write/execute/file-modification capability, since a bot can never actually have it regardless of what its prompt says.",
         "parameters": {"type": "object", "properties": {
             "name": {"type": "string", "description": "The bot's name."},
             "job_scope": {"type": "string", "description": "What this bot's job is -- the specific thing it should investigate or accomplish."},
             "tools": {"type": "array", "items": {"type": "object", "properties": {
                 "name": {"type": "string"}, "when_to_use": {"type": "string"}}}, "description": "The tools this bot has, each with a short note on when to use it."},
-            "additional_constraints": {"type": "string", "description": "Optional: anything else this bot specifically should or shouldn't do."},
+            "additional_constraints": {"type": "string", "description": "Optional: anything else this bot specifically should or shouldn't do -- investigate-only scope, never write/execute permissions, which this bot can never actually have."},
         }, "required": ["name", "job_scope", "tools"]},
     }},
     {"type": "function", "function": {
