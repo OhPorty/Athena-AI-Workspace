@@ -1012,6 +1012,7 @@ function athenaApp() {
                 this.roomMessages = data.map(m => ({
                     sender_type: m.role === "assistant" ? "athena" : "user",
                     content: m.content,
+                    messageId: m.messageId,
                     thinking: m.thinking || "",
                     thinkingOpen: false,
                     toolCalls: m.toolCalls || [],
@@ -1223,6 +1224,21 @@ function athenaApp() {
                 }
                 const deletedIds = new Set(data.deleted_ids || [msg.messageId]);
                 this.messages = this.messages.filter(m => !m.messageId || !deletedIds.has(m.messageId));
+            } catch (e) {
+                alert("Failed to delete message: " + e.message);
+            }
+        },
+        async deleteRoomMessagePair(msg) {
+            if (!msg.messageId) return;
+            try {
+                const resp = await fetch(`/api/messages/${msg.messageId}`, {method: "DELETE"});
+                const data = await resp.json();
+                if (data.error) {
+                    alert("Failed to delete message: " + data.error);
+                    return;
+                }
+                const deletedIds = new Set(data.deleted_ids || [msg.messageId]);
+                this.roomMessages = this.roomMessages.filter(m => !m.messageId || !deletedIds.has(m.messageId));
             } catch (e) {
                 alert("Failed to delete message: " + e.message);
             }

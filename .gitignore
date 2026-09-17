@@ -14,3 +14,4 @@ file_backups/
 bots.db
 rag_index.db
 tasks.db
+bot_task_scratch/

@@ -15,6 +15,7 @@ import tempfile
 import time
 import threading
 import hashlib
+import contextvars
 import queue
 from typing import Optional, List
 from datetime import datetime, timedelta
@@ -439,6 +440,30 @@ def _search_query_similarity(a, b):
 
 
 _large_tool_outputs = {}
+
+_BOT_TASK_FOLDER_ROOT = os.path.join(os.path.dirname(__file__), "bot_task_scratch")
+_BOT_TASK_FOLDER_MAX = 50
+_current_task_hash = contextvars.ContextVar("current_task_hash", default=None)
+
+def _get_task_hash(session_id):
+    h = _current_task_hash.get()
+    if h is not None:
+        return h
+    h = hashlib.md5(f"{session_id}:{time.time()}".encode()).hexdigest()[:12]
+    _current_task_hash.set(h)
+    os.makedirs(os.path.join(_BOT_TASK_FOLDER_ROOT, h), exist_ok=True)
+    _evict_old_task_folders()
+    return h
+
+def _evict_old_task_folders():
+    os.makedirs(_BOT_TASK_FOLDER_ROOT, exist_ok=True)
+    entries = [os.path.join(_BOT_TASK_FOLDER_ROOT, d) for d in os.listdir(_BOT_TASK_FOLDER_ROOT)]
+    entries = [d for d in entries if os.path.isdir(d)]
+    if len(entries) > _BOT_TASK_FOLDER_MAX:
+        entries.sort(key=lambda d: os.path.getmtime(d))
+        for old in entries[:len(entries) - _BOT_TASK_FOLDER_MAX]:
+            shutil.rmtree(old, ignore_errors=True)
+
 _large_tool_output_counter = [0]
 _LARGE_TOOL_OUTPUT_THRESHOLD = 3000
 _LARGE_TOOL_OUTPUT_MAX_STORED = 50
@@ -1081,7 +1106,7 @@ def read_workspace_file(workspace: str, path: str = ""):
     tool uses."""
     if not workspace:
         return {"error": "No workspace set."}
-    return _read_file(workspace, path)
+    return _read_file(workspace, path, offset)
 
 @app.delete("/api/workspace/delete")
 def delete_workspace_entry(workspace: str, path: str = ""):
@@ -1911,10 +1936,13 @@ FILE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file's contents.",
+            "description": "Read a file's contents. Large files are capped at 20000 characters per call -- if the response has has_more: true, call again with offset set to the returned next_offset to continue reading from where you left off, rather than assuming you've seen the whole file.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path relative to workspace root."}},
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to workspace root."},
+                    "offset": {"type": "integer", "description": "Character offset to start reading from. Omit or use 0 to start from the beginning."},
+                },
                 "required": ["path"],
             },
         },
@@ -2149,14 +2177,24 @@ def _list_files(workspace: str, rel_path: str):
     except Exception as e:
         return {"error": f"list_files failed: {e}"}
 
-def _read_file(workspace: str, rel_path: str):
+_READ_FILE_CHUNK_SIZE = 20000
+
+def _read_file(workspace: str, rel_path: str, offset: int = 0):
     try:
         target = _resolve_workspace_path(workspace, rel_path)
         if not os.path.isfile(target):
             return {"error": f"Not a file: {rel_path}"}
         with open(target, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
-        return {"path": rel_path, "content": content[:20000]}
+        offset = max(0, offset or 0)
+        total_chars = len(content)
+        chunk = content[offset:offset + _READ_FILE_CHUNK_SIZE]
+        next_offset = offset + len(chunk)
+        has_more = next_offset < total_chars
+        result = {"path": rel_path, "content": chunk, "total_chars": total_chars, "has_more": has_more}
+        if has_more:
+            result["next_offset"] = next_offset
+        return result
     except ValueError as e:
         return {"error": str(e)}
     except Exception as e:
@@ -3124,7 +3162,7 @@ def chat_stream(req: ChatIn):
         if name == "list_files":
             return _list_files(req.workspace, args.get("path", "."))
         if name == "read_file":
-            return _read_file(req.workspace, args.get("path", ""))
+            return _read_file(req.workspace, args.get("path", ""), args.get("offset", 0))
         if name == "write_file":
             return _write_file(req.workspace, args.get("path", ""), args.get("content", ""))
         if name == "edit_file":
@@ -3135,7 +3173,7 @@ def chat_stream(req: ChatIn):
             return _backup_file(args.get("path", ""))
         if name == "restore_file":
             return _restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
-        if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot"):
+        if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot", "run_delegation_step", "read_scratch_file", "plan_delegation"):
             if req.session_id != ATHENA_BOTS_SESSION_ID:
                 return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
             if name == "list_bots":
@@ -3143,17 +3181,29 @@ def chat_stream(req: ChatIn):
             if name == "draft_bot_prompt":
                 return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
             if name == "message_bot":
+                if _current_task_hash.get() is not None:
+                    return {"error": "A delegation task is already active this turn -- message_bot cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
                 return _message_bot_tool(args.get("bot_id"), args.get("content", ""))
             if name == "list_rooms":
                 return _list_rooms_tool()
             if name == "read_room_messages":
                 return _read_room_messages_tool(args.get("room_id"))
             if name == "message_room":
+                if _current_task_hash.get() is not None:
+                    return {"error": "A delegation task is already active this turn -- message_room cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
                 return _message_room_tool(args.get("room_id"), args.get("content", ""))
             if name == "create_bot":
                 return _create_bot_tool(args.get("name", ""), args.get("description", ""), args.get("allowed_tools", []))
             if name == "update_bot":
                 return _update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
+            if name == "run_delegation_step":
+                _get_task_hash(req.session_id)
+                return _run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""))
+            if name == "read_scratch_file":
+                return _read_scratch_file(args.get("bot_name", ""))
+            if name == "plan_delegation":
+                _get_task_hash(req.session_id)
+                return _plan_delegation_tool(args.get("steps", []))
         if name == "search_codebase":
             return _search_codebase(args.get("query", ""), args.get("limit", 3))
 
@@ -3975,16 +4025,20 @@ def _run_memory_scan(model: str):
     max_id_seen = max(m["id"] for m in new_messages)
     last_session_id = new_messages[-1]["session_id"]
 
+    host_key = _endpoint_host(OLLAMA_URL)
+    lock = _get_host_lock(host_key)
     try:
-        resp = httpx.post(OLLAMA_URL, json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": _MEMORY_EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Existing facts already known:\n{existing_facts_text}\n\nNew conversation since last scan:\n{transcript_text}"},
-            ],
-            "stream": False,
-            "think": False,
-        }, timeout=120)
+        with lock:
+            resp = httpx.post(OLLAMA_URL, json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _MEMORY_EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Existing facts already known:\n{existing_facts_text}\n\nNew conversation since last scan:\n{transcript_text}"},
+                ],
+                "options": {"num_ctx": 32768},
+                "stream": False,
+                "think": False,
+            }, timeout=120)
         raw = resp.json()["message"]["content"].strip()
         if raw.startswith("```"):
             raw = raw.strip("`").lstrip("json").strip()
@@ -4347,13 +4401,16 @@ def _room_messages_to_chat_messages(room_messages, responding_bot_id, system_pro
 
 
 def _call_bot_endpoint(bot, chat_messages, timeout=120):
-    """Run one non-streaming turn for a bot: send chat_messages to its
-    configured endpoint, return the complete response text. Reuses
-    _stream_completion (the same single entry point the main chat
-    loop uses, which already normalizes every supported provider into
-    identical Ollama-shaped chunks) by consuming the generator fully
-    and concatenating content deltas, rather than duplicating any
-    provider-specific request logic here."""
+    """Run a bot's full turn to completion: send chat_messages, and if
+    it calls a tool, actually execute it and loop back with the result
+    until it produces a final answer with no more tool calls -- the
+    same round-trip pattern generate() uses for Athena's own turns.
+    Previously this ran exactly one non-streaming shot with tools=None
+    and never even checked the response for tool_calls at all -- so a
+    bot could never really call a tool: no function-calling ability
+    was offered to Ollama, it produced a fast non-answer, and got
+    unloaded right after, which looked like an instant flash-on then
+    flash-off with no real work ever happening."""
     provider = bot.get("provider") or ""
     if provider not in _BOT_ALLOWED_PROVIDERS:
         return {"error": f"Bots may not use provider '{provider}' -- local inference only (Ollama-native or OpenAI-compatible)."}
@@ -4366,18 +4423,57 @@ def _call_bot_endpoint(bot, chat_messages, timeout=120):
         api_key=bot.get("api_key") or "",
     )
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
-    full_reply = ""
-    cancel_flag = threading.Event()
-    try:
-        for chunk in _stream_completion(fake_req, target_url, chat_messages, None, 4096, cancel_flag):
-            delta = chunk.get("message", {}).get("content", "")
-            if delta:
-                full_reply += delta
-            if chunk.get("done"):
-                break
-    except Exception as e:
-        return {"error": f"Bot endpoint call failed: {e}"}
-    return {"content": full_reply}
+    workspace = _load_settings().get("workspace") or ""
+    tool_schemas = _bot_tool_schemas(bot.get("allowed_tools") or [])
+    messages = list(chat_messages)
+    session_key = f"bot-{bot.get('id', 'unknown')}"
+
+    global _last_activity_ts
+    round_reply = ""
+    seen_fingerprints = []
+    for _ in range(_BOT_MAX_ROUNDS):
+        _last_activity_ts = time.time()
+        round_reply = ""
+        round_tool_calls = []
+        cancel_flag = threading.Event()
+        try:
+            round_thinking = ""
+            for chunk in _stream_completion(fake_req, target_url, messages, tool_schemas if tool_schemas else None, _BOT_CTX_SIZE, cancel_flag):
+                msg = chunk.get("message", {})
+                thinking_delta = msg.get("thinking", "")
+                if thinking_delta:
+                    round_thinking += thinking_delta
+                delta = msg.get("content", "")
+                if delta:
+                    round_reply += delta
+                    if _detect_text_loop(round_reply):
+                        break
+                if msg.get("tool_calls"):
+                    round_tool_calls.extend(msg["tool_calls"])
+                if chunk.get("done"):
+                    if not round_reply and not round_tool_calls:
+                        bot_name = bot.get("name")
+                        print(f"[BOT DEBUG] bot={bot_name} round produced no content/tool_calls -- thinking was {len(round_thinking)} chars: {round_thinking[-500:]!r}", flush=True)
+                    break
+        except Exception as e:
+            return {"error": f"Bot endpoint call failed: {e}"}
+
+        if not round_tool_calls:
+            return {"content": round_reply}
+
+        messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
+        for tc in round_tool_calls:
+            fingerprint = _tool_call_fingerprint(tc)
+            if seen_fingerprints.count(fingerprint) >= 2:
+                result = {"error": "BLOCKED: this exact tool call (same tool, same arguments) has already been made twice this turn. Use what you already have, or make a genuinely different call."}
+            else:
+                result = _execute_bot_tool_call(tc, workspace, bot, session_key)
+                seen_fingerprints.append(fingerprint)
+                if len(seen_fingerprints) > 20:
+                    seen_fingerprints.pop(0)
+            messages.append({"role": "tool", "content": json.dumps(result)})
+
+    return {"content": round_reply, "error": "Hit the round limit without a final answer after repeated real tool calls -- this may genuinely be too large a job for one turn; consider a narrower job_scope."}
 
 
 _bot_host_locks = {}
@@ -4563,11 +4659,13 @@ def _run_athena_room_turn_gen(room_id):
     provider = defaults.get("provider") or ""
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
 
+    global _last_activity_ts
     fingerprints = []
     full_reply = ""
     cancel_flag = threading.Event()
 
     for round_num in range(_ATHENA_ROOM_MAX_ROUNDS):
+        _last_activity_ts = time.time()
         round_reply = ""
         round_tool_calls = []
         try:
@@ -4708,9 +4806,14 @@ def send_room_message(room_id: int, req: RoomSendIn):
                 result = _call_bot_endpoint(bot, chat_messages)
                 _unload_bot_model(bot)
 
-            if "error" in result:
+            if "error" in result and not result.get("content"):
                 replies.append({"bot_id": bot_id, "error": result["error"]})
                 continue
+            if "error" in result:
+                # A round-limit or similar warning rode along with real
+                # content -- write the actual findings to the room, don't
+                # discard them just because a warning was also attached.
+                result = {"content": result["content"] + "\n\n[Note: " + result["error"] + "]"}
 
             reply_time = time.time()
             conn.execute(
@@ -4768,6 +4871,8 @@ def _draft_bot_prompt(name, job_scope, tools, additional_constraints=None):
     specific to bots: a bot never executes -- it investigates within
     job_scope and relays findings back to Athena, which is the real
     safety boundary the whole roster is built around."""
+    tools = [t for t in tools if t.get("name") in BOT_ALLOWED_TOOL_NAMES]
+    _bot_prompt_tool_cache[name.strip().lower()] = [t["name"] for t in tools]
     tool_lines = "\n".join(f"- {t['name']}: {t['when_to_use']}" for t in tools) if tools else "(no tools -- reasoning only)"
     constraints_block = f"\n\n## Additional Constraints\n{additional_constraints}" if additional_constraints else ""
     return f"""You are {name}.
@@ -4777,6 +4882,9 @@ Plan your approach before calling a tool. If something doesn't match what you ex
 
 ## Simplicity First
 Investigate only what the job below actually requires. Don't expand scope on your own just because something seems related.
+
+## Reading Large Files
+Never read a large file from the start to the end just because it was mentioned in your job. Orient first -- use search_codebase or a targeted bash grep to find the specific section, function, or line range that actually answers your job, then use read_file with offset to read only that section. If read_file reports has_more: true, that does not mean you should keep paginating through the whole file -- only continue if the specific section you actually need is further in. You have a limited number of rounds and a limited context budget for this one job; exhaustively reading a large file page by page will leave you unable to report your findings at all. A partial, targeted read that answers the actual question is far more useful than an incomplete attempt at reading everything.
 
 ## Scoped Tool Use
 Use only the tools relevant to this job:
@@ -4796,9 +4904,21 @@ def _get_bot_delegation_prompt_section(workspace=None):
     base = """
 
 ## Bot Delegation
-You have access to a roster of specialist bots you can delegate investigate-only work to. Bots never write files or run commands -- they investigate and report back to you; you are the one who acts on their findings. Use list_bots to see who's available before delegating. draft_bot_prompt helps you write a new bot's system prompt in the right structure when creating one. message_bot sends a message to a bot's DM with you and returns its reply. message_room posts to a group room and returns replies from any @mentioned bots -- nothing responds in a group room without an explicit @mention. read_room_messages lets you review any conversation's full history, including ones between two bots, since nothing here is hidden from you. Before creating a bot with create_bot, always check list_bots first and pick a name that isn't already in use -- a duplicate name will be rejected.
+You have access to a roster of specialist bots you can delegate investigate-only work to. Bots never write files or run commands -- they investigate and report back to you; you are the one who acts on their findings. Use list_bots to see who's available before delegating. draft_bot_prompt helps you write a new bot's system prompt in the right structure when creating one. Before creating a bot with create_bot, always check list_bots first and pick a name that isn't already in use -- a duplicate name will be rejected.
 
-Bots must be broad, general-purpose specialists (e.g. "web research", "UI/frontend code", "backend/API work") -- never a narrow one-off bot scoped to a single specific task. Check whether an existing bot's field already fits before creating a new one; reuse it rather than creating something redundant. If the roster is currently empty, the first bot you create must be a fully general-purpose one with no specific niche at all, since there's nothing yet to route more specialized work to."""
+Bots must be broad, general-purpose specialists (e.g. "web research", "UI/frontend code", "backend/API work") -- never a narrow one-off bot scoped to a single specific task. Check whether an existing bot's field already fits before creating a new one; reuse it rather than creating something redundant. If the roster is currently empty, the first bot you create must be a fully general-purpose one with no specific niche at all, since there's nothing yet to route more specialized work to.
+
+## Carrying Constraints Into a Step
+A bot in an isolated delegation step knows NOTHING you and the person discussed in this conversation -- only the exact instruction text you write for that specific step. If the person gives you any constraint, restriction, or scope limit -- "don't look at X", "avoid anything listed in .gitignore", "only consider Y", "these files are personal, not for public documentation" -- you must explicitly restate that constraint inside the instruction text of every single step where it applies, every time, not just remember it yourself for the conversation. A constraint the person told YOU does not exist for the bot unless you wrote it into that step's instruction. This applies even when it feels repetitive across many steps -- repeating it costs nothing; omitting it means the bot has no way to know the restriction exists at all.
+
+## Two Ways to Talk to a Bot
+message_bot and message_room are ONLY for quick, informal back-and-forth that is not part of a real investigation -- e.g. asking a bot a one-off question with no expectation of a formal finding. message_bot is NEVER an acceptable way to perform, continue, retry, or work around delegation -- not as a first choice, not as a fallback, not "just to get an answer" when a delegation step is being difficult. If you are doing investigative work for the person, the only tools you may use are run_delegation_step and plan_delegation, start to finish, including every retry. read_room_messages lets you review any conversation's full history, including ones between two bots, since nothing here is hidden from you.
+
+For real investigative work, use run_delegation_step or plan_delegation. These give a bot one single-topic instruction as a completely fresh, isolated call -- no DM history, no memory of prior steps -- which keeps a bot from getting bogged down or confused by its own past turns on a long investigation. The bot appends its findings to its own scratch file via append_scratch_note rather than replying with them directly; you then call read_scratch_file for that bot to see what it found. Use plan_delegation when you already know the full set of single-topic steps you want to run -- give it the whole list at once rather than calling run_delegation_step yourself one at a time. Bots run on small, resource-constrained local models, so a single step's instruction must cover ONE focused topic, never a compound multi-part request (e.g. "cover these nine areas: setup, config, LCM, voice, coding harness, web UI, API, dependencies, project structure") -- a bundled instruction like that overwhelms a small model and produces slow, incomplete, or truncated results regardless of which tool carries it.
+
+If run_delegation_step or plan_delegation reports status "no_scratch_note", that step genuinely failed -- the bot did not record findings, full stop. Retry that one step once, ideally with a more explicit instruction telling the bot to call append_scratch_note. If it fails a second time, or if read_scratch_file comes back with no file, report that failure to the person honestly. Under no circumstances switch to message_bot to "get an answer anyway" when a delegation step fails -- an informal reply obtained that way is not a substitute for a real investigation, was not produced under the same isolation guarantees, and must never be presented as a delegation finding. A reported failure is always the correct outcome over a message_bot workaround. The same applies if a scratch file's content looks fabricated or ungrounded (invented file structure, generic placeholder-style detail, claims that don't match anything you already know to be true) -- treat that as a failed step too, not a usable finding.
+
+Do NOT use read_file yourself on a large file (main.py or anything else of comparable size) while doing delegation work. You have a limited context budget for your own turn, and reading a large file directly -- especially across the multiple paginated calls a big file requires -- burns through that budget on investigation you don't need to do yourself, since a bot has its own separate, isolated context for exactly this. If you need to know something about a large file, delegate that investigation to a bot via run_delegation_step or plan_delegation and read its findings back with read_scratch_file, the same as any other investigative work in this mode. read_file is fine for small, targeted files you already know are short."""
     defaults = (_load_settings().get("bot_creation_defaults") or {})
     naming_guidance = defaults.get("naming_guidance")
     if naming_guidance:
@@ -4821,6 +4941,154 @@ def _list_bots_tool():
         return [_row_to_bot(r) for r in rows]
     finally:
         conn.close()
+
+
+BOT_SCRATCH_TOOL_NAME = "append_scratch_note"
+
+APPEND_SCRATCH_NOTE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "append_scratch_note",
+        "description": "Append your findings for this task to your own scratch file. Append-only -- no path control, no overwrite, no delete. Athena reads this file once, after your work is done, instead of you reporting back through chat.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The findings or notes to append."}
+            },
+            "required": ["content"]
+        }
+    }
+}
+
+def _append_scratch_note(bot_name, content):
+    task_hash = _current_task_hash.get()
+    if task_hash is None:
+        return {"error": "No active task context to write a scratch note into."}
+    folder = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash)
+    os.makedirs(folder, exist_ok=True)
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
+    path2 = os.path.join(folder, f"{safe_name}.md")
+    with open(path2, "a", encoding="utf-8") as f:
+        f.write(content.rstrip() + "\n\n")
+    return {"ok": True}
+
+
+def _get_bot_row(bot_id):
+    for b in _list_bots_tool():
+        if b.get("id") == bot_id:
+            return b
+    return None
+
+
+def _read_scratch_file(bot_name):
+    task_hash = _current_task_hash.get()
+    if task_hash is None:
+        return {"error": "No active task context -- nothing has been delegated yet this turn."}
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
+    fpath = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
+    if not os.path.exists(fpath):
+        return {"error": f"No scratch file for '{bot_name}' in the current task yet."}
+    with open(fpath, "r", encoding="utf-8") as f:
+        return {"content": f.read()}
+
+
+_NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*(?:\d+[\.\)]|[-*])\s+\S")
+
+def _instruction_is_compound(instruction):
+    """Cheap structural check: does this instruction try to cram
+    multiple distinct asks into one step? A numbered/bulleted list of
+    3+ items is the clearest signal -- a real single-topic instruction
+    doesn't need one. This exists because prompt instructions alone
+    have repeatedly failed to stop this on a small model under load;
+    rejecting it structurally forces plan_delegation instead."""
+    items = _NUMBERED_ITEM_RE.findall(instruction)
+    if len(items) >= 3:
+        return True, f"contains {len(items)} numbered/bulleted items"
+    if len(instruction) > 1200:
+        return True, f"is {len(instruction)} characters long (over the 1200 char guideline for a single-topic step)"
+    return False, ""
+
+def _run_delegation_step_tool(bot_id, instruction):
+    is_compound, reason = _instruction_is_compound(instruction)
+    if is_compound:
+        return {
+            "status": "rejected",
+            "error": f"This instruction {reason} -- that is a compound, multi-topic request, not a single-topic step. "
+                     "Break it into separate single-topic steps and use plan_delegation instead of one run_delegation_step call.",
+            "instruction": instruction,
+        }
+    bot = _get_bot_row(bot_id)
+    if bot is None:
+        return {"error": f"No bot with id {bot_id}.", "instruction": instruction}
+    task_hash = _current_task_hash.get()
+    if task_hash is None:
+        return {"error": "No active task context -- this should only be called mid-delegation.", "instruction": instruction}
+
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot["name"].lower())
+    scratch_path = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
+    before_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
+
+    system_prompt = _build_bot_system_prompt(bot)
+    user_content = (
+        f"{instruction}\n\n"
+        "This is an isolated delegation step -- when you have your findings, "
+        "call append_scratch_note with them. Do not reply with plain text; "
+        "use the tool, since that is the only way your findings reach Athena from here."
+    )
+    chat_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    result = _call_bot_endpoint(bot, chat_messages)
+    if result.get("error"):
+        return {"status": "error", "detail": result["error"], "bot": bot["name"], "instruction": instruction}
+
+    after_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
+    if after_size <= before_size:
+        # Internal auto-retry: one nudge in the SAME isolated conversation,
+        # continuing from the bot's own reply, before ever surfacing a
+        # failure to Athena2. This mirrors the external retry Athena2 was
+        # already doing herself (a whole extra run_delegation_step call) --
+        # moving it in-process saves her a full round trip for the common
+        # case where one nudge is all it takes.
+        chat_messages.append({"role": "assistant", "content": result.get("content", "")})
+        chat_messages.append({
+            "role": "user",
+            "content": (
+                "You did not call append_scratch_note. That is the only way your findings "
+                "reach Athena -- a plain text reply is discarded. Call append_scratch_note "
+                "now with your findings from above. Do not reply with plain text again."
+            ),
+        })
+        retry_result = _call_bot_endpoint(bot, chat_messages)
+        if retry_result.get("error"):
+            return {"status": "error", "detail": retry_result["error"], "bot": bot["name"], "instruction": instruction}
+        after_retry_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
+        if after_retry_size <= before_size:
+            return {
+                "status": "no_scratch_note",
+                "detail": "The bot replied without calling append_scratch_note, even after one internal retry -- no findings were recorded for this step.",
+                "bot": bot["name"],
+                "instruction": instruction,
+            }
+        return {"status": "done", "detail": "Step complete after one internal retry. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction}
+
+    return {"status": "done", "detail": "Step complete. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction}
+
+
+def _plan_delegation_tool(steps):
+    if not steps or not isinstance(steps, list):
+        return {"error": "steps must be a non-empty list of {bot_id, instruction} objects."}
+    results = []
+    for i, step in enumerate(steps):
+        bot_id = step.get("bot_id") if isinstance(step, dict) else None
+        instruction = step.get("instruction", "") if isinstance(step, dict) else ""
+        if not bot_id or not instruction:
+            results.append({"step": i, "status": "error", "detail": "Missing bot_id or instruction."})
+            continue
+        r = _run_delegation_step_tool(bot_id, instruction)
+        results.append({"step": i, "bot_id": bot_id, **r})
+    return {"plan_results": results, "note": "Findings were not returned here -- use read_scratch_file per bot to review them."}
 
 
 def _message_bot_tool(bot_id, content):
@@ -4878,6 +5146,11 @@ def _create_bot_tool(name, description, allowed_tools):
     provider = defaults.get("provider", "")
     if not model:
         return {"error": "No default model is configured for bot creation yet. Ask the person to set one in Athena's Agent Defaults menu before creating a bot."}
+    if not allowed_tools:
+        allowed_tools = _bot_prompt_tool_cache.get(name.strip().lower(), [])
+    allowed_tools = [t for t in allowed_tools if t in BOT_ALLOWED_TOOL_NAMES]
+    if not allowed_tools:
+        return {"error": "No valid read-only tools were provided for this bot. Call draft_bot_prompt first with a real tools list (or pass allowed_tools directly) -- a bot can't be created with no tools."}
     conn = _bots_conn()
     try:
         existing_names = [r[0] for r in conn.execute("SELECT name FROM bots").fetchall()]
@@ -4906,6 +5179,8 @@ def _update_bot_tool(bot_id, description=None, allowed_tools=None):
         current = _row_to_bot(existing)
         new_description = description if description is not None else current["description"]
         new_tools = allowed_tools if allowed_tools is not None else current["allowed_tools"]
+        if allowed_tools is not None:
+            new_tools = [t for t in new_tools if t in BOT_ALLOWED_TOOL_NAMES]
         conn.execute("UPDATE bots SET description=?, allowed_tools_json=? WHERE id=?",
                      (new_description, json.dumps(new_tools), bot_id))
         conn.commit()
@@ -4915,6 +5190,39 @@ def _update_bot_tool(bot_id, description=None, allowed_tools=None):
 
 
 BOT_DELEGATION_TOOL_SCHEMAS = [
+    {"type": "function", "function": {
+        "name": "run_delegation_step",
+        "description": "Give one bot one single-topic instruction as a fresh, isolated call -- no DM/room history involved, no memory of prior steps. The bot investigates internally and appends its findings to its own scratch file via append_scratch_note; this call returns only a status, never the findings themselves. Use read_scratch_file afterward to see what it found.",
+        "parameters": {"type": "object", "properties": {
+            "bot_id": {"type": "integer", "description": "The bot to run this step with."},
+            "instruction": {"type": "string", "description": "A single, self-contained topic or question -- not a multi-part task."},
+        }, "required": ["bot_id", "instruction"]},
+    }},
+    {"type": "function", "function": {
+        "name": "read_scratch_file",
+        "description": "Read the current task's scratch file for one bot -- its accumulated findings from any run_delegation_step calls so far this task. Scoped automatically to the task you're currently delegating within.",
+        "parameters": {"type": "object", "properties": {
+            "bot_name": {"type": "string", "description": "The bot's name, exactly as it appears in list_bots."},
+        }, "required": ["bot_name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "plan_delegation",
+        "description": "Give a whole roadmap of single-topic delegation steps at once, instead of calling run_delegation_step yourself one at a time. Each step runs in the same strict isolation as run_delegation_step (fresh context, no history) -- but you supply the full list up front rather than remembering to call each one separately. Returns only per-step status; use read_scratch_file per bot afterward to see what each one found.",
+        "parameters": {"type": "object", "properties": {
+            "steps": {
+                "type": "array",
+                "description": "One entry per single-topic step. Do not bundle multiple questions into one instruction -- split them into separate steps instead.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "bot_id": {"type": "integer"},
+                        "instruction": {"type": "string", "description": "One single, self-contained topic or question."},
+                    },
+                    "required": ["bot_id", "instruction"],
+                },
+            },
+        }, "required": ["steps"]},
+    }},
     {"type": "function", "function": {
         "name": "create_bot",
         "description": "Create a new bot in the roster, using the person's pre-configured default model and endpoint automatically -- you never choose a model yourself. Use draft_bot_prompt first to write its instructions, then pass that text as description.",
@@ -4977,6 +5285,128 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
         }, "required": ["room_id", "content"]},
     }},
 ]
+
+
+# Hard server-side lock on what a bot may actually execute, independent
+# of anything stored in allowed_tools_json -- a bot's design principle
+# is strictly read-only/investigate-only (no bash_exec, no write_file/
+# edit_file, no backup_file/restore_file), so this set is the real
+# enforcement point, not the prompt text or the DB column.
+BOT_ALLOWED_TOOL_NAMES = {
+    "bash", "list_files", "read_file", "search_codebase",
+    "find_definition", "find_references", "type_info",
+    "web_search", "web_fetch",
+    "list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt",
+    "lcm_recall_search", "lcm_recall_expand", "lcm_recall_range",
+}
+
+_BOT_CTX_SIZE = 32768
+_BOT_MAX_ROUNDS = 200  # real safety net is dedup + loop detection above, not this number
+
+# name.lower() -> list of tool names, populated by _draft_bot_prompt so
+# create_bot can recover the real list if the model forgets to repeat
+# allowed_tools on the follow-up create_bot call.
+_bot_prompt_tool_cache = {}
+
+
+def _tool_call_fingerprint(tc):
+    """Shared with generate()'s own tool-call dedup -- identical hash
+    of tool name + arguments, so a bot calling the same tool with the
+    same arguments twice in a row gets caught exactly like Athena's
+    own turns do, not by a separately-drifting copy of this logic."""
+    fn = tc.get("function", {})
+    args = fn.get("arguments", {})
+    try:
+        args_str = json.dumps(args, sort_keys=True)
+    except TypeError:
+        args_str = str(args)
+    raw = fn.get("name", "") + "|" + args_str
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _detect_text_loop(text):
+    """Shared with generate()'s own text-loop detector -- same layered
+    tail-repeat check (40 chars/3 repeats, 18 chars/5 repeats), so a
+    bot narrating a fake tool call as repeated text gets caught the
+    same way a stuck main-chat generation does."""
+    def _tail_repeats(window, min_repeats):
+        if len(text) < window * min_repeats:
+            return False
+        tail = text[-window:]
+        if len(tail.strip()) < window * 0.5:
+            return False
+        return text.count(tail) >= min_repeats
+    return _tail_repeats(40, 3) or _tail_repeats(18, 5)
+
+
+def _bot_tool_schemas(allowed_tools):
+    """Build real tool schemas for a bot's own Ollama request, filtered
+    through BOT_ALLOWED_TOOL_NAMES regardless of what's stored -- a
+    write tool name surviving in allowed_tools_json can never actually
+    produce a usable schema."""
+    pool = (
+        BASH_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS
+        + WEB_TOOL_SCHEMAS + get_lcm_tools()
+        + [s for s in BOT_DELEGATION_TOOL_SCHEMAS
+           if s.get("function", {}).get("name") in ("list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt")]
+    )
+    effective = set(allowed_tools or []) & BOT_ALLOWED_TOOL_NAMES
+    return [s for s in pool if s.get("function", {}).get("name") in effective] + [APPEND_SCRATCH_NOTE_SCHEMA]
+
+
+def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
+    """Dispatch one tool call a bot actually made. Gated against
+    BOT_ALLOWED_TOOL_NAMES a second time here, independent of what
+    schemas it was even offered -- belt and suspenders."""
+    fn = tool_call.get("function", {})
+    name = fn.get("name", "")
+    print(f"[BOT TOOL CALL] {bot.get('name', '?')} -> {name}", flush=True)
+    args = fn.get("arguments") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {}
+    if name == BOT_SCRATCH_TOOL_NAME:
+        return _append_scratch_note(bot["name"], args.get("content", ""))
+    if name not in BOT_ALLOWED_TOOL_NAMES:
+        return {"error": f"'{name}' is not a tool this bot is permitted to use."}
+    if name == "bash":
+        return _execute_readonly_bash(args.get("command", ""), args.get("args", []), workspace)
+    if name == "list_files":
+        return _list_files(workspace, args.get("path", "."))
+    if name == "read_file":
+        return _read_file(workspace, args.get("path", ""), args.get("offset", 0))
+    if name == "search_codebase":
+        return _search_codebase(args.get("query", ""), args.get("limit", 3))
+    if name == "find_definition":
+        return _get_lsp_client(workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+    if name == "find_references":
+        return _get_lsp_client(workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+    if name == "type_info":
+        return _get_lsp_client(workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+    if name == "web_search":
+        return _web_search(None, args.get("query", ""))
+    if name == "web_fetch":
+        return _web_fetch(args.get("url", ""))
+    if name == "list_bots":
+        return _list_bots_tool()
+    if name == "list_rooms":
+        return _list_rooms_tool()
+    if name == "message_bot":
+        return _message_bot_tool(args.get("bot_id"), args.get("content", ""))
+    if name == "read_room_messages":
+        return _read_room_messages_tool(args.get("room_id"))
+    if name == "draft_bot_prompt":
+        return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
+    args["session_id"] = session_key
+    try:
+        resp = httpx.post(f"{LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
+        if resp.status_code == 200:
+            return resp.json().get("result")
+        return {"error": f"Tool call failed: HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"error": f"Tool call failed: {e}"}
 
 
 TASKS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.db")
