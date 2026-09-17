@@ -43,6 +43,13 @@ class SimpleCodeRAG:
 
             file_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
             
+            # Clear this file's existing chunks first -- otherwise a file
+            # that shrinks or gets restructured leaves stale chunk rows
+            # behind forever, since chunk ids are filepath:line-index and
+            # a shorter file never overwrites the higher-index chunks a
+            # longer previous version created.
+            cursor.execute('DELETE FROM chunks WHERE filepath = ?', (filepath,))
+            
             # Simple line/paragraph chunking
             lines = content.splitlines()
             chunk_size = 50

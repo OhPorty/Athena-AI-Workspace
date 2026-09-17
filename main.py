@@ -1796,6 +1796,10 @@ def _restore_one_entry(entry):
         content = f.read()
     with open(target_path, "wb") as f:
         f.write(content)
+    try:
+        rag.index_codebase(".")
+    except Exception as e:
+        print(f"[RAG] auto-reindex after restore failed: {e}", flush=True)
     return {
         "path": target_path,
         "restored_hash": content_hash,
@@ -2227,6 +2231,10 @@ def _edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
         content = content.replace(old_text, new_text)
         with open(target, "w", encoding="utf-8") as f:
             f.write(content)
+        try:
+            rag.index_codebase(workspace)
+        except Exception as e:
+            print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
         return {"path": rel_path, "edited": True}
     except ValueError as e:
         return {"error": str(e)}
@@ -2380,6 +2388,10 @@ def _replace_lines(workspace: str, rel_path: str, start_line, end_line, new_cont
                 updated_lines = lines[:real_start - 1] + new_lines + lines[real_end:]
                 with open(target, "w", encoding="utf-8") as f:
                     f.write("\n".join(updated_lines))
+                try:
+                    rag.index_codebase(workspace)
+                except Exception as e:
+                    print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
                 return {
                     "path": rel_path,
                     "edited": True,
@@ -2395,6 +2407,10 @@ def _replace_lines(workspace: str, rel_path: str, start_line, end_line, new_cont
         updated_lines = lines[:start_line - 1] + new_lines + lines[end:]
         with open(target, "w", encoding="utf-8") as f:
             f.write("\n".join(updated_lines))
+        try:
+            rag.index_codebase(workspace)
+        except Exception as e:
+            print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
 
         delta = len(new_lines) - (end - start_line + 1)
         result = {"path": rel_path, "edited": True, "lines_replaced": f"{start_line}-{end_line}"}
