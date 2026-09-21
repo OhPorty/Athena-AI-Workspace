@@ -33,72 +33,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from auth import AuthManager
 from rag import SimpleCodeRAG
 import laya_gate
+import settings
+import task_context
+import activity
+import generation_streaming
+import lcm_client
 
 RAG_DB_PATH = os.environ.get("ATHENA_RAG_DB", "rag_index.db")
 rag = SimpleCodeRAG(RAG_DB_PATH)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-LCM_URL = os.environ.get("ATHENA_LCM_URL", "http://localhost:8421")
-
-# --- Bundled LCM (Lossless Context Management) service ---
-# Vendored as a project-local dependency (not a system-wide service) so
-# Athena is self-contained and portable if it's ever shared. Launched as
-# a subprocess on startup, on its own port (8421, distinct from the old
-# shared instance at 8420 which stays untouched for whatever else may
-# still use it), with a fresh, empty database -- no migration from any
-# prior LCM data.
-_LCM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcm")
-_lcm_process = None
-
-def _set_pdeathsig():
-    # Linux-only: asks the kernel to send SIGTERM to this child if its
-    # parent (Athena) dies for ANY reason, including a crash or kill -9,
-    # so the bundled LCM can never outlive Athena as an orphaned process.
-    PR_SET_PDEATHSIG = 1
-    try:
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
-    except Exception:
-        pass
-
-def _stop_bundled_lcm():
-    global _lcm_process
-    if _lcm_process and _lcm_process.poll() is None:
-        print("[Athena] Stopping bundled LCM...", flush=True)
-        _lcm_process.terminate()
-        try:
-            _lcm_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _lcm_process.kill()
-
-def _handle_shutdown_signal(signum, frame):
-    _stop_bundled_lcm()
-    sys.exit(0)
-
-def _start_bundled_lcm():
-    global _lcm_process
-    lcm_port = os.environ.get("LCM_PORT", "8421")
-    env = os.environ.copy()
-    env["LCM_PORT"] = lcm_port
-    env["LCM_DB_PATH"] = os.path.join(_LCM_DIR, "lcm.db")
-    _lcm_process = subprocess.Popen(
-        [sys.executable, os.path.join(_LCM_DIR, "server.py")],
-        env=env,
-        cwd=_LCM_DIR,
-        preexec_fn=_set_pdeathsig,
-    )
-    atexit.register(_stop_bundled_lcm)
-    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
-    signal.signal(signal.SIGINT, _handle_shutdown_signal)
-    for _ in range(30):
-        try:
-            httpx.get(f"http://localhost:{lcm_port}/messages/__athena_startup_check__", timeout=1)
-            print(f"[Athena] Bundled LCM ready on port {lcm_port}", flush=True)
-            return
-        except httpx.ConnectError:
-            time.sleep(0.3)
-    print("[Athena] WARNING: bundled LCM did not become reachable in time", flush=True)
 OLLAMA_URL = os.environ.get("ATHENA_OLLAMA_URL", "http://localhost:11434/api/chat")
 # A flat timeout=180 applies that value to connect/read/write/pool alike,
 # which was too short on its read side: prompt evaluation on a large model
@@ -121,6 +66,7 @@ PIPER_VOICE_PATH = os.environ.get("ATHENA_PIPER_VOICE_PATH", "/home/ohporty/athe
 
 app = FastAPI(title="Athena")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(generation_streaming.router)
 
 # ---------------------------------------------------------------------------
 # Authentication -- single-user login gate. Adapted from Odysseus's proven
@@ -508,29 +454,6 @@ def _search_query_similarity(a, b):
 
 _large_tool_outputs = {}
 
-_BOT_TASK_FOLDER_ROOT = os.path.join(os.path.dirname(__file__), "bot_task_scratch")
-_BOT_TASK_FOLDER_MAX = 50
-_current_task_hash = contextvars.ContextVar("current_task_hash", default=None)
-
-def _get_task_hash(session_id):
-    h = _current_task_hash.get()
-    if h is not None:
-        return h
-    h = hashlib.md5(f"{session_id}:{time.time()}".encode()).hexdigest()[:12]
-    _current_task_hash.set(h)
-    os.makedirs(os.path.join(_BOT_TASK_FOLDER_ROOT, h), exist_ok=True)
-    _evict_old_task_folders()
-    return h
-
-def _evict_old_task_folders():
-    os.makedirs(_BOT_TASK_FOLDER_ROOT, exist_ok=True)
-    entries = [os.path.join(_BOT_TASK_FOLDER_ROOT, d) for d in os.listdir(_BOT_TASK_FOLDER_ROOT)]
-    entries = [d for d in entries if os.path.isdir(d)]
-    if len(entries) > _BOT_TASK_FOLDER_MAX:
-        entries.sort(key=lambda d: os.path.getmtime(d))
-        for old in entries[:len(entries) - _BOT_TASK_FOLDER_MAX]:
-            shutil.rmtree(old, ignore_errors=True)
-
 _large_tool_output_counter = [0]
 _LARGE_TOOL_OUTPUT_THRESHOLD = 3000
 _LARGE_TOOL_OUTPUT_MAX_STORED = 50
@@ -619,7 +542,7 @@ def _resolve_mode_and_workspace(req):
     default workspace instead of silently downgrading her to casual
     chat -- which is what was actually happening before this existed."""
     if req.session_id == ATHENA_BOTS_SESSION_ID:
-        workspace = req.workspace or _load_settings().get("workspace") or ""
+        workspace = req.workspace or settings.load_settings().get("workspace") or ""
         return "athena_delegation", workspace
     if req.workspace:
         return "workspace", req.workspace
@@ -640,7 +563,7 @@ def _get_mode_system_prompt(mode, req):
     else:
         base = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
     if mode == "athena_delegation":
-        base = base + _get_bot_delegation_prompt_section(req.workspace, async_enabled=bool(_load_settings().get("delegation_async_enabled")), laya_gating_enabled=bool(_load_settings().get("laya_gating_enabled")))
+        base = base + _get_bot_delegation_prompt_section(req.workspace, async_enabled=bool(settings.load_settings().get("delegation_async_enabled")), laya_gating_enabled=bool(settings.load_settings().get("laya_gating_enabled")))
     return base
 
 
@@ -707,7 +630,7 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
     generation loop) so tool availability can shift as the model's own
     actions this turn accumulate, instead of being fixed once at request
     start."""
-    tools = get_lcm_tools() + PLAN_TOOL_SCHEMAS
+    tools = lcm_client.get_lcm_tools() + PLAN_TOOL_SCHEMAS
     if req.search_url:
         tools = tools + WEB_TOOL_SCHEMAS
     if mode in ("workspace", "athena_delegation"):
@@ -715,7 +638,7 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
     if _scan_skills():
         tools = tools + SKILL_TOOL_SCHEMAS
     if mode == "athena_delegation":
-        tools = tools + _bot_delegation_tool_schemas_for_mode(bool(_load_settings().get("delegation_async_enabled")))
+        tools = tools + _bot_delegation_tool_schemas_for_mode(bool(settings.load_settings().get("delegation_async_enabled")))
     called = called_tool_names or set()
     if mode in ("workspace", "athena_delegation"):
         if "search_codebase" not in called:
@@ -794,25 +717,6 @@ class TtsIn(BaseModel):
     text: str
 
 
-def get_lcm_context(session_id: str) -> list:
-    try:
-        resp = httpx.get(f"{LCM_URL}/context/{session_id}", timeout=30)
-        print(f"[DEBUG] LCM context status={resp.status_code} body={resp.text[:300]!r}", flush=True)
-        if resp.status_code == 200:
-            return resp.json().get("context", [])
-    except Exception as e:
-        print(f"[DEBUG] LCM context EXCEPTION: {e!r}", flush=True)
-    return []
-
-
-def get_lcm_tools() -> list:
-    try:
-        resp = httpx.get(f"{LCM_URL}/tools/schema", timeout=2)
-        if resp.status_code == 200:
-            return resp.json().get("tools", [])
-    except Exception:
-        pass
-    return []
 
 
 RATINGS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratings.db")
@@ -1029,42 +933,6 @@ def get_model_stats():
         conn.close()
 
 
-def send_to_lcm(session_id: str, role: str, content: str, model: str = None, has_image: bool = False, thinking: str = None, tool_calls: list = None):
-    """Returns the real LCM message ID on success, or None on failure --
-    the ID is what ratings attach to, since it's the one stable
-    identifier that survives across page reloads and session history
-    reloads (unlike a frontend array index, which is meaningless once
-    messages get re-fetched from LCM in a different order/subset).
-
-    thinking/tool_calls are optional and only meaningful for an
-    assistant message -- passing them lets history reloads (this
-    session or the Bots/Athena2 screens) show the same thinking and
-    tool-call detail a live stream shows, instead of losing it the
-    moment the tab closes.
-
-    Timeout is deliberately generous (not the usual few seconds) because
-    LCM runs auto-compaction synchronously on every /message call, which
-    can call out to an LLM for summarization -- a short timeout here was
-    silently dropping the returned ID on longer messages, which broke
-    both rating-attachment and per-message model tracking without any
-    visible error."""
-    try:
-        resp = httpx.post(f"{LCM_URL}/message", json={
-            "session_id": session_id,
-            "role": role,
-            "content": content,
-            "service": "athena",
-            "model": model,
-            "has_image": has_image,
-            "thinking": thinking,
-            "tool_calls": tool_calls,
-        }, timeout=30)
-        if resp.status_code == 200:
-            return resp.json().get("id")
-        print(f"[Athena] send_to_lcm got HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
-    except Exception as e:
-        print(f"[Athena] send_to_lcm failed: {e}", flush=True)
-    return None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2616,112 +2484,6 @@ def _replace_lines(workspace: str, rel_path: str, start_line, end_line, new_cont
         return {"error": f"replace_lines failed: {e}"}
 
 
-# Per-session cancel signal for in-progress generations. The frontend's
-# stop button aborting its own fetch only stops the CLIENT from
-# listening -- it does nothing to the backend, which has no way to
-# know the client walked away and just keeps talking to Ollama in the
-# background regardless. This explicit flag, checked inside the
-# generator's own loop below, is what actually stops the backend's
-# work, not just the frontend's display of it.
-_cancel_flags = {}
-
-class CancelIn(BaseModel):
-    session_id: str
-
-@app.post("/api/chat/cancel")
-def cancel_chat(req: CancelIn):
-    print(f"[CANCEL-DEBUG] cancel request for session_id={req.session_id!r}, known flags={list(_cancel_flags.keys())!r}", flush=True)
-    flag = _cancel_flags.get(req.session_id)
-    if flag:
-        flag.set()
-        print(f"[CANCEL-DEBUG] flag found and set for {req.session_id!r}", flush=True)
-    else:
-        print(f"[CANCEL-DEBUG] NO matching flag for {req.session_id!r}", flush=True)
-    return {"cancelled": bool(flag)}
-
-# session_id -> queue.Queue(), present only while a background
-# generation thread is actively draining that session's generator.
-# Lets the frontend ask "is this session still generating" after a
-# closed tab/navigation and the browser reconnects to it, and lets
-# _drain_generator_to_queue below know where to clean up when it's
-# done. Deliberately separate from _cancel_flags above -- that one
-# stops the work explicitly (the stop button); this one just tracks
-# whether it's currently running at all.
-_active_generations = {}
-
-# A continuously-updated live snapshot of an in-progress generation --
-# thinking so far, content so far, and each tool call's status/output --
-# kept separately from the single-consumer event queue above, so ANY
-# number of clients can ask "what's actually happening right now" via
-# a real status check, not just whoever happens to be the one actively
-# draining the queue. This is what makes "still generating" mean
-# something more than a boolean spinner.
-_generation_snapshots = {}
-
-
-def _update_snapshot(key, chunk):
-    """Parses one SSE-formatted chunk string (exactly what generate()
-    or an equivalent generator yields) and updates the live snapshot
-    for this session/room key in place."""
-    if not chunk.startswith("data: "):
-        return
-    try:
-        obj = json.loads(chunk[6:].strip())
-    except (json.JSONDecodeError, ValueError):
-        return
-    snap = _generation_snapshots.setdefault(key, {"thinking": "", "content": "", "tool_calls": []})
-    if obj.get("thinking"):
-        snap["thinking"] += obj["thinking"]
-    if obj.get("delta"):
-        snap["content"] += obj["delta"]
-    if obj.get("type") == "tool_start":
-        snap["tool_calls"].append({"tool": obj.get("tool"), "status": "running", "output": None})
-    if obj.get("type") == "tool_output":
-        for tc in reversed(snap["tool_calls"]):
-            if tc["tool"] == obj.get("tool") and tc["status"] == "running":
-                tc["status"] = "done"
-                tc["output"] = obj.get("output")
-                break
-
-def _drain_generator_to_queue(gen, event_queue, session_id):
-    """Runs an existing SSE-yielding generator (Athena's own, completely
-    unmodified agentic generation loop) to completion in a background
-    thread, pushing each yielded chunk into a queue instead of handing
-    it back to any particular HTTP response directly. This is what
-    lets generation survive the requesting browser tab closing or
-    navigating away: this thread keeps pulling from `gen` regardless of
-    whether anything is still reading from the queue on the other end,
-    since it's a separate OS thread with no participation at all in
-    the HTTP request's own cancellation. The generation logic itself
-    is untouched -- this is purely an outer layer around it."""
-    try:
-        for chunk in gen:
-            _update_snapshot(session_id, chunk)
-            event_queue.put(chunk)
-    except Exception as e:
-        print(f"[DEBUG] background generation for session {session_id!r} raised: {e!r}", flush=True)
-    finally:
-        event_queue.put(None)  # sentinel: no more chunks coming
-        _active_generations.pop(session_id, None)
-        _generation_snapshots.pop(session_id, None)
-
-@app.get("/api/chat/status/{session_id}")
-def chat_status(session_id: str):
-    """Lets the frontend check, right after loading a session, whether
-    a generation for it is still running in the background (e.g. the
-    tab was closed or navigated away mid-response) -- so it can show a
-    "still running" placeholder and poll instead of just displaying
-    whatever partial state was last saved. Now also returns the live,
-    continuously-updated snapshot (thinking so far, content so far,
-    tool calls with status/output) so a reconnecting client can render
-    genuine in-progress state, not just a boolean spinner."""
-    generating = session_id in _active_generations
-    snapshot = _generation_snapshots.get(session_id) if generating else None
-    return {"generating": generating, "snapshot": snapshot}
-
-
-_last_activity_ts = time.time()
-
 # ==================== Online provider adapters ====================
 # generate()'s round loop, loop detection, tool-call execution, and
 # doom-loop defenses are all built around Ollama's own streaming chunk
@@ -3283,14 +3045,13 @@ def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag, 
 
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
-    global _last_activity_ts
-    _last_activity_ts = time.time()
+    activity.touch()
     print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
     effective_message = req.message
     for att in req.attachments:
         att_content = (att.get("content") or "")[:20000]
         effective_message += f"\n\n[Attached file: {att.get('name', 'file')}]\n```\n{att_content}\n```"
-    _user_msg_id = send_to_lcm(req.session_id, "user", effective_message, has_image=bool(req.images))
+    _user_msg_id = lcm_client.send_to_lcm(req.session_id, "user", effective_message, has_image=bool(req.images))
     if _user_msg_id is None:
         # Don't silently generate a response for a message that was
         # never actually persisted -- that's exactly the confusing
@@ -3302,7 +3063,7 @@ def chat_stream(req: ChatIn):
             yield f"data: {json.dumps({'done': True})}\n\n"
         return StreamingResponse(_save_failed_error(), media_type="text/event-stream")
 
-    context = get_lcm_context(req.session_id)
+    context = lcm_client.get_lcm_context(req.session_id)
 
     # Perpetual agent mode -- one tool set, always available. LCM's recall
     # tools and the read-only bash tool are always on; file write/edit
@@ -3416,7 +3177,7 @@ def chat_stream(req: ChatIn):
             if name == "draft_bot_prompt":
                 return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
             if name == "message_bot":
-                if _current_task_hash.get() is not None:
+                if task_context.current_task_hash.get() is not None:
                     return {"error": "A delegation task is already active this turn -- message_bot cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
                 return _message_bot_tool(args.get("bot_id"), args.get("content", ""))
             if name == "list_rooms":
@@ -3424,7 +3185,7 @@ def chat_stream(req: ChatIn):
             if name == "read_room_messages":
                 return _read_room_messages_tool(args.get("room_id"))
             if name == "message_room":
-                if _current_task_hash.get() is not None:
+                if task_context.current_task_hash.get() is not None:
                     return {"error": "A delegation task is already active this turn -- message_room cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
                 return _message_room_tool(args.get("room_id"), args.get("content", ""))
             if name == "create_bot":
@@ -3432,8 +3193,8 @@ def chat_stream(req: ChatIn):
             if name == "update_bot":
                 return _update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
             if name == "run_delegation_step":
-                _get_task_hash(req.session_id)
-                if _load_settings().get("delegation_async_enabled"):
+                task_context.get_task_hash(req.session_id)
+                if settings.load_settings().get("delegation_async_enabled"):
                     return _run_delegation_step_async_tool(req, args.get("bot_id"), args.get("instruction", ""))
                 return _run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""))
             if name == "read_scratch_file":
@@ -3441,8 +3202,8 @@ def chat_stream(req: ChatIn):
             if name == "read_tool_call_history":
                 return _read_tool_call_history(args.get("bot_name", ""))
             if name == "plan_delegation":
-                _get_task_hash(req.session_id)
-                if _load_settings().get("delegation_async_enabled"):
+                task_context.get_task_hash(req.session_id)
+                if settings.load_settings().get("delegation_async_enabled"):
                     return _plan_delegation_async_tool(req, args.get("steps", []))
                 return _plan_delegation_tool(args.get("steps", []))
         if name == "search_codebase":
@@ -3469,7 +3230,7 @@ def chat_stream(req: ChatIn):
 
         args["session_id"] = req.session_id
         try:
-            resp = httpx.post(f"{LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
+            resp = httpx.post(f"{lcm_client.LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
             if resp.status_code == 200:
                 return resp.json().get("result")
             return {"error": f"Tool call failed: HTTP {resp.status_code}"}
@@ -3477,9 +3238,8 @@ def chat_stream(req: ChatIn):
             return {"error": f"Tool call failed: {e}"}
 
     def generate():
-        global _last_activity_ts
         cancel_flag = threading.Event()
-        _cancel_flags[req.session_id] = cancel_flag
+        generation_streaming.cancel_flags[req.session_id] = cancel_flag
         # Doom-loop detection: fingerprint each tool call (name + exact
         # arguments) and track the last 20 in this turn. If the same
         # fingerprint would be executed a 3rd time, refuse to run it
@@ -3587,7 +3347,7 @@ def chat_stream(req: ChatIn):
                         # window partway through, and the memory scan can
                         # fire a second, competing Ollama request while this
                         # one is still actively streaming.
-                        _last_activity_ts = time.time()
+                        activity.touch()
                         msg = chunk.get("message", {})
                         print(f"[DEBUG] chunk={chunk}", flush=True)
                         thinking_delta = msg.get("thinking", "")
@@ -3614,7 +3374,7 @@ def chat_stream(req: ChatIn):
                 # blip, or -- in athena_delegation mode -- resource
                 # contention with a concurrent bot call on the same host).
                 # Previously this surfaced nowhere: the exception propagated
-                # up to _drain_generator_to_queue, which just logged it and
+                # up to generation_streaming.drain_generator_to_queue, which just logged it and
                 # quietly cleaned up, so the turn appeared to silently stop
                 # with zero explanation. Persist and show a real message
                 # instead, reusing whatever partial reply already streamed.
@@ -3622,16 +3382,16 @@ def chat_stream(req: ChatIn):
                 error_msg = f"Generation failed partway through: {e!r}. The model backend likely became unreachable or dropped the connection -- try again in a moment."
                 _had_prior_content = bool(full_reply)
                 full_reply += ("\n\n" if _had_prior_content else "") + error_msg
-                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 yield f"data: {json.dumps({'delta': ('\n\n' if _had_prior_content else '') + error_msg})}\n\n"
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id, 'generation_error': True})}\n\n"
                 return
 
             if cancel_flag.is_set():
                 if full_reply:
-                    send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                    lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 yield f"data: {json.dumps({'done': True, 'cancelled': True})}\n\n"
-                _cancel_flags.pop(req.session_id, None)
+                generation_streaming.cancel_flags.pop(req.session_id, None)
                 return
 
             if loop_detected:
@@ -3654,7 +3414,7 @@ def chat_stream(req: ChatIn):
                     # the rest of MAX_ROUNDS on a model that can't recover.
                     failure_msg = "I got stuck repeating myself and wasn't able to recover after a few attempts -- stopping here rather than continuing to loop."
                     full_reply = (full_reply.rsplit(round_reply, 1)[0] if round_reply in full_reply else full_reply) + ("\n\n" + failure_msg if full_reply else failure_msg)
-                    _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                    _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                     yield f"data: {json.dumps({'delta': ('\n\n' if trimmed_reply.strip() else '') + failure_msg})}\n\n"
                     yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                     return
@@ -3690,7 +3450,7 @@ def chat_stream(req: ChatIn):
                     if consecutive_ungrounded_claims >= 3:
                         failure_msg = "I started describing further progress without actually making the tool calls to back it up, and wasn't able to correct that after a few attempts -- stopping here rather than continuing to report unverified work."
                         full_reply += ("\n\n" + failure_msg if full_reply else failure_msg)
-                        _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                        _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                         yield f"data: {json.dumps({'delta': '\n\n' + failure_msg})}\n\n"
                         yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                         return
@@ -3723,7 +3483,7 @@ def chat_stream(req: ChatIn):
                     if consecutive_empty_final_answers >= 3:
                         failure_msg = "I did some real investigation this turn but wasn't able to put together an actual answer from it after a few attempts -- stopping here rather than ending with nothing. Check the tool results above for what was actually found."
                         full_reply = failure_msg
-                        _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                        _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                         yield f"data: {json.dumps({'delta': failure_msg})}\n\n"
                         yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                         return
@@ -3736,7 +3496,7 @@ def chat_stream(req: ChatIn):
                     continue
                 consecutive_empty_final_answers = 0
 
-                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'assistant_message_id': _msg_id})}\n\n"
                 return
@@ -3857,7 +3617,7 @@ def chat_stream(req: ChatIn):
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
             full_reply = fallback_msg
             yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
-            _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+            _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
             tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
             yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
 
@@ -3867,9 +3627,9 @@ def chat_stream(req: ChatIn):
     # navigation away. generate() itself is completely unmodified.
     gen = generate()
     event_queue = queue.Queue()
-    _active_generations[req.session_id] = event_queue
-    _generation_snapshots[req.session_id] = {"thinking": "", "content": "", "tool_calls": []}
-    threading.Thread(target=_drain_generator_to_queue, args=(gen, event_queue, req.session_id), daemon=True).start()
+    generation_streaming.active_generations[req.session_id] = event_queue
+    generation_streaming.generation_snapshots[req.session_id] = {"thinking": "", "content": "", "tool_calls": []}
+    threading.Thread(target=generation_streaming.drain_generator_to_queue, args=(gen, event_queue, req.session_id), daemon=True).start()
 
     def _stream_from_queue():
         while True:
@@ -3952,7 +3712,7 @@ async def tts(req: TtsIn):
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str):
     try:
-        resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=3)
+        resp = httpx.get(f"{lcm_client.LCM_URL}/messages/{session_id}", timeout=3)
         if resp.status_code == 200:
             msgs = resp.json()
             from datetime import datetime
@@ -3981,7 +3741,7 @@ class MemoryIn(BaseModel):
 @app.get("/api/memory")
 def list_memory():
     try:
-        resp = httpx.get(f"{LCM_URL}/facts", timeout=10)
+        resp = httpx.get(f"{lcm_client.LCM_URL}/facts", timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -3991,7 +3751,7 @@ def list_memory():
 @app.post("/api/memory")
 def add_memory(req: MemoryIn):
     try:
-        resp = httpx.post(f"{LCM_URL}/facts", json={"content": req.content, "manual": True}, timeout=10)
+        resp = httpx.post(f"{lcm_client.LCM_URL}/facts", json={"content": req.content, "manual": True}, timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -4001,7 +3761,7 @@ def add_memory(req: MemoryIn):
 @app.delete("/api/memory/{fact_id}")
 def delete_memory(fact_id: int):
     try:
-        resp = httpx.delete(f"{LCM_URL}/facts/{fact_id}", timeout=10)
+        resp = httpx.delete(f"{lcm_client.LCM_URL}/facts/{fact_id}", timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -4011,7 +3771,7 @@ def delete_memory(fact_id: int):
 @app.delete("/api/messages/{message_id}")
 def delete_message(message_id: int):
     try:
-        resp = httpx.delete(f"{LCM_URL}/messages/{message_id}", timeout=10)
+        resp = httpx.delete(f"{lcm_client.LCM_URL}/messages/{message_id}", timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -4028,7 +3788,7 @@ class SessionMetaIn(BaseModel):
 @app.get("/api/sessions")
 def list_sessions_proxy():
     try:
-        resp = httpx.get(f"{LCM_URL}/sessions", timeout=10)
+        resp = httpx.get(f"{lcm_client.LCM_URL}/sessions", timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -4038,7 +3798,7 @@ def list_sessions_proxy():
 @app.post("/api/sessions")
 def upsert_session_proxy(req: SessionMetaIn):
     try:
-        resp = httpx.post(f"{LCM_URL}/sessions", json=req.model_dump(), timeout=10)
+        resp = httpx.post(f"{lcm_client.LCM_URL}/sessions", json=req.model_dump(), timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -4056,7 +3816,7 @@ def fork_session_proxy(session_id: str, req: ForkSessionProxyIn):
     letting the user rewind to a point in a conversation and continue
     down a different path without losing or altering the original."""
     try:
-        resp = httpx.post(f"{LCM_URL}/sessions/{session_id}/fork", json=req.model_dump(), timeout=15)
+        resp = httpx.post(f"{lcm_client.LCM_URL}/sessions/{session_id}/fork", json=req.model_dump(), timeout=15)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
@@ -4068,7 +3828,7 @@ def delete_history(session_id: str):
     """Delete a chat session's messages and summary nodes from LCM --
     real data deletion, not just removing it from the sidebar list."""
     try:
-        resp = httpx.delete(f"{LCM_URL}/session/{session_id}", timeout=10)
+        resp = httpx.delete(f"{lcm_client.LCM_URL}/session/{session_id}", timeout=10)
         if resp.status_code == 200:
             return resp.json()
         return {"error": f"LCM delete failed: HTTP {resp.status_code}"}
@@ -4119,62 +3879,18 @@ def system_stats():
         "gpus": gpus,
     }
 
-_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_settings.json")
-_settings_lock = threading.Lock()
-
-def _load_settings():
-    try:
-        with open(_SETTINGS_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _save_settings(settings):
-    """Atomic write (temp file + os.replace) so a crash or a
-    concurrent write from another device mid-write can never leave
-    behind a half-written, corrupted JSON file -- which previously
-    silently made _load_settings() return {} (an unparseable file is
-    caught by its broad except and treated as 'no settings yet'),
-    making real saved data look like it had vanished entirely."""
-    tmp_path = _SETTINGS_PATH + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(settings, f)
-    os.replace(tmp_path, _SETTINGS_PATH)
-
-_notes_lock = threading.Lock()
-_NOTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_notes.json")
-
-def _load_notes():
-    try:
-        with open(_NOTES_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def _save_notes(notes):
-    """Atomic write (temp file + os.replace), same pattern as
-    settings, so a crash or a concurrent write from another device
-    mid-write can never leave a corrupted notes file behind. This
-    replaces the old localStorage-only storage, which never synced
-    notes across devices at all -- a note saved on one device was
-    simply invisible everywhere else."""
-    tmp_path = _NOTES_PATH + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(notes, f)
-    os.replace(tmp_path, _NOTES_PATH)
-
 class NotesIn(BaseModel):
     notes: list
 
 @app.get("/api/notes")
 def get_notes():
-    with _notes_lock:
-        return {"notes": _load_notes()}
+    with settings.notes_lock:
+        return {"notes": settings.load_notes()}
 
 @app.post("/api/notes")
 def save_notes_endpoint(req: NotesIn):
-    with _notes_lock:
-        _save_notes(req.notes)
+    with settings.notes_lock:
+        settings.save_notes(req.notes)
     return {"ok": True}
 
 class MemoryModelIn(BaseModel):
@@ -4214,13 +3930,13 @@ def add_mcp_server(req: MCPServerIn):
     so the person sees real success/failure right away instead of
     only finding out on the next restart."""
     from mcp_manager import mcp_manager
-    with _settings_lock:
-        settings = _load_settings()
+    with settings.settings_lock:
+        settings = settings.load_settings()
         servers = settings.setdefault("mcp_servers", [])
         servers = [s for s in servers if s["name"] != req.name]
         servers.append({"name": req.name, "command": req.command, "args": req.args or []})
         settings["mcp_servers"] = servers
-        _save_settings(settings)
+        settings.save_settings(settings)
     try:
         tools = mcp_manager.connect_server(req.name, req.command, req.args or [])
         return {"connected": True, "tool_count": len(tools)}
@@ -4231,10 +3947,10 @@ def add_mcp_server(req: MCPServerIn):
 def remove_mcp_server(name: str):
     from mcp_manager import mcp_manager
     mcp_manager.disconnect_server(name)
-    with _settings_lock:
-        settings = _load_settings()
+    with settings.settings_lock:
+        settings = settings.load_settings()
         settings["mcp_servers"] = [s for s in settings.get("mcp_servers", []) if s["name"] != name]
-        _save_settings(settings)
+        settings.save_settings(settings)
     return {"removed": True}
 
 class MCPCallIn(BaseModel):
@@ -4339,7 +4055,7 @@ def serve_mcp_ui_file(server_name: str, path: str):
 
 @app.get("/api/settings")
 def get_settings():
-    return _load_settings()
+    return settings.load_settings()
 
 @app.post("/api/settings")
 def update_settings(req: SettingsIn):
@@ -4349,21 +4065,21 @@ def update_settings(req: SettingsIn):
     default model. Lock-guarded end to end (read, merge, write) so two
     devices saving at nearly the same moment serialize safely instead
     of one's update silently clobbering the other's."""
-    with _settings_lock:
-        settings = _load_settings()
+    with settings.settings_lock:
+        settings = settings.load_settings()
         settings.update(req.model_dump(exclude_unset=True))
-        _save_settings(settings)
+        settings.save_settings(settings)
         return settings
 
 @app.get("/api/settings/memory-model")
 def get_memory_model():
-    return {"model": _load_settings().get("memory_extraction_model")}
+    return {"model": settings.load_settings().get("memory_extraction_model")}
 
 @app.post("/api/settings/memory-model")
 def set_memory_model(req: MemoryModelIn):
-    settings = _load_settings()
+    settings = settings.load_settings()
     settings["memory_extraction_model"] = req.model
-    _save_settings(settings)
+    settings.save_settings(settings)
     return {"model": req.model}
 
 def _get_memory_context() -> str:
@@ -4375,7 +4091,7 @@ def _get_memory_context() -> str:
     install with nothing learned behaves identically to before this
     feature existed."""
     try:
-        resp = httpx.get(f"{LCM_URL}/facts", timeout=5)
+        resp = httpx.get(f"{lcm_client.LCM_URL}/facts", timeout=5)
         if resp.status_code != 200:
             return ""
         facts = resp.json()
@@ -4406,14 +4122,14 @@ Rules:
 Respond with ONLY a JSON array of new fact strings, e.g. ["Works as a mechanical engineer", "Prefers dark roast coffee"]. If there is nothing new and genuinely worth keeping, respond with exactly: []"""
 
 def _run_memory_scan(model: str):
-    scan_state = httpx.get(f"{LCM_URL}/scan-state", timeout=10).json()
+    scan_state = httpx.get(f"{lcm_client.LCM_URL}/scan-state", timeout=10).json()
     last_id = scan_state.get("last_scanned_message_id", 0)
 
-    new_messages = httpx.get(f"{LCM_URL}/messages/since/{last_id}", timeout=10).json()
+    new_messages = httpx.get(f"{lcm_client.LCM_URL}/messages/since/{last_id}", timeout=10).json()
     if not new_messages:
         return  # nothing new -- also naturally prevents re-scanning during a long idle stretch
 
-    existing_facts = httpx.get(f"{LCM_URL}/facts", timeout=10).json()
+    existing_facts = httpx.get(f"{lcm_client.LCM_URL}/facts", timeout=10).json()
     existing_facts_text = "\n".join(f"- {f['content']}" for f in existing_facts) or "(none yet)"
     transcript_text = "\n".join(f"[{m['role']}] {m['content']}" for m in new_messages)
 
@@ -4444,7 +4160,7 @@ def _run_memory_scan(model: str):
 
     for fact_text in new_facts:
         if isinstance(fact_text, str) and fact_text.strip():
-            httpx.post(f"{LCM_URL}/facts", json={
+            httpx.post(f"{lcm_client.LCM_URL}/facts", json={
                 "content": fact_text.strip(),
                 "source_session_id": last_session_id,
                 "source_message_id": max_id_seen,
@@ -4453,18 +4169,18 @@ def _run_memory_scan(model: str):
 
     if new_facts:
         print(f"[Athena] Memory scan: added {len(new_facts)} new fact(s)", flush=True)
-    httpx.post(f"{LCM_URL}/scan-state", json={"last_scanned_message_id": max_id_seen}, timeout=10)
+    httpx.post(f"{lcm_client.LCM_URL}/scan-state", json={"last_scanned_message_id": max_id_seen}, timeout=10)
 
 def _memory_scan_loop():
     print("[Athena] Memory scan loop started (checks every 60s)", flush=True)
     while True:
         time.sleep(_MEMORY_SCAN_INTERVAL_SECONDS)
         try:
-            model = _load_settings().get("memory_extraction_model")
+            model = settings.load_settings().get("memory_extraction_model")
             if not model:
                 print("[Athena] Memory scan check: no model configured, skipping", flush=True)
                 continue  # no model configured -- do nothing, no error
-            idle_seconds = time.time() - _last_activity_ts
+            idle_seconds = time.time() - activity.last_activity_ts
             if idle_seconds < _MEMORY_IDLE_THRESHOLD_SECONDS:
                 remaining = int(_MEMORY_IDLE_THRESHOLD_SECONDS - idle_seconds)
                 print(f"[Athena] Memory scan check: still active, {remaining}s until idle threshold", flush=True)
@@ -4818,14 +4534,13 @@ def _call_bot_endpoint(bot, chat_messages):
         api_key=bot.get("api_key") or "",
     )
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
-    _settings_snapshot = _load_settings()
+    _settings_snapshot = settings.load_settings()
     workspace = _settings_snapshot.get("workspace") or ""
     ptc_enabled = bool(_settings_snapshot.get("bot_ptc_enabled"))
     allowed_tools = bot.get("allowed_tools") or []
     messages = list(chat_messages)
     session_key = f"bot-{bot.get('id', 'unknown')}"
 
-    global _last_activity_ts
     round_reply = ""
     seen_fingerprints = []
     # Every real tool call this turn makes, tool name + args + a
@@ -4842,7 +4557,7 @@ def _call_bot_endpoint(bot, chat_messages):
     _tool_type_warned = set()
     _tool_type_hard_stopped = set()
     for _ in range(_BOT_MAX_ROUNDS):
-        _last_activity_ts = time.time()
+        activity.touch()
         round_reply = ""
         round_tool_calls = []
         cancel_flag = threading.Event()
@@ -5048,7 +4763,7 @@ _ATHENA_ROOM_MAX_ROUNDS = 8
 
 def _room_key(room_id):
     """The generic string key used to track a room-turn's background
-    generation in the exact same _active_generations/_generation_snapshots
+    generation in the exact same generation_streaming.active_generations/generation_streaming.generation_snapshots
     dicts main chat and Athena2 already use -- distinct from a real LCM
     session_id (which is always a UUID), so no collision risk, and it
     means zero new tracking infrastructure is needed for rooms at all."""
@@ -5065,7 +4780,7 @@ def _run_athena_room_turn_gen(room_id):
     own done chunk -- so a real reply always lands in the room exactly
     once generation actually finishes, whether anyone's still watching
     or not."""
-    settings = _load_settings()
+    settings = settings.load_settings()
     defaults = settings.get("athena_agent_model") or {}
     model = defaults.get("model")
     if not model:
@@ -5092,7 +4807,7 @@ def _run_athena_room_turn_gen(room_id):
     history = [{"sender_type": r[0], "sender_bot_id": r[1], "content": r[2],
                 "sender_bot_name": bots_by_id.get(r[1], {}).get("name") if r[1] else None} for r in history_rows]
 
-    room_turn_workspace = _load_settings().get("workspace") or ""
+    room_turn_workspace = settings.load_settings().get("workspace") or ""
     system_prompt = CODING_HARNESS_SYSTEM_PROMPT + _get_bot_delegation_prompt_section(room_turn_workspace)
     chat_messages = [{"role": "system", "content": system_prompt}]
     for m in history:
@@ -5112,13 +4827,12 @@ def _run_athena_room_turn_gen(room_id):
     provider = defaults.get("provider") or ""
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
 
-    global _last_activity_ts
     fingerprints = []
     full_reply = ""
     cancel_flag = threading.Event()
 
     for round_num in range(_ATHENA_ROOM_MAX_ROUNDS):
-        _last_activity_ts = time.time()
+        activity.touch()
         round_reply = ""
         round_tool_calls = []
         try:
@@ -5190,9 +4904,9 @@ def _start_athena_room_turn_background(room_id):
     key = _room_key(room_id)
     gen = _run_athena_room_turn_gen(room_id)
     event_queue = queue.Queue()
-    _active_generations[key] = event_queue
-    _generation_snapshots[key] = {"thinking": "", "content": "", "tool_calls": []}
-    threading.Thread(target=_drain_generator_to_queue, args=(gen, event_queue, key), daemon=True).start()
+    generation_streaming.active_generations[key] = event_queue
+    generation_streaming.generation_snapshots[key] = {"thinking": "", "content": "", "tool_calls": []}
+    threading.Thread(target=generation_streaming.drain_generator_to_queue, args=(gen, event_queue, key), daemon=True).start()
 
 
 class RoomSendIn(BaseModel):
@@ -5409,7 +5123,7 @@ Do NOT use read_file yourself on a large file (main.py or anything else of compa
             "still double-check it yourself if something about it still feels off, but you no longer have to "
             "eyeball every note for fabrication signs on your own."
         )
-    defaults = (_load_settings().get("bot_creation_defaults") or {})
+    defaults = (settings.load_settings().get("bot_creation_defaults") or {})
     naming_guidance = defaults.get("naming_guidance")
     if naming_guidance:
         base += f"\n\nWhen naming a new bot: {naming_guidance}"
@@ -5451,10 +5165,10 @@ APPEND_SCRATCH_NOTE_SCHEMA = {
 }
 
 def _append_scratch_note(bot_name, content):
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     if task_hash is None:
         return {"error": "No active task context to write a scratch note into."}
-    folder = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash)
+    folder = os.path.join(task_context.BOT_TASK_FOLDER_ROOT, task_hash)
     os.makedirs(folder, exist_ok=True)
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
     path2 = os.path.join(folder, f"{safe_name}.md")
@@ -5491,10 +5205,10 @@ def _append_tool_call_history(bot_name, instruction, calls):
     for it when she actually asks (see read_tool_call_history), instead
     of it riding along in every run_delegation_step/plan_delegation
     response by default."""
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     if task_hash is None or not calls:
         return
-    folder = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash)
+    folder = os.path.join(task_context.BOT_TASK_FOLDER_ROOT, task_hash)
     os.makedirs(folder, exist_ok=True)
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
     path2 = os.path.join(folder, f"{safe_name}.calls.jsonl")
@@ -5510,11 +5224,11 @@ def _get_bot_row(bot_id):
 
 
 def _read_scratch_file(bot_name):
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     if task_hash is None:
         return {"error": "No active task context -- nothing has been delegated yet this turn."}
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
-    fpath = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
+    fpath = os.path.join(task_context.BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
     if not os.path.exists(fpath):
         return {"error": f"No scratch file for '{bot_name}' in the current task yet."}
     with open(fpath, "r", encoding="utf-8") as f:
@@ -5527,11 +5241,11 @@ def _read_tool_call_history(bot_name):
     of calls belongs to -- for checking HOW a bot reached its findings,
     e.g. when a scratch note looks fabricated or ungrounded and you want
     to see whether the tool calls behind it are actually there."""
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     if task_hash is None:
         return {"error": "No active task context -- nothing has been delegated yet this turn."}
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
-    fpath = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.calls.jsonl")
+    fpath = os.path.join(task_context.BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.calls.jsonl")
     if not os.path.exists(fpath):
         return {"error": f"No tool-call history for '{bot_name}' in the current task yet."}
     steps = []
@@ -5577,7 +5291,7 @@ def _instruction_is_compound(instruction):
         return True, f"contains {len(items)} numbered/bulleted items"
     if len(instruction) > 1200:
         return True, f"is {len(instruction)} characters long (over the 1200 char guideline for a single-topic step)"
-    if _load_settings().get("laya_gating_enabled"):
+    if settings.load_settings().get("laya_gating_enabled"):
         p_single_topic = laya_gate.check_single_topic(instruction)
         if p_single_topic is not None and p_single_topic < _LAYA_COMPOUND_THRESHOLD:
             return True, "was flagged by the compound-instruction checker as covering more than one distinct topic"
@@ -5629,12 +5343,12 @@ def _deliver_delegation_result(req_fields, content):
     same discard-the-StreamingResponse trick _start_task_run uses to
     drive a chat turn with no live HTTP client. Waits for the session to
     be free of any in-progress generation first (mirrors
-    _task_scheduler_loop's own _active_generations check) so this never
+    _task_scheduler_loop's own generation_streaming.active_generations check) so this never
     fires a second concurrent generation into the same session."""
     session_id = req_fields["session_id"]
     lock = _get_delegation_delivery_lock(session_id)
     with lock:
-        while session_id in _active_generations:
+        while session_id in generation_streaming.active_generations:
             time.sleep(2)
         req = ChatIn(
             session_id=session_id,
@@ -5673,7 +5387,7 @@ def _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_hi
     unavailable). Reads only the bytes appended since before_size, so this
     checks exactly the note this step just wrote, not earlier steps'
     accumulated content in the same scratch file."""
-    if not _load_settings().get("laya_gating_enabled"):
+    if not settings.load_settings().get("laya_gating_enabled"):
         return None
     with open(scratch_path, "r", encoding="utf-8") as f:
         f.seek(before_size)
@@ -5700,12 +5414,12 @@ def _run_delegation_step_tool(bot_id, instruction):
     bot = _get_bot_row(bot_id)
     if bot is None:
         return {"error": f"No bot with id {bot_id}.", "instruction": instruction}
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     if task_hash is None:
         return {"error": "No active task context -- this should only be called mid-delegation.", "instruction": instruction}
 
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot["name"].lower())
-    scratch_path = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
+    scratch_path = os.path.join(task_context.BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
     before_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
 
     system_prompt = _build_bot_system_prompt(bot)
@@ -5798,7 +5512,7 @@ def _plan_delegation_tool(steps):
     # this in settings; the per-host lock in _run_delegation_step_tool
     # still serializes any two steps that land on the same physical
     # inference host regardless of what this is set to.
-    concurrency = max(1, int(_load_settings().get("delegation_concurrency") or 1))
+    concurrency = max(1, int(settings.load_settings().get("delegation_concurrency") or 1))
 
     if concurrency <= 1 or len(runnable) <= 1:
         for i, bot_id, instruction in runnable:
@@ -5806,17 +5520,17 @@ def _plan_delegation_tool(steps):
             results[i] = {"step": i, "bot_id": bot_id, **r}
     else:
         # Each worker thread starts with its own empty context, so
-        # _current_task_hash.get() would come back None in there and
+        # task_context.current_task_hash.get() would come back None in there and
         # break scratch-file scoping -- read the value once up front and
         # set it explicitly in each worker instead. (A single shared
         # contextvars.Context can't be entered from more than one thread
         # at a time, so copy_context() + one shared ctx.run() isn't an
         # option here.)
-        task_hash = _current_task_hash.get()
+        task_hash = task_context.current_task_hash.get()
 
         def _run(item):
             i, bot_id, instruction = item
-            _current_task_hash.set(task_hash)
+            task_context.current_task_hash.set(task_hash)
             r = _run_delegation_step_tool(bot_id, instruction)
             return i, {"step": i, "bot_id": bot_id, **r}
 
@@ -5828,7 +5542,7 @@ def _plan_delegation_tool(steps):
 
 
 def _delegation_step_worker(job_id, task_hash, req_fields, bot_id, instruction):
-    _current_task_hash.set(task_hash)  # each thread starts with its own empty context -- see _plan_delegation_tool's own comment on this
+    task_context.current_task_hash.set(task_hash)  # each thread starts with its own empty context -- see _plan_delegation_tool's own comment on this
     try:
         result = _run_delegation_step_tool(bot_id, instruction)
     except Exception as e:
@@ -5854,7 +5568,7 @@ def _run_delegation_step_async_tool(req, bot_id, instruction):
             "instruction": instruction,
         }
     job_id = _next_delegation_job_id()
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     req_fields = _capture_req_fields(req)
     with _delegation_jobs_lock:
         _delegation_jobs[job_id] = {"status": "running", "kind": "step", "session_id": req.session_id, "result": None}
@@ -5868,7 +5582,7 @@ def _run_delegation_step_async_tool(req, bot_id, instruction):
 
 
 def _delegation_plan_worker(job_id, task_hash, req_fields, steps):
-    _current_task_hash.set(task_hash)
+    task_context.current_task_hash.set(task_hash)
     try:
         plan_result = _plan_delegation_tool(steps)
     except Exception as e:
@@ -5888,7 +5602,7 @@ def _plan_delegation_async_tool(req, steps):
     if not steps or not isinstance(steps, list):
         return {"error": "steps must be a non-empty list of {bot_id, instruction} objects."}
     job_id = _next_delegation_job_id()
-    task_hash = _current_task_hash.get()
+    task_hash = task_context.current_task_hash.get()
     req_fields = _capture_req_fields(req)
     with _delegation_jobs_lock:
         _delegation_jobs[job_id] = {"status": "running", "kind": "plan", "session_id": req.session_id, "result": None}
@@ -5950,7 +5664,7 @@ def _create_bot_tool(name, description, allowed_tools):
     pre-configured default (set via Athena2's Agent Defaults menu)
     instead, removing the guess entirely rather than just warning
     about it."""
-    settings = _load_settings()
+    settings = settings.load_settings()
     defaults = settings.get("bot_creation_defaults") or {}
     model = defaults.get("model")
     endpoint_url = defaults.get("endpoint_url")
@@ -6482,7 +6196,7 @@ def _bot_tool_schemas(allowed_tools, hard_stopped_groups=None, ptc_enabled=False
     of them -- a bot can always fall back to calling tools one at a time."""
     pool = (
         BASH_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS
-        + WEB_TOOL_SCHEMAS + get_lcm_tools()
+        + WEB_TOOL_SCHEMAS + lcm_client.get_lcm_tools()
         + [s for s in BOT_DELEGATION_TOOL_SCHEMAS
            if s.get("function", {}).get("name") in ("list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt")]
     )
@@ -6543,7 +6257,7 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
         return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
     args["session_id"] = session_key
     try:
-        resp = httpx.post(f"{LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
+        resp = httpx.post(f"{lcm_client.LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
         if resp.status_code == 200:
             return resp.json().get("result")
         return {"error": f"Tool call failed: HTTP {resp.status_code}"}
@@ -6582,7 +6296,7 @@ def _tasks_conn():
 def _available_task_tools():
     names = []
     seen = set()
-    for schema in BASH_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + get_lcm_tools():
+    for schema in BASH_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + lcm_client.get_lcm_tools():
         fn = schema.get("function", {})
         name = fn.get("name")
         if name and name not in seen:
@@ -6802,7 +6516,7 @@ def _lcm_get_session(session_id):
     overwrites both of those from whatever gets sent, so a naive resend
     of a default label/pinned would silently clobber real values."""
     try:
-        resp = httpx.get(f"{LCM_URL}/sessions", timeout=5)
+        resp = httpx.get(f"{lcm_client.LCM_URL}/sessions", timeout=5)
         if resp.status_code == 200:
             for s in resp.json():
                 if s.get("id") == session_id:
@@ -6813,7 +6527,7 @@ def _lcm_get_session(session_id):
 
 def _lcm_message_count(session_id):
     try:
-        resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=5)
+        resp = httpx.get(f"{lcm_client.LCM_URL}/messages/{session_id}", timeout=5)
         if resp.status_code == 200:
             return len(resp.json())
     except Exception:
@@ -6836,7 +6550,7 @@ def _start_task_run(task):
     if not existing:
         session_id = str(uuid.uuid4())
         try:
-            httpx.post(f"{LCM_URL}/sessions", json={
+            httpx.post(f"{lcm_client.LCM_URL}/sessions", json={
                 "id": session_id, "label": task["session_label"],
                 "pinned": False, "created_at": now_ms, "last_active": now_ms,
             }, timeout=5)
@@ -6858,7 +6572,7 @@ def _start_task_run(task):
         # label/pinned are NOT, so both are read back and resent as-is
         # rather than risking a silent reset to defaults.
         try:
-            httpx.post(f"{LCM_URL}/sessions", json={
+            httpx.post(f"{lcm_client.LCM_URL}/sessions", json={
                 "id": session_id, "label": existing.get("label") or task["session_label"],
                 "pinned": bool(existing.get("pinned")),
                 "created_at": existing.get("created_at") or now_ms,
@@ -6869,7 +6583,7 @@ def _start_task_run(task):
 
     message_count_before = _lcm_message_count(session_id) or 0
     enabled_tools = task["enabled_tools"]
-    settings_search_url = (_load_settings() or {}).get("search_url") or ""
+    settings_search_url = (settings.load_settings() or {}).get("search_url") or ""
     req = ChatIn(
         session_id=session_id,
         message=task["prompt"],
@@ -6916,7 +6630,7 @@ def _record_task_run_result(task_id, task, success):
 def _task_scheduler_loop():
     """Wakes up periodically: checks any task runs already in progress
     for completion (a run is "done" once its session drops out of
-    _active_generations, the same tracker the frontend's own
+    generation_streaming.active_generations, the same tracker the frontend's own
     reconnect-and-poll logic uses), then starts any newly-due tasks.
     Success/failure is inferred from whether a new assistant message
     actually landed in the session -- true on every real completion
@@ -6926,7 +6640,7 @@ def _task_scheduler_loop():
         try:
             for task_id in list(_task_runs_in_progress.keys()):
                 info = _task_runs_in_progress[task_id]
-                if info["session_id"] in _active_generations:
+                if info["session_id"] in generation_streaming.active_generations:
                     continue
                 message_count_after = _lcm_message_count(info["session_id"])
                 success = message_count_after is not None and message_count_after > info["message_count_before"]
@@ -6985,7 +6699,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     _check_requirements()
-    _start_bundled_lcm()
+    lcm_client.start_bundled_lcm()
 
     def _startup_reindex():
         # Warm the embedding model here, explicitly, before touching any
@@ -7009,7 +6723,7 @@ if __name__ == "__main__":
 
     from mcp_manager import mcp_manager
     mcp_manager.start()
-    for server_cfg in _load_settings().get("mcp_servers", []):
+    for server_cfg in settings.load_settings().get("mcp_servers", []):
         try:
             tools = mcp_manager.connect_server(server_cfg["name"], server_cfg["command"], server_cfg.get("args", []))
             print(f"[Athena] Connected to MCP server '{server_cfg['name']}' -- {len(tools)} tools discovered", flush=True)
