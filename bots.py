@@ -198,6 +198,7 @@ def _call_bot_endpoint(bot, chat_messages):
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
     _settings_snapshot = settings.load_settings()
     workspace = _settings_snapshot.get("workspace") or ""
+    search_url = _settings_snapshot.get("search_url") or ""
     ptc_enabled = bool(_settings_snapshot.get("bot_ptc_enabled"))
     allowed_tools = bot.get("allowed_tools") or []
     messages = list(chat_messages)
@@ -268,7 +269,7 @@ def _call_bot_endpoint(bot, chat_messages):
             elif tool_name == "run_tool_program":
                 result = _execute_bot_tool_program(
                     fn_args.get("code", ""), workspace, bot, session_key, allowed_tools,
-                    _tool_type_counts, _tool_type_hard_stopped, seen_fingerprints,
+                    _tool_type_counts, _tool_type_hard_stopped, seen_fingerprints, search_url,
                 )
                 tool_call_history.append(_tool_call_history_entry(tool_name, {"code": fn_args.get("code", "")}, {"status": result.get("status") or "error", "detail": result.get("detail") or result.get("error")}))
                 tool_call_history.extend(result.get("tool_call_history", []))
@@ -276,7 +277,7 @@ def _call_bot_endpoint(bot, chat_messages):
                 if len(seen_fingerprints) > 20:
                     seen_fingerprints.pop(0)
             else:
-                result = _execute_bot_tool_call(tc, workspace, bot, session_key)
+                result = _execute_bot_tool_call(tc, workspace, bot, session_key, search_url)
                 tool_call_history.append(_tool_call_history_entry(tool_name, fn_args, result))
                 seen_fingerprints.append(fingerprint)
                 if len(seen_fingerprints) > 20:
@@ -1245,7 +1246,7 @@ def _build_run_tool_program_schema(tool_schemas):
 
 
 
-def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, tool_type_counts, tool_type_hard_stopped, seen_fingerprints):
+def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, tool_type_counts, tool_type_hard_stopped, seen_fingerprints, search_url=""):
     """Run one bot-authored script in an isolated subprocess (see the PTC
     block comment above), dispatching each tool call it makes through the
     exact same _execute_bot_tool_call used for individual tool calls, and
@@ -1336,7 +1337,7 @@ def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, 
             if seen_fingerprints.count(fingerprint) >= 2:
                 result = {"error": "BLOCKED: this exact tool call (same tool, same arguments) has already been made twice this turn. Use what you already have, or make a genuinely different call."}
             else:
-                result = _execute_bot_tool_call(fake_tc, workspace, bot, session_key)
+                result = _execute_bot_tool_call(fake_tc, workspace, bot, session_key, search_url)
                 seen_fingerprints.append(fingerprint)
                 if len(seen_fingerprints) > 20:
                     seen_fingerprints.pop(0)
@@ -1393,7 +1394,7 @@ def _bot_tool_schemas(allowed_tools, hard_stopped_groups=None, ptc_enabled=False
 
 
 
-def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
+def _execute_bot_tool_call(tool_call, workspace, bot, session_key, search_url=""):
     """Dispatch one tool call a bot actually made. Gated against
     BOT_ALLOWED_TOOL_NAMES a second time here, independent of what
     schemas it was even offered -- belt and suspenders."""
@@ -1427,7 +1428,9 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
     if name == "type_info":
         return lsp_tools.get_lsp_client(workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
     if name == "web_search":
-        return web_tools.web_search(None, args.get("query", ""))
+        if not search_url:
+            return {"error": "No search engine is configured (search_url is empty in Athena's settings) -- web_search is unavailable until one is set."}
+        return web_tools.web_search(search_url, args.get("query", ""))
     if name == "web_fetch":
         return web_tools.web_fetch(args.get("url", ""))
     if name == "list_bots":
