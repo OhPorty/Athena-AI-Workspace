@@ -340,3 +340,28 @@ class SimpleCodeRAG:
             {"filepath": rows[i][0], "content": rows[i][1], "score": float(scores[i])}
             for i in order
         ]
+
+
+# Module-level default instance + convenience functions, so every consumer
+# (main.py, file_tools.py, backup_tools.py, and any future module that needs
+# to trigger a reindex after a write) just does `import rag` and calls
+# `rag.index_codebase(...)`/`rag.search(...)` directly, rather than each one
+# separately instantiating SimpleCodeRAG or main.py handing its own instance
+# around to every other module that needs it.
+RAG_DB_PATH = os.environ.get("ATHENA_RAG_DB", "rag_index.db")
+_default_instance = None
+
+
+def _get_default_instance():
+    global _default_instance
+    if _default_instance is None:
+        _default_instance = SimpleCodeRAG(RAG_DB_PATH)
+    return _default_instance
+
+
+def index_codebase(root_dir: str = "."):
+    _get_default_instance().index_codebase(root_dir)
+
+
+def search(query: str, limit: int = 3) -> List[Dict[str, Any]]:
+    return _get_default_instance().search(query, limit=limit)

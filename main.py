@@ -31,6 +31,7 @@ import argparse
 from fastapi import FastAPI, UploadFile, File, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse, JSONResponse, FileResponse
 from rag import SimpleCodeRAG
+import rag
 import laya_gate
 import settings
 import task_context
@@ -43,9 +44,10 @@ import skills
 import annotations
 import auth_routes
 import tool_output
-
-RAG_DB_PATH = os.environ.get("ATHENA_RAG_DB", "rag_index.db")
-rag = SimpleCodeRAG(RAG_DB_PATH)
+import bash_tools
+import backup_tools
+import file_tools
+import web_tools
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -74,6 +76,7 @@ app.include_router(voice.router)
 app.include_router(skills.router)
 app.include_router(annotations.router)
 app.include_router(auth_routes.router)
+app.include_router(file_tools.router)
 app.add_middleware(auth_routes.AuthMiddleware)
 
 BASE_SYSTEM_PROMPT = (
@@ -184,7 +187,7 @@ CASUAL_AGENT_SECTIONS = [
 # Note: there is deliberately no dead-tool STRICT RULE here about grep -n
 # vs. read_file for line-location questions -- casual mode's tool list
 # never includes bash or read_file (see _get_mode_tools; only workspace/
-# athena_delegation modes get BASH_TOOL_SCHEMAS/FILE_TOOL_SCHEMAS), so an
+# athena_delegation modes get bash_tools.BASH_TOOL_SCHEMAS/file_tools.FILE_TOOL_SCHEMAS), so an
 # instruction to use them here was always unreachable. That guidance
 # already lives, correctly scoped, in CODING_HARNESS_SECTIONS'
 # tool_selection section below, where those tools actually exist.
@@ -414,9 +417,9 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
     start."""
     tools = lcm_client.get_lcm_tools() + PLAN_TOOL_SCHEMAS
     if req.search_url:
-        tools = tools + WEB_TOOL_SCHEMAS
+        tools = tools + web_tools.WEB_TOOL_SCHEMAS
     if mode in ("workspace", "athena_delegation"):
-        tools = tools + BASH_TOOL_SCHEMAS + BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS
+        tools = tools + bash_tools.BASH_TOOL_SCHEMAS + backup_tools.BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS
     if skills.scan_skills():
         tools = tools + skills.SKILL_TOOL_SCHEMAS
     if mode == "athena_delegation":
@@ -709,815 +712,6 @@ def mkdir_workspace(req: MkdirIn):
         return {"error": f"Could not create folder: {e}"}
 
 
-@app.get("/api/workspace/files")
-def list_workspace_files(workspace: str, path: str = ""):
-    """List files and directories (with sizes) at a path relative to the
-    given workspace root, for the file-browser panel. Reuses
-    _resolve_workspace_path so the UI browser shares the same confinement
-    boundary as the agent's list_files/read_file/write_file/edit_file tools."""
-    if not workspace:
-        return {"error": "No workspace set."}
-    try:
-        target = _resolve_workspace_path(workspace, path)
-    except ValueError as e:
-        return {"error": str(e)}
-    if not os.path.isdir(target):
-        return {"error": f"Not a directory: {path}"}
-    try:
-        entries = []
-        for name in sorted(os.listdir(target)):
-            full = os.path.join(target, name)
-            is_dir = os.path.isdir(full)
-            try:
-                size = None if is_dir else os.path.getsize(full)
-            except OSError:
-                size = None
-            entries.append({"name": name, "type": "dir" if is_dir else "file", "size": size})
-        return {"path": path, "entries": entries}
-    except PermissionError:
-        return {"error": f"Permission denied: {path}"}
-
-
-@app.get("/api/workspace/read")
-def read_workspace_file(workspace: str, path: str = ""):
-    """Read a file's content for the file-browser panel's preview,
-    reusing the same _read_file implementation the agent's read_file
-    tool uses."""
-    if not workspace:
-        return {"error": "No workspace set."}
-    return _read_file(workspace, path, offset)
-
-@app.delete("/api/workspace/delete")
-def delete_workspace_entry(workspace: str, path: str = ""):
-    """Deletes a file or directory (recursively) at a path within the
-    given workspace, for the file browser panel's delete action --
-    reuses the same _resolve_workspace_path confinement check every
-    other file tool uses, so this can never delete anything outside
-    the workspace regardless of what path is passed."""
-    if not workspace:
-        return {"error": "No workspace set."}
-    if not path:
-        return {"error": "Refusing to delete the workspace root itself."}
-    try:
-        target = _resolve_workspace_path(workspace, path)
-        if target == os.path.realpath(workspace):
-            return {"error": "Refusing to delete the workspace root itself."}
-        if os.path.isdir(target):
-            import shutil
-            shutil.rmtree(target)
-        elif os.path.isfile(target):
-            os.remove(target)
-        else:
-            return {"error": f"Not found: {path}"}
-        return {"ok": True}
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"delete failed: {e}"}
-
-
-WEB_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web and automatically fetch readable content from the top results -- returns full page text, not just snippets, so you usually don't need a separate web_fetch call after this. Use for anything current/external not already in context.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query."},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_fetch",
-            "description": "Fetch and extract readable text from a specific URL. Use after web_search to read a promising result, or when given a URL directly.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "The URL to fetch."},
-                },
-                "required": ["url"],
-            },
-        },
-    },
-]
-
-def _web_search(search_url: str, query: str):
-    """Search then auto-fetch the top results concurrently, keeping only
-    the ones that actually parsed to real content -- ports Odysseus's
-    proven approach (services/search/core.py comprehensive_web_search):
-    the model never has to decide "try another URL", since failed/blocked
-    fetches are silently filtered out before it ever sees the response.
-    This is what fixed Odysseus's own indecisive-looping problem."""
-    try:
-        resp = httpx.get(f"{search_url.rstrip('/')}/search", params={"q": query, "format": "json"}, timeout=15)
-        if resp.status_code != 200:
-            return {"error": f"SearXNG responded with HTTP {resp.status_code}"}
-        results = resp.json().get("results", [])[:5]
-        if not results:
-            return {"error": "No search results found."}
-
-        import concurrent.futures
-        fetched = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_result = {
-                executor.submit(_web_fetch, r.get("url", "")): r
-                for r in results if r.get("url")
-            }
-            for future in concurrent.futures.as_completed(future_to_result):
-                r = future_to_result[future]
-                try:
-                    fetch_result = future.result()
-                    if "content" in fetch_result and fetch_result["content"]:
-                        fetched.append({
-                            "title": r.get("title"),
-                            "url": r.get("url"),
-                            "content": fetch_result["content"][:2500],
-                        })
-                except Exception:
-                    pass  # a single failed fetch shouldn't fail the whole search
-
-        if not fetched:
-            # Every candidate failed to fetch -- fall back to snippets alone
-            # rather than returning nothing at all.
-            return [{"title": r.get("title"), "url": r.get("url"), "snippet": r.get("content")} for r in results]
-
-        return fetched
-    except Exception as e:
-        return {"error": f"Search failed: {e}"}
-
-import re as _re_webfetch
-
-def _web_fetch(url: str):
-    """Fetch and extract clean readable text -- uses BeautifulSoup for
-    real HTML parsing (same technique Odysseus uses), not a regex
-    tag-strip. A regex-only approach leaves nav/ad/script text mixed
-    into the output, which was confusing local models into treating
-    real content as unreliable. Structural elements (lists, headings)
-    get separators so the model can still parse a readable shape.
-
-    A bare GitHub repo root URL (github.com/owner/repo, no further
-    path) gets rewritten to fetch that repo's raw README.md directly
-    from raw.githubusercontent.com instead. Confirmed directly by
-    testing: modern GitHub repo pages are React-rendered SPAs whose
-    real content (README, file tree) only loads via JavaScript --
-    fetching the raw HTML here just returns UI chrome ('You signed in
-    with another tab...', 'Uh oh! There was an error while loading')
-    which is non-empty so it survives this function's own empty-text
-    check, but is useless to the model. The raw README route has none
-    of that problem since it's a plain text file, no rendering at all."""
-    github_repo_match = _re_webfetch.match(r"^https?://github\.com/([^/]+)/([^/]+)/?$", url)
-    if github_repo_match:
-        owner, repo = github_repo_match.group(1), github_repo_match.group(2)
-        for branch in ("main", "master"):
-            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md"
-            try:
-                raw_resp = httpx.get(raw_url, timeout=15, follow_redirects=True)
-                if raw_resp.status_code == 200 and raw_resp.text.strip():
-                    header = f"# {owner}/{repo} README\nSource: {raw_url}\n\n"
-                    return {"url": raw_url, "content": (header + raw_resp.text)[:6000]}
-            except Exception:
-                pass
-        # Both branches failed -- fall through to the normal HTML fetch
-        # below rather than giving up, since some repos use a different
-        # default branch name entirely.
-
-    # A /blob/branch/path URL is GitHub's own viewer for one specific
-    # file -- same React-SPA rendering problem as the repo root case
-    # above, just for a single file instead of the README. The branch
-    # is already given in the URL itself here, so no guessing between
-    # main/master is needed the way it is for the repo-root case.
-    blob_match = _re_webfetch.match(r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$", url)
-    if blob_match:
-        owner, repo, branch, file_path = blob_match.groups()
-        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
-        try:
-            raw_resp = httpx.get(raw_url, timeout=15, follow_redirects=True)
-            if raw_resp.status_code == 200 and raw_resp.text.strip():
-                header = f"# {owner}/{repo} -- {file_path}\nSource: {raw_url}\n\n"
-                return {"url": raw_url, "content": (header + raw_resp.text)[:6000]}
-        except Exception:
-            pass
-        # Raw fetch failed -- fall through to the normal HTML fetch below.
-
-    try:
-        from bs4 import BeautifulSoup
-        resp = httpx.get(url, timeout=15, follow_redirects=True, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; AthenaBot/1.0)"
-        })
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
-            tag.decompose()
-
-        title_tag = soup.find("title")
-        title = title_tag.get_text(strip=True) if title_tag else ""
-
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        text = "\n".join(lines)
-
-        if not text:
-            return {"error": f"web_fetch: {url}: no readable text content (page may need JS)"}
-
-        header = f"# {title}\nSource: {url}\n\n" if title else f"Source: {url}\n\n"
-        output = header + text
-        return {"url": url, "content": output[:6000]}
-    except Exception as e:
-        return {"error": f"Fetch failed: {e}"}
-
-
-# Read-only shell access. Structured, not a raw command string: the
-# model supplies a bare command name plus a list of arguments, which
-# are passed directly to subprocess.run with shell=False -- no shell
-# is ever invoked at all, so shell metacharacters (;, &&, |, $(...),
-# backticks, redirection) have no special meaning whatsoever if they
-# appear in an argument; they're just literal text passed to the
-# allowlisted command itself. This is a structural guarantee against
-# command injection, not a blocklist of dangerous patterns to detect --
-# there's no shell present for an injection to exploit in the first
-# place. On top of that: only specific, genuinely read-only commands
-# are allowed at all, and specific dangerous flags are rejected even
-# for allowed commands (sed's -i, find's -delete/-exec), since those
-# would give write access through a "read" tool otherwise. This tool
-# never requires a workspace and is never confined to one -- it can
-# read anywhere this process has filesystem access, matching the
-# read-anywhere/write-only-in-workspace split this design is built on.
-BASH_ALLOWED_COMMANDS = {
-    "ls", "cat", "grep", "find", "head", "tail", "wc", "pwd",
-    "sed", "stat", "diff", "sort", "uniq", "file", "tree", "du", "date",
-}
-BASH_DANGEROUS_FLAGS = {
-    "sed": {"-i", "--in-place"},
-    "find": {"-delete", "-exec", "-execdir", "-fprintf", "-fprint", "-fprint0", "-fls"},
-}
-
-def _execute_readonly_bash(command: str, args: list, cwd: str = ""):
-    if not command:
-        return {"error": "Missing 'command'. Example: to run grep -n pattern file.txt, set command to 'grep' (just the program name) and args to ['-n', 'pattern', 'file.txt'] (a list of separate arguments)."}
-    if not isinstance(command, str) or " " in command or command.startswith("[") or command.startswith('"'):
-        return {
-            "error": "'" + str(command) + "' looks like a full command line or a JSON array, not a bare program name. "
-            "command must be ONLY the program name by itself, e.g. 'grep' -- never the whole command line, "
-            "and never the command name repeated inside args. Everything after the program name goes in "
-            "args as separate list items instead: to run grep -n pattern file.txt, use "
-            "command='grep' and args=['-n', 'pattern', 'file.txt']."
-        }
-    if command not in BASH_ALLOWED_COMMANDS:
-        return {"error": "Command '" + command + "' is not allowed. Allowed commands: " + ", ".join(sorted(BASH_ALLOWED_COMMANDS))}
-    dangerous = BASH_DANGEROUS_FLAGS.get(command, set())
-    shell_operators = ("|", ">", "<", "&", ";", "$(", "`", "&&", "||")
-    for arg in args:
-        if not isinstance(arg, str):
-            return {"error": "All arguments must be strings."}
-        if any(op in arg for op in shell_operators):
-            return {
-                "error": "Argument '" + arg + "' contains a shell operator (pipe, redirect, chaining, or substitution). "
-                "There is no shell here at all -- this tool runs the program directly, so operators like |, >, 2>/dev/null, "
-                "&&, or $(...) have no special meaning and can't do what they'd do in a real shell; they'd just be passed "
-                "as literal, meaningless text to the program. Make separate bash calls instead and read each result "
-                "yourself -- for example, to ignore a 'not found' error from find, just call find normally and ignore "
-                "any error in the response, rather than trying to redirect it away."
-            }
-        if arg in dangerous or any(arg.startswith(d) for d in dangerous):
-            return {"error": "Argument '" + arg + "' is not allowed for '" + command + "' -- this tool is strictly read-only, no in-place edits or deletions."}
-    try:
-        result = subprocess.run(
-            [command] + list(args),
-            capture_output=True,
-            text=True,
-            timeout=15,
-            shell=False,
-            cwd=cwd if cwd else None,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += "\n[stderr]\n" + result.stderr
-        return {"command": command, "args": args, "output": output[:10000], "exit_code": result.returncode}
-    except FileNotFoundError:
-        return {"error": "Command '" + command + "' not found on this system."}
-    except subprocess.TimeoutExpired:
-        return {"error": "Command timed out after 15 seconds."}
-    except Exception as e:
-        return {"error": f"bash execution failed: {e}"}
-
-
-def _rm_is_recursive(args: list) -> bool:
-    for a in args:
-        if a == "--recursive":
-            return True
-        if a.startswith("-") and not a.startswith("--") and "r" in a[1:].lower():
-            return True
-    return False
-
-
-def _rm_targets_broad(args: list) -> bool:
-    positional = [a for a in args if not a.startswith("-")]
-    broad = {".", "/", "*", "..", ""}
-    return (not positional) or any(p in broad for p in positional)
-
-
-# Write-capable shell access, confined to a single workspace. Like the
-# read-only bash tool, this never invokes a real shell (shell=False),
-# so shell metacharacters in an argument are inert literal text, not
-# injection surface. Confinement here is structurally weaker than the
-# file tools' _resolve_workspace_path though: cwd is fixed to the
-# workspace root, but individual arguments aren't path-validated (no
-# reliable way to tell "this argument is a path" from "this argument
-# is just a string" across an arbitrary allowlisted command). The
-# actual safety boundary is: a small allowlist of genuinely useful
-# commands, cwd pinned to the workspace, and explicit rejection of the
-# two clearly destructive patterns (broad recursive rm, force-push) --
-# not a guarantee that no path outside the workspace can ever be named.
-BASH_EXEC_ALLOWED_COMMANDS = {
-    "npm", "npx", "yarn", "pip", "pip3", "python3", "node", "pytest",
-    "git", "make", "mkdir", "touch", "mv", "cp", "rm",
-}
-BASH_EXEC_TIMEOUT_SECONDS = 300
-
-
-def _validate_bash_exec_call(command: str, args: list):
-    """Shared safety validation for both the blocking and background
-    forms of bash_exec -- same allowlist, same shell-operator block,
-    same rm/force-push refusals, so a background command gets exactly
-    the same structural guarantees a blocking one does. Returns an
-    error dict if invalid, or None if the call is safe to run."""
-    if not command:
-        return {"error": "Missing 'command'. Example: to run npm install, set command to 'npm' (just the program name) and args to ['install'] (a list of separate arguments)."}
-    if not isinstance(command, str) or " " in command or command.startswith("[") or command.startswith('"'):
-        return {
-            "error": "'" + str(command) + "' looks like a full command line or a JSON array, not a bare program name. "
-            "command must be ONLY the program name by itself, e.g. 'npm' -- never the whole command line, "
-            "and never the command name repeated inside args. Everything after the program name goes in "
-            "args as separate list items instead: to run npm install --save-dev foo, use "
-            "command='npm' and args=['install', '--save-dev', 'foo']."
-        }
-    if command not in BASH_EXEC_ALLOWED_COMMANDS:
-        return {"error": "Command '" + command + "' is not allowed. Allowed commands: " + ", ".join(sorted(BASH_EXEC_ALLOWED_COMMANDS))}
-    shell_operators = ("|", ">", "<", "&", ";", "$(", "`", "&&", "||")
-    for arg in args:
-        if not isinstance(arg, str):
-            return {"error": "All arguments must be strings."}
-        if any(op in arg for op in shell_operators):
-            return {
-                "error": "Argument '" + arg + "' contains a shell operator (pipe, redirect, chaining, or substitution). "
-                "There is no shell here at all -- this tool runs the program directly, so operators like |, >, 2>/dev/null, "
-                "&&, or $(...) have no special meaning and can't do what they'd do in a real shell; they'd just be passed "
-                "as literal, meaningless text to the program. Make separate bash_exec calls instead."
-            }
-    if command == "rm" and _rm_is_recursive(args) and _rm_targets_broad(args):
-        return {"error": "Refusing: recursive rm with a broad or missing target (e.g. '.', '/', '*', '..', or no target at all). Name specific files or directories instead."}
-    if command == "git" and args and args[0] == "push":
-        force_flags = {"-f", "--force", "--force-with-lease"}
-        if any(a in force_flags or a.startswith("--force") for a in args):
-            return {"error": "Refusing: force-push is blocked. Run a normal 'git push' instead."}
-    return None
-
-
-ATHENA_SANDBOX_IMAGE = "athena-sandbox:latest"
-
-
-def _docker_sandbox_available():
-    """Checked live on every call rather than cached -- a stale cached
-    'yes' would be exactly the false-confidence failure mode a sandbox
-    can't afford: if Docker or the image genuinely isn't there right
-    now, bash_exec must say so plainly and refuse, never silently run
-    unsandboxed."""
-    try:
-        result = subprocess.run(
-            ["docker", "image", "inspect", ATHENA_SANDBOX_IMAGE],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _build_docker_sandbox_cmd(command, args, workspace):
-    """Every bash_exec command runs inside this container, not
-    directly on the host -- allowlisting/pattern-blocking in
-    _validate_bash_exec_call decides WHETHER a command runs; this
-    decides what it can actually reach once it does. Hardened per
-    DeepSeek Harness's own real-world Docker practice: dropped
-    capabilities, no privilege escalation, read-only root filesystem
-    (only the mounted workspace and /tmp are writable), no Docker
-    socket, no credential paths, nothing beyond the workspace itself
-    visible. Network stays available (install-type commands need it);
-    filesystem containment is the actual protection here."""
-    real_workspace = os.path.realpath(workspace)
-    uid, gid = os.getuid(), os.getgid()
-    return [
-        "docker", "run", "--rm",
-        "--network", "bridge",
-        "-v", f"{real_workspace}:{real_workspace}",
-        "-w", real_workspace,
-        "--user", f"{uid}:{gid}",
-        "-e", "HOME=/tmp",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges=true",
-        "--read-only",
-        "--tmpfs", "/tmp",
-        "--memory", "512m",
-        "--cpus", "1",
-        "--pids-limit", "100",
-        ATHENA_SANDBOX_IMAGE,
-        command,
-    ] + list(args)
-
-
-def _execute_write_bash(command: str, args: list, workspace: str):
-    if not workspace:
-        return {"error": "bash_exec requires an active workspace."}
-    err = _validate_bash_exec_call(command, args)
-    if err:
-        return err
-    if not _docker_sandbox_available():
-        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
-    try:
-        result = subprocess.run(
-            _build_docker_sandbox_cmd(command, args, workspace),
-            capture_output=True,
-            text=True,
-            timeout=BASH_EXEC_TIMEOUT_SECONDS,
-            shell=False,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += "\n[stderr]\n" + result.stderr
-        return {"command": command, "args": args, "output": output[:10000], "exit_code": result.returncode}
-    except FileNotFoundError:
-        return {"error": "Command '" + command + "' not found on this system."}
-    except subprocess.TimeoutExpired:
-        return {"error": f"Command timed out after {BASH_EXEC_TIMEOUT_SECONDS} seconds."}
-    except Exception as e:
-        return {"error": f"bash execution failed: {e}"}
-
-
-# Background command execution -- same allowlist/safety validation as
-# the blocking bash_exec above, but returns immediately with a handle
-# instead of waiting for the command to finish. Built as the deliberate
-# alternative to a real PTY: gives the actual capability a PTY exists
-# for (long-running processes, checking on progress) without losing
-# the structural safety guarantee (shell=False, no real shell ever
-# involved) that a true interactive terminal can't preserve.
-_bg_processes = {}
-_bg_processes_lock = threading.Lock()
-_bg_process_counter = [0]
-
-
-def _start_background_bash(command: str, args: list, workspace: str):
-    if not workspace:
-        return {"error": "bash_exec requires an active workspace."}
-    err = _validate_bash_exec_call(command, args)
-    if err:
-        return err
-    if not _docker_sandbox_available():
-        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
-    try:
-        proc = subprocess.Popen(
-            _build_docker_sandbox_cmd(command, args, workspace),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            shell=False,
-        )
-    except FileNotFoundError:
-        return {"error": "Command '" + command + "' not found on this system."}
-    except Exception as e:
-        return {"error": f"Failed to start background process: {e}"}
-
-    with _bg_processes_lock:
-        _bg_process_counter[0] += 1
-        process_id = str(_bg_process_counter[0])
-        entry = {"proc": proc, "command": command, "args": args, "output": "", "output_lock": threading.Lock(), "started_at": time.time()}
-        _bg_processes[process_id] = entry
-
-    def _drain():
-        try:
-            for line in proc.stdout:
-                with entry["output_lock"]:
-                    entry["output"] += line
-                    if len(entry["output"]) > 50000:
-                        entry["output"] = entry["output"][-50000:]
-        except Exception:
-            pass
-
-    threading.Thread(target=_drain, daemon=True).start()
-    return {"process_id": process_id, "command": command, "args": args, "status": "started"}
-
-
-def _check_background_bash(process_id: str):
-    entry = _bg_processes.get(str(process_id))
-    if not entry:
-        return {"error": f"No background process with id '{process_id}'. It may have already been stopped, or the id is wrong -- check with a process_id returned by a prior background-start call."}
-    proc = entry["proc"]
-    with entry["output_lock"]:
-        output = entry["output"]
-    exit_code = proc.poll()
-    return {
-        "process_id": process_id, "command": entry["command"], "args": entry["args"],
-        "running": exit_code is None, "exit_code": exit_code, "output": output[-10000:],
-    }
-
-
-def _stop_background_bash(process_id: str, force: bool = False):
-    entry = _bg_processes.get(str(process_id))
-    if not entry:
-        return {"error": f"No background process with id '{process_id}'."}
-    proc = entry["proc"]
-    if proc.poll() is not None:
-        return {"error": f"Process '{process_id}' has already exited (code {proc.poll()})."}
-    try:
-        proc.kill() if force else proc.terminate()
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
-    except Exception as e:
-        return {"error": f"Failed to stop process: {e}"}
-    return {"process_id": process_id, "stopped": True, "exit_code": proc.poll()}
-
-
-def _read_backup_manifest():
-    manifest_path = os.path.join(_BACKUP_ROOT, "manifest.jsonl")
-    if not os.path.isfile(manifest_path):
-        return []
-    entries = []
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries
-
-
-def _restore_one_entry(entry):
-    """Restore a single manifest entry back to its original path,
-    backing up whatever's currently there first (via the same
-    content-addressable _backup_file) so a restore is never a
-    one-way, unrecoverable action -- if it turns out to be the wrong
-    version, the pre-restore state is itself just another backup to
-    restore from."""
-    target_path = entry["path"]
-    content_hash = entry["hash"]
-    object_path = os.path.join(_BACKUP_ROOT, "objects", content_hash[:2], content_hash[2:] + ".gz")
-    if not os.path.isfile(object_path):
-        return {"path": target_path, "error": f"Backup object missing on disk for hash {content_hash}."}
-    pre_restore_backup = None
-    if os.path.isfile(target_path):
-        pre_restore_backup = _backup_one_file(target_path, None, [])
-    os.makedirs(os.path.dirname(target_path), exist_ok=True) if os.path.dirname(target_path) else None
-    with gzip.open(object_path, "rb") as f:
-        content = f.read()
-    with open(target_path, "wb") as f:
-        f.write(content)
-    try:
-        rag.index_codebase(".")
-    except Exception as e:
-        print(f"[RAG] auto-reindex after restore failed: {e}", flush=True)
-    return {
-        "path": target_path,
-        "restored_hash": content_hash,
-        "restored_from_timestamp": entry["timestamp"],
-        "bytes": len(content),
-        "pre_restore_backup_hash": pre_restore_backup["hash"] if pre_restore_backup else None,
-    }
-
-
-def _restore_file(path: str = "", snapshot_id: str = "", restore_hash: str = "", restore_timestamp: float = None):
-    if bool(path) == bool(snapshot_id):
-        return {"error": "Provide exactly one of 'path' or 'snapshot_id', not both and not neither."}
-
-    entries = _read_backup_manifest()
-
-    if snapshot_id:
-        matches = [e for e in entries if e.get("snapshot_id") == snapshot_id]
-        if not matches:
-            return {"error": f"No backups found for snapshot_id '{snapshot_id}'."}
-        results = [_restore_one_entry(e) for e in matches]
-        return {"snapshot_id": snapshot_id, "files_restored": len(results), "results": results}
-
-    matches = [e for e in entries if e.get("path") == path]
-    if not matches:
-        return {"error": f"No backups found for path '{path}'."}
-    if restore_hash:
-        chosen = next((e for e in matches if e.get("hash") == restore_hash), None)
-        if not chosen:
-            return {"error": f"No backup found for path '{path}' with hash '{restore_hash}'."}
-    elif restore_timestamp is not None:
-        eligible = [e for e in matches if e["timestamp"] <= restore_timestamp]
-        if not eligible:
-            return {"error": f"No backup found for path '{path}' at or before timestamp {restore_timestamp}."}
-        chosen = max(eligible, key=lambda e: e["timestamp"])
-    else:
-        chosen = max(matches, key=lambda e: e["timestamp"])
-
-    return _restore_one_entry(chosen)
-
-
-BASH_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Run a read-only shell command. Only these commands are allowed: ls, cat, grep, find, head, tail, wc, pwd, sed, stat, diff, sort, uniq, file, tree, du, date. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. sed's -i flag and find's -delete/-exec flags are blocked; this tool can never write or modify anything, on any file, regardless of workspace. Works anywhere on the filesystem this process can read, not limited to any workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The bare command name, e.g. 'grep' or 'ls'. No path, no shell operators."},
-                    "args": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Arguments to the command, each as a separate array element (e.g. [\"-n\", \"pattern\", \"file.txt\"] for grep -n pattern file.txt).",
-                    },
-                },
-                "required": ["command", "args"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash_exec",
-            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Runs inside an isolated sandbox container: network access works (git clone/push over HTTPS, npm/pip installs), but nothing outside the mounted workspace is visible or writable -- no host SSH keys, no credential files, no other directories. If a command fails specifically because it can't find or write to something outside the workspace, that's this containment working as intended, not a bug to work around. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The bare command name, e.g. 'npm' or 'git'. No path, no shell operators."},
-                    "args": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Arguments to the command, each as a separate array element (e.g. [\"install\"] for npm install, or [\"commit\", \"-m\", \"fix bug\"] for git commit -m \"fix bug\").",
-                    },
-                },
-                "required": ["command", "args"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash_exec_start",
-            "description": "Start a bash_exec command in the background instead of waiting for it to finish -- for anything long-running (a dev server, a build watcher) or where you need to check progress partway through. Same allowlist and safety rules as bash_exec. Returns a process_id immediately; use bash_exec_check to see output so far, and bash_exec_stop to end it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The bare command name, e.g. 'npm'."},
-                    "args": {"type": "array", "items": {"type": "string"}, "description": "Arguments to the command, each as a separate array element."},
-                },
-                "required": ["command", "args"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash_exec_check",
-            "description": "Check a background command started with bash_exec_start -- returns its output so far and whether it's still running.",
-            "parameters": {
-                "type": "object",
-                "properties": {"process_id": {"type": "string", "description": "The process_id returned by bash_exec_start."}},
-                "required": ["process_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash_exec_stop",
-            "description": "Stop a background command started with bash_exec_start. Tries a graceful stop first unless force is true.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "process_id": {"type": "string", "description": "The process_id returned by bash_exec_start."},
-                    "force": {"type": "boolean", "description": "If true, kill immediately instead of asking it to stop gracefully first."},
-                },
-                "required": ["process_id"],
-            },
-        },
-    },
-]
-
-FILE_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files and directories at a path within the workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path relative to workspace root. Use '.' for the root."}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a file's contents. Large files are capped at 20000 characters per call -- if the response has has_more: true, call again with offset set to the returned next_offset to continue reading from where you left off, rather than assuming you've seen the whole file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "offset": {"type": "integer", "description": "Character offset to start reading from. Omit or use 0 to start from the beginning."},
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Create a new file, or overwrite an existing one entirely. Use edit_file instead if you only need to change part of an existing file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "content": {"type": "string", "description": "Full file content to write."},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Replace one exact occurrence of text in an existing file. old_text must match uniquely -- include enough surrounding context if the text could appear more than once.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "old_text": {"type": "string", "description": "Exact text to find and replace. Must appear exactly once in the file."},
-                    "new_text": {"type": "string", "description": "Replacement text."},
-                },
-                "required": ["path", "old_text", "new_text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "replace_lines",
-            "description": "Replace an exact range of lines in a file by line number, given the new content to put there -- use this instead of edit_file whenever you already know the exact line numbers (e.g. from grep -n or sed -n via bash), since it never requires reproducing old text byte-for-byte and so can't fail on a whitespace mismatch. Requires expected_content: what you believe is currently at that exact line range, used as a safety check before applying anything. If your line numbers turn out to be stale, this will try to find the expected content nearby and correct itself automatically, or fail safely and show you the real current content rather than corrupting the file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "start_line": {"type": "integer", "description": "First line to replace (1-indexed)."},
-                    "end_line": {"type": "integer", "description": "Last line to replace, inclusive (1-indexed). Same as start_line to replace a single line."},
-                    "new_content": {"type": "string", "description": "The new text to put in place of that line range. This completely replaces the range, it is not inserted alongside it."},
-                    "expected_content": {"type": "string", "description": "What you believe is currently at lines start_line-end_line, exactly as you last saw it. Used to verify your line numbers are still accurate before making any change."},
-                },
-                "required": ["path", "start_line", "end_line", "new_content", "expected_content"],
-            },
-        },
-    },
-]
-
-BACKUP_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "backup_file",
-            "description": "Save a copy of a file's (or an entire directory's) current content before making changes to it, so it can be recovered later if something goes wrong. Works on a single file or a whole directory -- pass a directory path to back up everything inside it (recursively, skipping .git/node_modules/build-output-style directories) as one coherent snapshot. Deduplicated by content -- backing up something whose content hasn't actually changed since a previous backup costs no extra storage. Use this before editing anything whose current state matters and hasn't already been captured (e.g. by version control) this turn.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Absolute path to the file or directory to back up (e.g. /home/user/project or /home/user/project/main.py)."}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "restore_file",
-            "description": "Restore a previously backed-up file (or an entire directory snapshot) back to disk, undoing a change by bringing back an earlier version. Provide EITHER 'path' (restores that one file's most recent backup, or a specific one if 'restore_hash' or 'restore_timestamp' is also given) OR 'snapshot_id' (restores every file from that whole-directory backup at once) -- never both. Whatever is currently at the target path is itself backed up first, automatically, before being overwritten, so a restore is never a one-way action.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Absolute path to the single file to restore. Omit if using snapshot_id instead."},
-                    "snapshot_id": {"type": "string", "description": "Restore an entire directory snapshot (from a directory backup_file call) back to that exact point in time. Omit if using path instead."},
-                    "restore_hash": {"type": "string", "description": "Optional: restore this exact backed-up version of 'path' by its content hash, instead of the most recent one."},
-                    "restore_timestamp": {"type": "number", "description": "Optional: restore the most recent backup of 'path' that was taken at or before this unix timestamp, instead of the latest one overall."},
-                },
-                "required": [],
-            },
-        },
-    },
-]
 
 # Mode-independent -- available in casual, workspace, and athena_delegation
 # alike (see _get_mode_tools), unlike every other schema list here which is
@@ -1584,277 +778,6 @@ RAG_TOOL_SCHEMAS = [
         },
     },
 ]
-
-
-def _resolve_workspace_path(workspace: str, rel_path: str) -> str:
-    """Resolve a model-supplied relative path against the workspace root,
-    refusing to ever resolve outside it. This is the actual safety
-    boundary for file tools -- without it, a path like '../../etc/passwd'
-    or an absolute path would let the model read/write anywhere on the
-    filesystem the Athena process has access to, not just the intended
-    workspace directory."""
-    workspace_root = os.path.realpath(workspace)
-    candidate = os.path.realpath(os.path.join(workspace_root, rel_path or "."))
-    if candidate != workspace_root and not candidate.startswith(workspace_root + os.sep):
-        raise ValueError(f"Path '{rel_path}' resolves outside the workspace, refusing.")
-    return candidate
-
-def _list_files(workspace: str, rel_path: str):
-    try:
-        target = _resolve_workspace_path(workspace, rel_path)
-        if not os.path.isdir(target):
-            return {"error": f"Not a directory: {rel_path}"}
-        entries = []
-        for name in sorted(os.listdir(target)):
-            full = os.path.join(target, name)
-            entries.append({"name": name, "type": "dir" if os.path.isdir(full) else "file"})
-        return {"path": rel_path, "entries": entries}
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"list_files failed: {e}"}
-
-_READ_FILE_CHUNK_SIZE = 20000
-
-def _read_file(workspace: str, rel_path: str, offset: int = 0):
-    try:
-        target = _resolve_workspace_path(workspace, rel_path)
-        if not os.path.isfile(target):
-            return {"error": f"Not a file: {rel_path}"}
-        with open(target, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        offset = max(0, offset or 0)
-        total_chars = len(content)
-        chunk = content[offset:offset + _READ_FILE_CHUNK_SIZE]
-        next_offset = offset + len(chunk)
-        has_more = next_offset < total_chars
-        result = {"path": rel_path, "content": chunk, "total_chars": total_chars, "has_more": has_more}
-        if has_more:
-            result["next_offset"] = next_offset
-        return result
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"read_file failed: {e}"}
-
-def _write_file(workspace: str, rel_path: str, file_content: str):
-    try:
-        target = _resolve_workspace_path(workspace, rel_path)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(file_content)
-        return {"path": rel_path, "written": True, "bytes": len(file_content)}
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"write_file failed: {e}"}
-
-def _edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
-    try:
-        target = _resolve_workspace_path(workspace, rel_path)
-        if not os.path.isfile(target):
-            return {"error": f"Not a file: {rel_path}"}
-        with open(target, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        count = content.count(old_text)
-        if count == 0:
-            return {"error": "old_text not found in file"}
-        if count > 1:
-            return {"error": f"old_text appears {count} times -- must be unique, add more context"}
-        content = content.replace(old_text, new_text)
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(content)
-        try:
-            rag.index_codebase(workspace)
-        except Exception as e:
-            print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
-        return {"path": rel_path, "edited": True}
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"edit_file failed: {e}"}
-
-# Stored next to Athena's own app data (pins.db, tasks.db, etc.), never
-# inside a workspace -- so a backup can never be accidentally
-# git-committed, wiped if the workspace gets reset/deleted, or clutter
-# the actual project directory the user is working in.
-_BACKUP_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "file_backups")
-
-# Skipped when backing up a whole directory -- either already under
-# their own version control, or fully regeneratable, so backing them
-# up would just burn storage and time for no real recovery value.
-_BACKUP_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache", "dist", "build", ".next"}
-
-def _backup_one_file(abs_path, snapshot_id, manifest_lines):
-    """The actual per-file content-addressable backup step, factored
-    out so both a single-file and a whole-directory backup share the
-    exact same logic and guarantees, rather than the directory case
-    reimplementing it separately. Appends one manifest line (not yet
-    written to disk) to manifest_lines and returns a small per-file
-    result dict; the caller decides when to actually flush the batch."""
-    with open(abs_path, "rb") as f:
-        raw = f.read()
-    content_hash = hashlib.sha256(raw).hexdigest()
-    objects_dir = os.path.join(_BACKUP_ROOT, "objects", content_hash[:2])
-    object_path = os.path.join(objects_dir, content_hash[2:] + ".gz")
-    already_existed = os.path.isfile(object_path)
-    if not already_existed:
-        os.makedirs(objects_dir, exist_ok=True)
-        with gzip.open(object_path, "wb") as f:
-            f.write(raw)
-    manifest_lines.append(json.dumps({
-        "path": abs_path,
-        "hash": content_hash,
-        "timestamp": time.time(),
-        "bytes": len(raw),
-        "snapshot_id": snapshot_id,
-    }))
-    return {"path": abs_path, "hash": content_hash, "deduplicated": already_existed, "bytes": len(raw)}
-
-def _backup_file(path: str):
-    """Content-addressable backup, the same underlying idea as Git's
-    own object store: each file's content is hashed (SHA-256) and
-    stored at a path derived entirely from that hash, gzip-compressed,
-    with a separate append-only manifest recording which path and
-    timestamp each hash belongs to. This gives two properties for
-    free, as a structural consequence of the design rather than
-    special-cased logic to enforce: (1) identical content is only
-    ever stored once no matter how many times it gets backed up, and
-    (2) a backup taken after a real edit can never collide with and
-    silently overwrite one taken before it, since different content
-    mathematically produces a different hash and therefore a
-    different storage path.
-
-    Not scoped to any workspace -- unlike the other file tools, a
-    backup is read-only with respect to its source (it only ever
-    copies content into Athena's own storage, never touches the
-    original), so the usual workspace-boundary safety check doesn't
-    apply the same way here. Works on either a single file or a whole
-    directory. For a directory, every file underneath it (skipping
-    common noise dirs) is backed up individually using the exact same
-    logic, but all tagged with one shared snapshot_id, so a future
-    restore tool can recognize them as one coherent snapshot and
-    restore the whole directory back to that exact point in time at
-    once, rather than as a pile of unrelated individual file backups."""
-    try:
-        target = os.path.realpath(os.path.expanduser(path))
-        manifest_lines = []
-        if os.path.isfile(target):
-            result = _backup_one_file(target, None, manifest_lines)
-        elif os.path.isdir(target):
-            snapshot_id = uuid.uuid4().hex
-            files_backed_up = []
-            for root, dirs, files in os.walk(target):
-                dirs[:] = [d for d in dirs if d not in _BACKUP_SKIP_DIRS]
-                for name in files:
-                    abs_path = os.path.join(root, name)
-                    files_backed_up.append(_backup_one_file(abs_path, snapshot_id, manifest_lines))
-            result = {
-                "path": target,
-                "snapshot_id": snapshot_id,
-                "files_backed_up": len(files_backed_up),
-                "files_deduplicated": sum(1 for f in files_backed_up if f["deduplicated"]),
-                "total_bytes": sum(f["bytes"] for f in files_backed_up),
-            }
-        else:
-            return {"error": f"Not a file or directory: {path}"}
-        os.makedirs(_BACKUP_ROOT, exist_ok=True)
-        manifest_path = os.path.join(_BACKUP_ROOT, "manifest.jsonl")
-        with open(manifest_path, "a", encoding="utf-8") as f:
-            for line in manifest_lines:
-                f.write(line + "\n")
-        return result
-    except Exception as e:
-        return {"error": f"backup_file failed: {e}"}
-
-def _replace_lines(workspace: str, rel_path: str, start_line, end_line, new_content: str, expected_content: str):
-    """Replaces an exact line range by number, sidestepping edit_file's
-    fragile requirement to reproduce old text byte-for-byte. Requires
-    expected_content -- a sanity check against what's actually at that
-    line range right now, not an exact-match requirement like
-    old_text. If it genuinely doesn't match (most often because an
-    earlier edit shifted the file's line numbers and these ones are
-    now stale), this does NOT blindly apply the change: it searches a
-    window around the given range for the expected content and, if
-    found once and unambiguously, applies the edit there instead and
-    reports the correction. If it's not found nearby, or found more
-    than once, it fails safely and returns the real current content at
-    that location, rather than corrupting the file the way a blind
-    line-number replacement could."""
-    try:
-        target = _resolve_workspace_path(workspace, rel_path)
-        if not os.path.isfile(target):
-            return {"error": f"Not a file: {rel_path}"}
-        with open(target, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        lines = content.split("\n")
-
-        try:
-            start_line = int(start_line)
-            end_line = int(end_line)
-        except (TypeError, ValueError):
-            return {"error": "start_line and end_line must be numbers."}
-        if start_line < 1 or start_line > len(lines) or end_line < start_line:
-            return {"error": f"Invalid range for a file with {len(lines)} lines (start_line={start_line}, end_line={end_line})."}
-
-        end = min(len(lines), end_line)
-        actual_block = "\n".join(lines[start_line - 1:end])
-        expected_stripped = (expected_content or "").strip()
-
-        if actual_block.strip() != expected_stripped:
-            window_start = max(0, start_line - 1 - 25)
-            window_end = min(len(lines), end_line + 25)
-            window_lines = lines[window_start:window_end]
-            expected_lines = expected_stripped.split("\n") if expected_stripped else []
-
-            matches = []
-            if expected_lines:
-                for offset in range(len(window_lines) - len(expected_lines) + 1):
-                    candidate = "\n".join(window_lines[offset:offset + len(expected_lines)]).strip()
-                    if candidate == expected_stripped:
-                        matches.append(window_start + offset + 1)
-
-            if len(matches) == 1:
-                real_start = matches[0]
-                real_end = real_start + len(expected_lines) - 1
-                new_lines = new_content.split("\n")
-                updated_lines = lines[:real_start - 1] + new_lines + lines[real_end:]
-                with open(target, "w", encoding="utf-8") as f:
-                    f.write("\n".join(updated_lines))
-                try:
-                    rag.index_codebase(workspace)
-                except Exception as e:
-                    print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
-                return {
-                    "path": rel_path,
-                    "edited": True,
-                    "note": f"Your line numbers ({start_line}-{end_line}) were stale, but the expected content was found unambiguously nearby at lines {real_start}-{real_end} and the edit was applied there instead. Re-check line numbers for this file before your next edit, since they may have shifted again.",
-                }
-
-            reason = "did not match" if not matches else f"was found {len(matches)} times nearby, which is ambiguous"
-            return {
-                "error": f"expected_content {reason} at or near lines {start_line}-{end_line}. Actual current content at that exact range right now:\n{actual_block}\n\nRe-verify the real content and line numbers before retrying, rather than guessing again."
-            }
-
-        new_lines = new_content.split("\n")
-        updated_lines = lines[:start_line - 1] + new_lines + lines[end:]
-        with open(target, "w", encoding="utf-8") as f:
-            f.write("\n".join(updated_lines))
-        try:
-            rag.index_codebase(workspace)
-        except Exception as e:
-            print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
-
-        delta = len(new_lines) - (end - start_line + 1)
-        result = {"path": rel_path, "edited": True, "lines_replaced": f"{start_line}-{end_line}"}
-        if delta != 0:
-            result["warning"] = f"This changed the file's line count by {delta:+d}. Any other line numbers you had for this file are now stale -- re-check before another replace_lines call."
-        return result
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"replace_lines failed: {e}"}
-
 
 # ==================== Online provider adapters ====================
 # generate()'s round loop, loop detection, tool-call execution, and
@@ -2504,21 +1427,21 @@ def chat_stream(req: ChatIn):
             except json.JSONDecodeError:
                 args = {}
         if name == "web_search":
-            return _web_search(req.search_url, args.get("query", ""))
+            return web_tools.web_search(req.search_url, args.get("query", ""))
         if name == "web_fetch":
-            return _web_fetch(args.get("url", ""))
+            return web_tools.web_fetch(args.get("url", ""))
         if name == "load_skill":
             return skills.load_skill(args.get("name", ""))
         if name == "bash":
-            return _execute_readonly_bash(args.get("command", ""), args.get("args", []), req.workspace)
+            return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), req.workspace)
         if name == "bash_exec":
-            return _execute_write_bash(args.get("command", ""), args.get("args", []), req.workspace)
+            return bash_tools.execute_write_bash(args.get("command", ""), args.get("args", []), req.workspace)
         if name == "bash_exec_start":
-            return _start_background_bash(args.get("command", ""), args.get("args", []), req.workspace)
+            return bash_tools.start_background_bash(args.get("command", ""), args.get("args", []), req.workspace)
         if name == "bash_exec_check":
-            return _check_background_bash(args.get("process_id", ""))
+            return bash_tools.check_background_bash(args.get("process_id", ""))
         if name == "bash_exec_stop":
-            return _stop_background_bash(args.get("process_id", ""), args.get("force", False))
+            return bash_tools.stop_background_bash(args.get("process_id", ""), args.get("force", False))
         if name == "get_full_tool_output":
             return tool_output.get_full_tool_output_tool(args.get("output_id", ""))
         if name == "find_definition":
@@ -2528,19 +1451,19 @@ def chat_stream(req: ChatIn):
         if name == "type_info":
             return lsp_tools.get_lsp_client(req.workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
         if name == "list_files":
-            return _list_files(req.workspace, args.get("path", "."))
+            return file_tools.list_files(req.workspace, args.get("path", "."))
         if name == "read_file":
-            return _read_file(req.workspace, args.get("path", ""), args.get("offset", 0))
+            return file_tools.read_file(req.workspace, args.get("path", ""), args.get("offset", 0))
         if name == "write_file":
-            return _write_file(req.workspace, args.get("path", ""), args.get("content", ""))
+            return file_tools.write_file(req.workspace, args.get("path", ""), args.get("content", ""))
         if name == "edit_file":
-            return _edit_file(req.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
+            return file_tools.edit_file(req.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
         if name == "replace_lines":
-            return _replace_lines(req.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
+            return file_tools.replace_lines(req.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
         if name == "backup_file":
-            return _backup_file(args.get("path", ""))
+            return backup_tools.backup_file(args.get("path", ""))
         if name == "restore_file":
-            return _restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
+            return backup_tools.restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
         if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot", "run_delegation_step", "read_scratch_file", "read_tool_call_history", "plan_delegation"):
             if req.session_id != ATHENA_BOTS_SESSION_ID:
                 return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
@@ -5500,8 +4423,8 @@ def _bot_tool_schemas(allowed_tools, hard_stopped_groups=None, ptc_enabled=False
     (see the PTC block above) alongside the individual tools, never instead
     of them -- a bot can always fall back to calling tools one at a time."""
     pool = (
-        BASH_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS
-        + WEB_TOOL_SCHEMAS + lcm_client.get_lcm_tools()
+        bash_tools.BASH_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS
+        + web_tools.WEB_TOOL_SCHEMAS + lcm_client.get_lcm_tools()
         + [s for s in BOT_DELEGATION_TOOL_SCHEMAS
            if s.get("function", {}).get("name") in ("list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt")]
     )
@@ -5533,11 +4456,11 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
     if name not in BOT_ALLOWED_TOOL_NAMES:
         return {"error": f"'{name}' is not a tool this bot is permitted to use."}
     if name == "bash":
-        return _execute_readonly_bash(args.get("command", ""), args.get("args", []), workspace)
+        return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), workspace)
     if name == "list_files":
-        return _list_files(workspace, args.get("path", "."))
+        return file_tools.list_files(workspace, args.get("path", "."))
     if name == "read_file":
-        return _read_file(workspace, args.get("path", ""), args.get("offset", 0))
+        return file_tools.read_file(workspace, args.get("path", ""), args.get("offset", 0))
     if name == "search_codebase":
         return _search_codebase(args.get("query", ""), args.get("limit", 3))
     if name == "find_definition":
@@ -5547,9 +4470,9 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
     if name == "type_info":
         return lsp_tools.get_lsp_client(workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
     if name == "web_search":
-        return _web_search(None, args.get("query", ""))
+        return web_tools.web_search(None, args.get("query", ""))
     if name == "web_fetch":
-        return _web_fetch(args.get("url", ""))
+        return web_tools.web_fetch(args.get("url", ""))
     if name == "list_bots":
         return _list_bots_tool()
     if name == "list_rooms":
@@ -5601,7 +4524,7 @@ def _tasks_conn():
 def _available_task_tools():
     names = []
     seen = set()
-    for schema in BASH_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + lcm_client.get_lcm_tools():
+    for schema in bash_tools.BASH_TOOL_SCHEMAS + web_tools.WEB_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + lcm_client.get_lcm_tools():
         fn = schema.get("function", {})
         name = fn.get("name")
         if name and name not in seen:
