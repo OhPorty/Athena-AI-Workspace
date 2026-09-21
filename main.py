@@ -17,6 +17,8 @@ import threading
 import hashlib
 import contextvars
 import queue
+import select
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List
 from datetime import datetime, timedelta
 import calendar
@@ -30,6 +32,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse,
 from starlette.middleware.base import BaseHTTPMiddleware
 from auth import AuthManager
 from rag import SimpleCodeRAG
+import laya_gate
 
 RAG_DB_PATH = os.environ.get("ATHENA_RAG_DB", "rag_index.db")
 rag = SimpleCodeRAG(RAG_DB_PATH)
@@ -97,6 +100,21 @@ def _start_bundled_lcm():
             time.sleep(0.3)
     print("[Athena] WARNING: bundled LCM did not become reachable in time", flush=True)
 OLLAMA_URL = os.environ.get("ATHENA_OLLAMA_URL", "http://localhost:11434/api/chat")
+# A flat timeout=180 applies that value to connect/read/write/pool alike,
+# which was too short on its read side: prompt evaluation on a large model
+# with a large, accumulated context (the common case in a long
+# athena_delegation turn) can genuinely take longer than 180s on its own,
+# with zero bytes sent back until it's done -- httpx's read timeout has no
+# way to distinguish that from a truly dead connection, so it fires either
+# way. Split so a dead/unreachable server is still caught fast (short
+# connect timeout) while a slow-but-alive one gets real patience on the
+# read side -- these are different failure modes and shouldn't share one
+# number. Two separate read budgets, not one shared value: a bot (sub
+# agent) round is one bounded, single-topic investigation step, while
+# Athena's own turn can legitimately run long chains of rounds on old/
+# slow hardware -- she needs real patience, a bot needs a real ceiling.
+_SUB_AGENT_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)      # 10 minutes -- one bot round
+_MAIN_AGENT_TIMEOUT = httpx.Timeout(connect=10.0, read=3600.0, write=30.0, pool=10.0)    # 1 hour -- Athena's own turn
 DEFAULT_MODEL = os.environ.get("ATHENA_DEFAULT_MODEL", "gpt-oss-20b-32k:latest")
 WHISPER_MODEL_SIZE = os.environ.get("ATHENA_WHISPER_MODEL", "large-v3-turbo")
 PIPER_VOICE_PATH = os.environ.get("ATHENA_PIPER_VOICE_PATH", "/home/ohporty/athena/voices/en_US-lessac-medium.onnx")
@@ -255,87 +273,114 @@ BASE_SYSTEM_PROMPT = (
     "You are Athena, a helpful assistant. Be direct and concise."
 )
 
-AGENT_SYSTEM_SUFFIX = (
-    " You have access to tools listed below when relevant -- use them "
-    "rather than guessing when you need real information. When presenting "
-    "structured or tabular data (schedules, forecasts, comparisons, lists "
-    "of items with multiple fields each), format it as a real markdown "
-    "table with | column | headers | -- not a run-on list of colon-separated "
-    "values. When you are asked to research a specific, named software "
-    "library, SDK, or API -- not a general topic -- do not rely on a broad "
-    "web search alone: that returns scattered blog posts and tutorials of "
-    "unknown age that get blended together into answers matching no real "
-    "version. Instead, fetch that project's own official repository or "
-    "documentation site directly (e.g. its GitHub README, its docs site) "
-    "and base your answer on that source. If the library has multiple "
-    "language SDKs for the same protocol or spec (e.g. Python, TypeScript, "
-    "Go), never mix a convention from one language's SDK into another "
-    "language's example -- python-style decorators on bare functions are "
-    "not valid syntax in JavaScript or TypeScript, and vice versa; verify "
-    "each language's example separately against that language's own SDK "
-    "docs. For every specific API claim you state as fact -- an import "
-    "path, a class name, a function signature -- name which source you "
-    "got it from, so a person reading your answer can verify it "
-    "themselves rather than trusting it blindly. When you generate a "
-    "dependency declaration for an external library -- requirements.txt, "
-    "pyproject.toml, package.json, go.mod, or any similar file -- always "
-    "pin to a specific version or a bounded range (e.g. mcp>=1.28,<2), "
-    "never an open-ended minimum like mcp>=1.0.0. An unbounded dependency "
-    "silently resolves to whatever is newest at install time, which may "
-    "be a different major version than whatever API you actually "
-    "researched and wrote code against -- exactly the kind of breaking "
-    "change that makes generated code fail long after you wrote it. When "
-    "you research a library's current API, note which version that API "
-    "belongs to, and pin your generated dependency file to that version. "
-    "When research is about building something that creates, writes, "
-    "or generates files or other output, it must explicitly name the "
-    "specific API, method, or function that performs that write (for "
-    "example fs.writeFile, or a library's own save/create method) and "
-    "show it actually being called in at least one real example -- "
-    "never leave the actual creation step implied, described only in "
-    "prose, or absent from every example while only reading, analyzing, "
-    "or reacting to things gets demonstrated. And when you are not "
-    "certain whether a capability is available or restricted in some "
-    "environment or API, say that uncertainty plainly -- never state a "
-    "confident-sounding restriction you have not actually confirmed "
-    "from a real source, since a plausible but invented rule is often "
-    "followed just as strictly as a true one, and is much harder to "
-    "catch. When a task asks you to review, verify, check, or update "
-    "something against 'the documentation' or another external source, "
-    "and you notice you only have a summary, a compacted account, or a "
-    "secondhand description of that source in your current context -- "
-    "not the source itself -- you must actually fetch the real source "
-    "before proceeding. Noticing that gap in your own reasoning and then "
-    "continuing anyway with the lossy version defeats the entire point "
-    "of checking. This applies even when the summary comes from earlier "
-    "in this same conversation, including your own memory system's "
-    "compacted context, since compaction can silently drop the exact "
-    "specific detail that turns out to matter most. When something is "
-    "built as a string or text blob representing some OTHER artifact -- "
-    "generated code in a different language, a JSON or YAML config "
-    "assembled via string concatenation, an HTML template, a SQL query "
-    "built by interpolation, a shell script written out as text, "
-    "anything where the actual product lives inside a string rather "
-    "than being written directly as its own native syntax that gets "
-    "parsed and checked as such -- the correctness of the code doing "
-    "the building is a separate question from the correctness of what "
-    "it actually produces. Validate both independently. Code that "
-    "assembles such an artifact can be flawless in its own language "
-    "while the artifact it produces is still broken, since that "
-    "artifact lives inside strings, invisible to normal review, rather "
-    "than as code your own tooling would ever check directly. STRICT RULE: for "
-    "any task about a specific location within a file -- finding a word "
-    "or pattern, identifying which line something is on, or viewing a "
-    "particular line or range -- always use bash's grep -n or sed -n "
-    "first, never read_file. read_file returns raw text with no line "
-    "numbers at all, which forces you to manually count lines to answer "
-    "any 'which line' question, and that counting is genuinely easy to "
-    "get wrong. grep -n labels every match with its real line number "
-    "directly, so no counting is ever needed and the answer can't be "
-    "off by one. Only use read_file as a last resort, when you "
-    "genuinely need a small file's full contents and grep/sed truly "
-    "can't answer the question."
-)
+# Casual-chat system-prompt suffix, built the same named-section way as
+# CODING_HARNESS_SECTIONS below -- its own independent registry, its own
+# wording. Deliberately NOT shared text with the coding-harness sections:
+# casual and coding-harness mode are separate layers by design (DeepSeek-
+# Harness-style -- a stable per-mode prompt, not one prompt with mode-
+# conditional bits spliced together), so each layer gets tuned on its own
+# terms rather than collapsed into a single shared block. This used to be
+# one 80-line unbroken paragraph mixing everything below into a single
+# run-on block with no structure between concerns -- splitting it out
+# doesn't change what it says, just how legible it is to edit later.
+CASUAL_AGENT_SECTIONS = [
+    ("casual_tool_use",
+     "You have access to tools listed below when relevant -- use them rather than guessing "
+     "when you need real information."),
+
+    ("plan_first",
+     "## When a question needs more than a couple of lookups\n"
+     "If answering something is genuinely going to take more than a couple of tool calls -- "
+     "several searches, a fetch followed by more fetches to track down the right source, "
+     "cross-checking more than one thing -- call write_plan first with the short ordered list "
+     "of what you're actually going to check, before diving in. This is a real requirement, "
+     "not a suggestion: if you make several tool calls in a row without ever calling "
+     "write_plan, every tool except write_plan disappears until you call it. It does not cap "
+     "how much you can look up afterward -- once you've written a plan, your full tool access "
+     "returns and stays available. A simple one-lookup question never needs this at all."),
+
+    ("formatting",
+     "## Formatting structured data\n"
+     "When presenting structured or tabular data (schedules, forecasts, comparisons, lists "
+     "of items with multiple fields each), format it as a real markdown table with | column | "
+     "headers | -- not a run-on list of colon-separated values."),
+
+    ("research_discipline",
+     "## Researching something real\n"
+     "When you are asked to research a specific, named software library, SDK, or API -- not "
+     "a general topic -- do not rely on a broad web search alone: that returns scattered blog "
+     "posts and tutorials of unknown age that get blended together into answers matching no "
+     "real version. Instead, fetch that project's own official repository or documentation "
+     "site directly (e.g. its GitHub README, its docs site) and base your answer on that "
+     "source. If the library has multiple language SDKs for the same protocol or spec (e.g. "
+     "Python, TypeScript, Go), never mix a convention from one language's SDK into another "
+     "language's example -- python-style decorators on bare functions are not valid syntax in "
+     "JavaScript or TypeScript, and vice versa; verify each language's example separately "
+     "against that language's own SDK docs. For every specific API claim you state as fact -- "
+     "an import path, a class name, a function signature -- name which source you got it "
+     "from, so a person reading your answer can verify it themselves rather than trusting it "
+     "blindly."),
+
+    ("dependency_pinning",
+     "## Pinning dependency versions\n"
+     "When you generate a dependency declaration for an external library -- requirements.txt, "
+     "pyproject.toml, package.json, go.mod, or any similar file -- always pin to a specific "
+     "version or a bounded range (e.g. mcp>=1.28,<2), never an open-ended minimum like "
+     "mcp>=1.0.0. An unbounded dependency silently resolves to whatever is newest at install "
+     "time, which may be a different major version than whatever API you actually researched "
+     "and wrote code against -- exactly the kind of breaking change that makes generated code "
+     "fail long after you wrote it. When you research a library's current API, note which "
+     "version that API belongs to, and pin your generated dependency file to that version."),
+
+    ("explicit_write_calls",
+     "## Naming the actual write, not just describing it\n"
+     "When research is about building something that creates, writes, or generates files or "
+     "other output, it must explicitly name the specific API, method, or function that "
+     "performs that write (for example fs.writeFile, or a library's own save/create method) "
+     "and show it actually being called in at least one real example -- never leave the "
+     "actual creation step implied, described only in prose, or absent from every example "
+     "while only reading, analyzing, or reacting to things gets demonstrated."),
+
+    ("uncertainty",
+     "## Naming uncertainty plainly\n"
+     "When you are not certain whether a capability is available or restricted in some "
+     "environment or API, say that uncertainty plainly -- never state a confident-sounding "
+     "restriction you have not actually confirmed from a real source, since a plausible but "
+     "invented rule is often followed just as strictly as a true one, and is much harder to "
+     "catch."),
+
+    ("source_fidelity",
+     "## Using the real source, not a summary of it\n"
+     "When a task asks you to review, verify, check, or update something against 'the "
+     "documentation' or another external source, and you notice you only have a summary, a "
+     "compacted account, or a secondhand description of that source in your current context "
+     "-- not the source itself -- you must actually fetch the real source before proceeding. "
+     "Noticing that gap in your own reasoning and then continuing anyway with the lossy "
+     "version defeats the entire point of checking. This applies even when the summary comes "
+     "from earlier in this same conversation, including your own memory system's compacted "
+     "context, since compaction can silently drop the exact specific detail that turns out to "
+     "matter most."),
+
+    ("generated_artifacts",
+     "## Artifacts built as strings\n"
+     "When something is built as a string or text blob representing some OTHER artifact -- "
+     "generated code in a different language, a JSON or YAML config assembled via string "
+     "concatenation, an HTML template, a SQL query built by interpolation, a shell script "
+     "written out as text, anything where the actual product lives inside a string rather "
+     "than being written directly as its own native syntax that gets parsed and checked as "
+     "such -- the correctness of the code doing the building is a separate question from the "
+     "correctness of what it actually produces. Validate both independently. Code that "
+     "assembles such an artifact can be flawless in its own language while the artifact it "
+     "produces is still broken, since that artifact lives inside strings, invisible to normal "
+     "review, rather than as code your own tooling would ever check directly."),
+]
+# Note: there is deliberately no dead-tool STRICT RULE here about grep -n
+# vs. read_file for line-location questions -- casual mode's tool list
+# never includes bash or read_file (see _get_mode_tools; only workspace/
+# athena_delegation modes get BASH_TOOL_SCHEMAS/FILE_TOOL_SCHEMAS), so an
+# instruction to use them here was always unreachable. That guidance
+# already lives, correctly scoped, in CODING_HARNESS_SECTIONS'
+# tool_selection section below, where those tools actually exist.
 
 # Coding-harness system prompt, built as named, independently
 # addressable sections assembled in order at request time -- not one
@@ -353,10 +398,18 @@ CODING_HARNESS_SECTIONS = [
 
     ("plan_before_acting",
      "## Before you act\n"
-     "For anything touching more than one file, or more than a couple of lines: state a "
-     "short plan first. A trivial one-line fix doesn't need one. A plan can be wrong once "
-     "you see real file contents -- revise it -- but skipping it and improvising edit-by-"
-     "edit is how partial, inconsistent changes happen."),
+     "For anything touching more than one file, or more than a couple of lines, or requiring "
+     "several tool calls to even figure out the shape of the problem: call write_plan first "
+     "with the short ordered list of what you're actually going to do. A trivial one-line fix "
+     "doesn't need one. This is enforced, not just advised: if you make several tool calls in "
+     "a row without ever calling write_plan, every other tool disappears until you call it -- "
+     "so don't be surprised if bash/read_file/etc. suddenly aren't in your tool list anymore; "
+     "that's this gate, not an error. It never reduces how much you can actually do -- once "
+     "you've written a plan, full tool access returns and stays available for the rest of the "
+     "turn. A plan can be wrong once you see real file contents -- call update_plan_step to "
+     "mark a step done, failed, or in progress as you go, and call write_plan again if the "
+     "whole approach needs to change -- but skipping it and improvising edit-by-edit is how "
+     "partial, inconsistent changes happen."),
 
     ("grounded_claims",
      "## Ground every claim in a real tool result\n"
@@ -376,17 +429,22 @@ CODING_HARNESS_SECTIONS = [
     ("tool_selection",
      "## Picking the right tool\n"
      "Use grep/sed to locate something by line -- never read_file for that, since it "
-     "returns no line numbers. Use search_codebase to orient yourself in unfamiliar "
-     "territory before blind exploration, but treat its results as a pointer, not ground "
-     "truth -- read the real file before editing. Use find_definition/find_references/"
-     "type_info for real semantic questions about a symbol, not text search. Use "
-     "backup_file before an edit whose current state matters and isn't already in version "
-     "control this turn -- never a hand-rolled copy."),
+     "returns no line numbers. Before reading or grepping any file yourself for a "
+     "codebase question, call search_codebase first -- this is a default, not an optional "
+     "step for unfamiliar territory. Skipping straight to read_file/bash on a guess wastes "
+     "context searching by hand for something search_codebase would have pointed to in one "
+     "call. Treat its results as a pointer, not ground truth -- read the real file before "
+     "editing, but let search_codebase tell you which file and roughly where first. Use "
+     "find_definition/find_references/type_info for real semantic questions about a symbol, "
+     "not text search. Use backup_file before an edit whose current state matters and isn't "
+     "already in version control this turn -- never a hand-rolled copy."),
 
     ("research_discipline",
      "## Researching something real\n"
      "For a specific named library, SDK, or API: don't rely on general web search alone -- "
-     "fetch that project's own docs or repo directly. State which source backs any "
+     "fetch that project's own docs or repo directly. If it has SDKs for multiple languages, "
+     "verify each language's example against that language's own docs rather than carrying a "
+     "convention from one language's SDK into another's syntax. State which source backs any "
      "specific claim (an import path, a function signature). Pin dependency versions "
      "explicitly rather than leaving them open-ended.\n\n"
      "Use tools for real information. State uncertainty plainly rather than presenting a "
@@ -394,12 +452,13 @@ CODING_HARNESS_SECTIONS = [
 ]
 
 
-def _assemble_prompt_sections(section_ids, extra_sections=None):
-    """Build a system prompt from named sections, in the order given
-    by section_ids. extra_sections lets a mode splice in its own
-    section text (keyed by id) without it needing to live in the
-    shared global registry above."""
-    lookup = dict(CODING_HARNESS_SECTIONS)
+def _assemble_prompt_sections(sections, section_ids, extra_sections=None):
+    """Build a system prompt from named sections, in the order given by
+    section_ids, looked up from the given sections registry (a list of
+    (id, text) tuples -- CODING_HARNESS_SECTIONS or CASUAL_AGENT_SECTIONS
+    today). extra_sections lets a caller splice in one-off section text
+    (keyed by id) without it needing to live in either registry above."""
+    lookup = dict(sections)
     if extra_sections:
         lookup.update(extra_sections)
     return "\n\n".join(lookup[sid] for sid in section_ids if sid in lookup)
@@ -407,9 +466,17 @@ def _assemble_prompt_sections(section_ids, extra_sections=None):
 
 # Default: every section, in registry order -- kept under this same
 # name so every existing reference to the coding-harness prompt keeps
-# working unchanged while the underlying mechanism becomes genuinely
+# working unchanged while the underlying mechanism stays genuinely
 # modular rather than one flat string.
-CODING_HARNESS_SYSTEM_PROMPT = _assemble_prompt_sections([sid for sid, _ in CODING_HARNESS_SECTIONS])
+CODING_HARNESS_SYSTEM_PROMPT = _assemble_prompt_sections(CODING_HARNESS_SECTIONS, [sid for sid, _ in CODING_HARNESS_SECTIONS])
+
+# Same mechanism, casual mode's own independent registry (see
+# CASUAL_AGENT_SECTIONS above). Leading "\n\n" so BASE_SYSTEM_PROMPT +
+# AGENT_SYSTEM_SUFFIX (no separator at that call site, in
+# _get_mode_system_prompt) still reads as two cleanly separated blocks,
+# the same way _get_bot_delegation_prompt_section already leads with its
+# own "\n\n" when layered onto CODING_HARNESS_SYSTEM_PROMPT.
+AGENT_SYSTEM_SUFFIX = "\n\n" + _assemble_prompt_sections(CASUAL_AGENT_SECTIONS, [sid for sid, _ in CASUAL_AGENT_SECTIONS])
 
 
 _SEARCH_STOPWORDS = {"the", "a", "an", "of", "for", "and", "or", "in", "on", "to", "is", "are", "what", "how", "does", "do", "with", "vs", "current"}
@@ -467,6 +534,13 @@ def _evict_old_task_folders():
 _large_tool_output_counter = [0]
 _LARGE_TOOL_OUTPUT_THRESHOLD = 3000
 _LARGE_TOOL_OUTPUT_MAX_STORED = 50
+
+# A bot's scratch file is already a deliberately curated, information-dense
+# deliverable -- not raw noise like a read_file dump -- so a generic head/
+# tail preview cuts exactly the itemized findings out of the middle. Exempt
+# these from _compress_tool_result entirely rather than relying on Athena2
+# remembering to call get_full_tool_output every time.
+_UNCOMPRESSED_TOOL_NAMES = {"read_scratch_file", "read_tool_call_history"}
 
 
 def _compress_tool_result(result):
@@ -566,7 +640,7 @@ def _get_mode_system_prompt(mode, req):
     else:
         base = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
     if mode == "athena_delegation":
-        base = base + _get_bot_delegation_prompt_section(req.workspace)
+        base = base + _get_bot_delegation_prompt_section(req.workspace, async_enabled=bool(_load_settings().get("delegation_async_enabled")), laya_gating_enabled=bool(_load_settings().get("laya_gating_enabled")))
     return base
 
 
@@ -581,12 +655,59 @@ def _get_dynamic_context_message(req):
     return {"role": "user", "content": content}
 
 
-def _get_mode_tools(mode, req):
+# Blind-exploration tools that require search_codebase to have been
+# called at least once this turn first -- the same "orient before you
+# dig" discipline already asked for in prose (CODING_HARNESS_SECTIONS'
+# tool_selection section) but enforced structurally: a model can drift
+# off a prompt instruction under pressure, it can't call a tool that
+# isn't in its tool list.
+_SEARCH_GATED_TOOL_NAMES = {"bash", "read_file"}
+
+# The full set of self-investigation tools, cut off once a turn has
+# leaned on them past the threshold below AND no delegation has
+# happened yet this turn -- narrowing what's reachable down to
+# delegation (plus whatever write tools were already available) rather
+# than asking the model to notice it's over-exploring and delegate on
+# its own judgment. Once she's delegated at least once this turn, the
+# cutoff no longer applies: initial research should generally go
+# through sub-agents (this still forces that), but she isn't locked out
+# of her own follow-up digging on top of real delegation findings --
+# e.g. confirming something a bot's scratch note pointed to.
+_EXPLORATION_TOOL_NAMES = {
+    "bash", "read_file", "list_files", "search_codebase",
+    "find_definition", "find_references", "type_info",
+}
+_DELEGATION_TOOL_NAMES = {"run_delegation_step", "plan_delegation"}
+_SELF_INVESTIGATION_TOOL_THRESHOLD = 6
+
+# Below this many total tool calls in one turn (any tool, any mode), a
+# turn is small enough not to need an explicit plan. At or past it,
+# _get_mode_tools narrows the tool list down to write_plan alone until
+# it's called -- a real structural checkpoint, not a prose reminder,
+# replacing what used to be enforced only by CODING_HARNESS_SECTIONS'
+# plan_before_acting sentence. Deliberately mode-independent (unlike
+# _SELF_INVESTIGATION_TOOL_THRESHOLD, which only applies in
+# athena_delegation): the observed failure mode -- 23 tool calls
+# rediscovering a fixed weather API endpoint -- happened in plain casual
+# chat, which had no per-turn structure of any kind before this existed.
+# This is NOT a cap on how much work can happen -- once write_plan has
+# been called, the gate never re-applies for the rest of the turn, so
+# total tool-call volume is unaffected; it only forces one checkpoint.
+_PLAN_REQUIRED_THRESHOLD = 3
+
+
+def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0):
     """Casual chat no longer carries bash/backup_file -- a mode only
     gets tools it actually needs, matching the same principle behind
     bots never getting write tools at the registration level rather
-    than being told not to use them."""
-    tools = get_lcm_tools()
+    than being told not to use them.
+
+    called_tool_names/exploration_call_count/total_tool_call_count let a
+    caller recompute this per round within one turn (see chat_stream's
+    generation loop) so tool availability can shift as the model's own
+    actions this turn accumulate, instead of being fixed once at request
+    start."""
+    tools = get_lcm_tools() + PLAN_TOOL_SCHEMAS
     if req.search_url:
         tools = tools + WEB_TOOL_SCHEMAS
     if mode in ("workspace", "athena_delegation"):
@@ -594,7 +715,25 @@ def _get_mode_tools(mode, req):
     if _scan_skills():
         tools = tools + SKILL_TOOL_SCHEMAS
     if mode == "athena_delegation":
-        tools = tools + BOT_DELEGATION_TOOL_SCHEMAS
+        tools = tools + _bot_delegation_tool_schemas_for_mode(bool(_load_settings().get("delegation_async_enabled")))
+    called = called_tool_names or set()
+    if mode in ("workspace", "athena_delegation"):
+        if "search_codebase" not in called:
+            tools = [t for t in tools if t.get("function", {}).get("name") not in _SEARCH_GATED_TOOL_NAMES]
+        if (mode == "athena_delegation" and exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
+                and not (called & _DELEGATION_TOOL_NAMES)):
+            tools = [t for t in tools if t.get("function", {}).get("name") not in _EXPLORATION_TOOL_NAMES]
+        if mode == "athena_delegation" and "plan_delegation" in called:
+            # Hard commitment: once a plan has been submitted, any
+            # correction (a rejected step, an incomplete result) must go
+            # through resubmitting plan_delegation, never an ad hoc
+            # one-off run_delegation_step call. This is the structural
+            # fix for the observed failure mode where a rejected
+            # plan_delegation step led to abandoning the plan entirely
+            # in favor of reworded, one-at-a-time retries.
+            tools = [t for t in tools if t.get("function", {}).get("name") != "run_delegation_step"]
+    if total_tool_call_count >= _PLAN_REQUIRED_THRESHOLD and "write_plan" not in called:
+        tools = [t for t in tools if t.get("function", {}).get("name") == "write_plan"]
     if req.allowed_tools is not None:
         _allowed = set(req.allowed_tools)
         tools = [t for t in tools if t.get("function", {}).get("name") in _allowed]
@@ -838,7 +977,13 @@ def _search_codebase(query: str, limit: int = 3):
         limit = max(1, min(int(limit), 10))
     except (TypeError, ValueError):
         limit = 3
-    results = rag.search(query, limit=limit)
+    try:
+        results = rag.search(query, limit=limit)
+    except RuntimeError as e:
+        # The embedding model failed to load (or is still loading for the
+        # first time and hasn't finished) -- surface a clear, structured
+        # error instead of letting this propagate up out of tool dispatch.
+        return {"error": f"search_codebase is temporarily unavailable: {e}"}
     if not results:
         return {"query": query, "results": [], "note": "No matches found -- try different or broader search terms."}
     return {
@@ -2034,12 +2179,60 @@ BACKUP_TOOL_SCHEMAS = [
     },
 ]
 
+# Mode-independent -- available in casual, workspace, and athena_delegation
+# alike (see _get_mode_tools), unlike every other schema list here which is
+# gated to specific modes. Backs the plan-required structural gate in
+# chat_stream's generate() loop: once a turn has made several tool calls
+# without writing a plan, every tool except write_plan disappears until it's
+# called. This replaces relying on the prose-only "state a short plan
+# first" sentence that used to be the entire mechanism (see
+# CODING_HARNESS_SECTIONS' plan_before_acting section) -- prompt-only
+# guardrails here have repeatedly been observed to degrade under pressure;
+# see _SELF_INVESTIGATION_TOOL_THRESHOLD above for the same lesson applied
+# to blind self-investigation.
+PLAN_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_plan",
+            "description": "Record (or completely replace) the ordered list of steps for what you're about to do this turn. Call this once you can see a task is going to take more than a couple of tool calls, before diving into the work -- not after. This does not limit how many tool calls you can make afterward; it only requires deciding on a structure first. Calling this again replaces the previous plan entirely (use update_plan_step instead if you just want to mark progress on the existing plan).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered list of short, concrete step descriptions, e.g. ['Find where X is defined', 'Check how Y calls it', 'Make the fix', 'Verify it']."
+                    },
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_plan_step",
+            "description": "Mark progress on one step of the plan already recorded via write_plan. Returns the full plan re-rendered with the update applied. Fails with a clear error if write_plan hasn't been called yet this turn, or if the index is out of range.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Zero-based index of the step to update, matching its position in the list passed to write_plan."},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "done", "failed"], "description": "New status for this step."},
+                    "note": {"type": "string", "description": "Optional short note about this step's outcome (e.g. what was found, or why it failed)."},
+                },
+                "required": ["index", "status"],
+            },
+        },
+    },
+]
+
 RAG_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
             "name": "search_codebase",
-            "description": "Semantic/keyword search over the indexed codebase (built ahead of time, separately from this conversation) -- returns the most relevant chunks of real code for a natural-language or keyword query, each labeled with its file path. Use this for orientation questions (where does X live, what does this area of the codebase roughly do) before falling back to list_files or grep to explore blind. Results are a starting point, not a source of truth: each result is a fixed-size slice of a file that can cut a function in half or be stale relative to changes made earlier this session -- once you're actually about to make an edit, read the real file directly first. If results aren't useful, try a different, more specific query rather than giving up on the tool entirely.",
+            "description": "Semantic search over the indexed codebase (built ahead of time, separately from this conversation) -- embeds your query and ranks chunks of real code by meaning, not by literal word overlap, so a query phrased differently from the code's own vocabulary can still find it. Each Python function/class is its own chunk (a large class is split per-method); other file types are chunked by section. Use this for orientation questions (where does X live, what does this area of the codebase roughly do) before falling back to list_files or grep to explore blind. Results are a starting point, not a source of truth: a chunk can still be stale relative to changes made earlier this session, and an oversized function may be split across more than one result -- once you're actually about to make an edit, read the real file directly first. If results aren't useful, try a different, more specific query rather than giving up on the tool entirely.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2600,7 +2793,7 @@ def _iter_sse_lines(resp):
             line_bytes, buffer = buffer.split(b"\n", 1)
             yield line_bytes.decode("utf-8", errors="ignore").rstrip("\r")
 
-def _stream_openai_compatible(req, messages, tools, cancel_flag):
+def _stream_openai_compatible(req, messages, tools, cancel_flag, timeout=_MAIN_AGENT_TIMEOUT):
     """Covers OpenAI itself, OpenRouter, and any custom OpenAI-
     compatible endpoint -- all three speak the same /chat/completions
     wire format. Tool schemas need no translation at all: Ollama
@@ -2624,7 +2817,7 @@ def _stream_openai_compatible(req, messages, tools, cancel_flag):
         payload["tools"] = tools
     accumulated_tool_calls = {}
     try:
-        with httpx.stream("POST", url, headers=headers, json=payload, timeout=180) as resp:
+        with httpx.stream("POST", url, headers=headers, json=payload, timeout=timeout) as resp:
             if resp.status_code != 200:
                 error_text = resp.read().decode(errors="replace")
                 try:
@@ -2789,7 +2982,7 @@ def _anthropic_error_message(status_code, error_detail):
         return f"The provider's own servers returned an error (HTTP {status_code}) -- this is on their end, not a local problem.\n\n{error_detail}"
     return f"Request failed (HTTP {status_code}).\n\n{error_detail}"
 
-def _stream_anthropic(req, messages, tools, cancel_flag):
+def _stream_anthropic(req, messages, tools, cancel_flag, timeout=_MAIN_AGENT_TIMEOUT):
     """Anthropic's own /v1/messages format -- separate system field,
     tool_use/tool_result content blocks instead of Ollama's/OpenAI's
     role="tool" convention, and a named-SSE-event streaming protocol
@@ -2819,7 +3012,7 @@ def _stream_anthropic(req, messages, tools, cancel_flag):
         payload["tools"] = _translate_tools_to_anthropic(tools)
     current_blocks = {}
     try:
-        with httpx.stream("POST", url, headers=headers, json=payload, timeout=180) as resp:
+        with httpx.stream("POST", url, headers=headers, json=payload, timeout=timeout) as resp:
             if resp.status_code != 200:
                 error_text = resp.read().decode(errors="replace")
                 try:
@@ -2965,7 +3158,7 @@ def _translate_tools_to_google(tools):
         })
     return [{"function_declarations": declarations}] if declarations else None
 
-def _stream_google(req, messages, tools, cancel_flag):
+def _stream_google(req, messages, tools, cancel_flag, timeout=_MAIN_AGENT_TIMEOUT):
     """Google Gemini's generateContent streaming API -- uses ?alt=sse
     to get proper SSE framing rather than Google's default
     single-JSON-array response, since the whole _stream_completion
@@ -2986,7 +3179,7 @@ def _stream_google(req, messages, tools, cancel_flag):
     if google_tools:
         payload["tools"] = google_tools
     try:
-        with httpx.stream("POST", url, json=payload, timeout=180) as resp:
+        with httpx.stream("POST", url, json=payload, timeout=timeout) as resp:
             if resp.status_code != 200:
                 error_text = resp.read().decode(errors="replace")
                 try:
@@ -3049,20 +3242,26 @@ def _stream_google(req, messages, tools, cancel_flag):
         yield {"message": {"content": f"[Online provider error] Could not reach the provider: {e}"}, "done": True}
         return
 
-def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag):
+def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag, timeout=_MAIN_AGENT_TIMEOUT):
     """Single entry point for actually running one round of generation
     -- yields Ollama-shaped chunks no matter which provider a request
     targets. Ollama-native requests (provider == "") pass straight
     through to Ollama's own /api/chat, completely unchanged from
-    before online providers existed at all."""
+    before online providers existed at all.
+
+    timeout defaults to _MAIN_AGENT_TIMEOUT (Athena's own turn, real
+    patience on old/slow hardware) -- _call_bot_endpoint explicitly
+    passes _SUB_AGENT_TIMEOUT instead, since a bot round is one bounded,
+    single-topic investigation step that should hit a real ceiling
+    rather than running indefinitely."""
     if req.provider in ("openai", "openrouter", "custom"):
-        yield from _stream_openai_compatible(req, messages, tools, cancel_flag)
+        yield from _stream_openai_compatible(req, messages, tools, cancel_flag, timeout=timeout)
         return
     if req.provider == "anthropic":
-        yield from _stream_anthropic(req, messages, tools, cancel_flag)
+        yield from _stream_anthropic(req, messages, tools, cancel_flag, timeout=timeout)
         return
     if req.provider == "google":
-        yield from _stream_google(req, messages, tools, cancel_flag)
+        yield from _stream_google(req, messages, tools, cancel_flag, timeout=timeout)
         return
     with httpx.stream("POST", target_url, json={
         "model": req.model,
@@ -3070,7 +3269,7 @@ def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag):
         "tools": tools if tools else None,
         "options": {"num_ctx": ctx_size},
         "stream": True,
-    }, timeout=180) as resp:
+    }, timeout=timeout) as resp:
         for line in resp.iter_lines():
             if cancel_flag.is_set():
                 return
@@ -3113,7 +3312,11 @@ def chat_stream(req: ChatIn):
     mode, effective_workspace = _resolve_mode_and_workspace(req)
     req.workspace = effective_workspace
     system_prompt = _get_mode_system_prompt(mode, req)
-    tools = _get_mode_tools(mode, req)
+    # Sized off the maximum tool set this turn could ever reach (as if
+    # search_codebase were already called), not whatever round 1 actually
+    # starts with -- ctx_size must not be picked too small for a tool
+    # list that later grows back as the turn progresses.
+    tools = _get_mode_tools(mode, req, called_tool_names={"search_codebase"})
     print(f"[TOOLS DEBUG] {[t.get('function', {}).get('name') for t in tools]}", flush=True)
 
     _dynamic_context_msg = _get_dynamic_context_message(req)
@@ -3137,6 +3340,22 @@ def chat_stream(req: ChatIn):
     if req.max_ctx > 0:
         ctx_size = req.max_ctx
     prompt_tokens = estimate_tokens(messages, tools)
+
+    # Per-turn plan state, mutated in place (never rebound) so both
+    # _execute_tool_call and generate() -- sibling closures directly inside
+    # chat_stream, not nested inside each other -- see the same list without
+    # needing `nonlocal`. Each entry: {"text": str, "status": str, "note": str}.
+    _current_plan = []
+
+    def _render_plan():
+        if not _current_plan:
+            return {"plan": [], "note": "No plan recorded yet -- call write_plan first."}
+        lines = []
+        for i, step in enumerate(_current_plan):
+            marker = {"done": "[x]", "failed": "[!]", "in_progress": "[~]"}.get(step["status"], "[ ]")
+            note = f" -- {step['note']}" if step.get("note") else ""
+            lines.append(f"{i}. {marker} {step['text']}{note}")
+        return {"plan": "\n".join(lines)}
 
     def _execute_tool_call(tool_call):
         """Dispatch a single tool call. Right now only LCM's own tools
@@ -3189,7 +3408,7 @@ def chat_stream(req: ChatIn):
             return _backup_file(args.get("path", ""))
         if name == "restore_file":
             return _restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
-        if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot", "run_delegation_step", "read_scratch_file", "plan_delegation"):
+        if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot", "run_delegation_step", "read_scratch_file", "read_tool_call_history", "plan_delegation"):
             if req.session_id != ATHENA_BOTS_SESSION_ID:
                 return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
             if name == "list_bots":
@@ -3214,14 +3433,39 @@ def chat_stream(req: ChatIn):
                 return _update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
             if name == "run_delegation_step":
                 _get_task_hash(req.session_id)
+                if _load_settings().get("delegation_async_enabled"):
+                    return _run_delegation_step_async_tool(req, args.get("bot_id"), args.get("instruction", ""))
                 return _run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""))
             if name == "read_scratch_file":
                 return _read_scratch_file(args.get("bot_name", ""))
+            if name == "read_tool_call_history":
+                return _read_tool_call_history(args.get("bot_name", ""))
             if name == "plan_delegation":
                 _get_task_hash(req.session_id)
+                if _load_settings().get("delegation_async_enabled"):
+                    return _plan_delegation_async_tool(req, args.get("steps", []))
                 return _plan_delegation_tool(args.get("steps", []))
         if name == "search_codebase":
             return _search_codebase(args.get("query", ""), args.get("limit", 3))
+        if name == "write_plan":
+            steps = args.get("steps", [])
+            if not steps or not isinstance(steps, list) or not all(isinstance(s, str) and s.strip() for s in steps):
+                return {"error": "steps must be a non-empty list of non-empty strings."}
+            _current_plan.clear()
+            _current_plan.extend({"text": s, "status": "pending", "note": ""} for s in steps)
+            return _render_plan()
+        if name == "update_plan_step":
+            if not _current_plan:
+                return {"error": "No plan recorded yet -- call write_plan first."}
+            index = args.get("index")
+            status = args.get("status", "")
+            if not isinstance(index, int) or not (0 <= index < len(_current_plan)):
+                return {"error": f"index must be between 0 and {len(_current_plan) - 1}, got {index!r}."}
+            if status not in ("pending", "in_progress", "done", "failed"):
+                return {"error": f"status must be one of pending/in_progress/done/failed, got {status!r}."}
+            _current_plan[index]["status"] = status
+            _current_plan[index]["note"] = args.get("note", "")
+            return _render_plan()
 
         args["session_id"] = req.session_id
         try:
@@ -3297,45 +3541,91 @@ def chat_stream(req: ChatIn):
         last_eval_duration = None
         consecutive_loop_detections = 0
         consecutive_ungrounded_claims = 0
+        consecutive_empty_final_answers = 0
         made_any_tool_calls_this_turn = False
+        # Tool availability is recomputed every round from these two,
+        # not fixed once at request start -- see _get_mode_tools. This is
+        # what makes read_file/bash gated behind search_codebase, and
+        # blind self-investigation gated behind delegation, structural
+        # instead of one more prompt instruction to drift off under
+        # pressure.
+        _called_tool_names = set()
+        _exploration_call_count = 0
+        _investigation_gate_notified = False
+        _total_tool_call_count = 0
+        _plan_gate_notified = False
+        _delegation_commitment_notified = False
 
         for _round in range(MAX_ROUNDS):
             round_reply = ""
             round_tool_calls = []
             loop_detected = False
+            _round_tools = _get_mode_tools(mode, req, _called_tool_names, _exploration_call_count, _total_tool_call_count)
 
-            for chunk in _stream_completion(req, _target_url, _messages, tools, ctx_size, cancel_flag):
-                if cancel_flag.is_set():
-                    break
-                # Refresh on every real chunk received, not just once
-                # when the request first arrives -- otherwise a single
-                # generation running longer than the idle threshold
-                # (a large tool-call argument buffered by Ollama, a
-                # big context, a slow model) gets misread as an idle
-                # window partway through, and the memory scan can
-                # fire a second, competing Ollama request while this
-                # one is still actively streaming.
-                _last_activity_ts = time.time()
-                msg = chunk.get("message", {})
-                print(f"[DEBUG] chunk={chunk}", flush=True)
-                thinking_delta = msg.get("thinking", "")
-                if thinking_delta:
-                    full_thinking += thinking_delta
-                    yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
-                delta = msg.get("content", "")
-                if delta:
-                    round_reply += delta
-                    full_reply += delta
-                    yield f"data: {json.dumps({'delta': delta})}\n\n"
-                    if _detect_text_loop(round_reply):
-                        loop_detected = True
-                        break
-                if msg.get("tool_calls"):
-                    round_tool_calls.extend(msg["tool_calls"])
-                if chunk.get("done"):
-                    last_eval_count = chunk.get("eval_count")
-                    last_eval_duration = chunk.get("eval_duration")
-                    break
+            # Same per-host lock bot delegation calls already use
+            # (_get_host_lock / _run_delegation_step_tool) -- without it,
+            # Athena's own generation here and a concurrent bot call could
+            # land on the same physical Ollama host at the same time (the
+            # common case -- see _endpoint_host's own docstring), forcing
+            # it to juggle two different models on hardware that can't
+            # hold both in VRAM at once. That contention is the leading
+            # suspect behind recurring RemoteProtocolError("incomplete
+            # chunked read")/ReadTimeout failures observed specifically
+            # in the athena-bots-agent session. Scoped to one round's
+            # streaming call, not the whole multi-round turn, so a queued
+            # bot call still gets a fair turn between rounds.
+            try:
+                with _get_host_lock(_endpoint_host(req.endpoint_url)):
+                    for chunk in _stream_completion(req, _target_url, _messages, _round_tools, ctx_size, cancel_flag):
+                        if cancel_flag.is_set():
+                            break
+                        # Refresh on every real chunk received, not just once
+                        # when the request first arrives -- otherwise a single
+                        # generation running longer than the idle threshold
+                        # (a large tool-call argument buffered by Ollama, a
+                        # big context, a slow model) gets misread as an idle
+                        # window partway through, and the memory scan can
+                        # fire a second, competing Ollama request while this
+                        # one is still actively streaming.
+                        _last_activity_ts = time.time()
+                        msg = chunk.get("message", {})
+                        print(f"[DEBUG] chunk={chunk}", flush=True)
+                        thinking_delta = msg.get("thinking", "")
+                        if thinking_delta:
+                            full_thinking += thinking_delta
+                            yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
+                        delta = msg.get("content", "")
+                        if delta:
+                            round_reply += delta
+                            full_reply += delta
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
+                            if _detect_text_loop(round_reply):
+                                loop_detected = True
+                                break
+                        if msg.get("tool_calls"):
+                            round_tool_calls.extend(msg["tool_calls"])
+                        if chunk.get("done"):
+                            last_eval_count = chunk.get("eval_count")
+                            last_eval_duration = chunk.get("eval_duration")
+                            break
+            except httpx.RequestError as e:
+                # The model backend became unreachable or dropped the
+                # connection mid-response (server restarted/crashed, network
+                # blip, or -- in athena_delegation mode -- resource
+                # contention with a concurrent bot call on the same host).
+                # Previously this surfaced nowhere: the exception propagated
+                # up to _drain_generator_to_queue, which just logged it and
+                # quietly cleaned up, so the turn appeared to silently stop
+                # with zero explanation. Persist and show a real message
+                # instead, reusing whatever partial reply already streamed.
+                print(f"[DEBUG] generation for session {req.session_id!r} raised: {e!r}", flush=True)
+                error_msg = f"Generation failed partway through: {e!r}. The model backend likely became unreachable or dropped the connection -- try again in a moment."
+                _had_prior_content = bool(full_reply)
+                full_reply += ("\n\n" if _had_prior_content else "") + error_msg
+                _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                yield f"data: {json.dumps({'delta': ('\n\n' if _had_prior_content else '') + error_msg})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id, 'generation_error': True})}\n\n"
+                return
 
             if cancel_flag.is_set():
                 if full_reply:
@@ -3417,6 +3707,35 @@ def chat_stream(req: ChatIn):
                     )})
                     continue
                 consecutive_ungrounded_claims = 0
+
+                # The model did real tool-call work this turn, then ended
+                # with a completely blank round -- no content, no tool
+                # calls, done:true. Nothing else here catches this: it's
+                # not a loop (no repeated text), not an ungrounded claim
+                # (no text was written at all), so without this it sails
+                # through as an ordinary successful completion and the
+                # turn just ends with nothing to show for the work done.
+                # Nudge for an actual answer a couple of times before
+                # giving up honestly, same shape as the other two
+                # recovery paths above.
+                if made_any_tool_calls_this_turn and not full_reply.strip():
+                    consecutive_empty_final_answers += 1
+                    if consecutive_empty_final_answers >= 3:
+                        failure_msg = "I did some real investigation this turn but wasn't able to put together an actual answer from it after a few attempts -- stopping here rather than ending with nothing. Check the tool results above for what was actually found."
+                        full_reply = failure_msg
+                        _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                        yield f"data: {json.dumps({'delta': failure_msg})}\n\n"
+                        yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
+                        return
+                    _messages.append({"role": "user", "content": (
+                        "You finished a round of tool calls but ended with a completely blank reply -- no "
+                        "answer, no further tool call. Based on what you've actually found so far this turn, "
+                        "state your real conclusion or findings now, directly and concisely. If you're genuinely "
+                        "stuck, say so plainly instead of ending with nothing."
+                    )})
+                    continue
+                consecutive_empty_final_answers = 0
+
                 _msg_id = send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'assistant_message_id': _msg_id})}\n\n"
@@ -3424,6 +3743,16 @@ def chat_stream(req: ChatIn):
 
             made_any_tool_calls_this_turn = True
             consecutive_ungrounded_claims = 0
+
+            _gate_was_open = _exploration_call_count < _SELF_INVESTIGATION_TOOL_THRESHOLD
+            _plan_gate_was_open = _total_tool_call_count < _PLAN_REQUIRED_THRESHOLD
+            _delegation_commitment_was_open = "plan_delegation" not in _called_tool_names
+            for tc in round_tool_calls:
+                _tc_name = tc.get("function", {}).get("name", "")
+                _called_tool_names.add(_tc_name)
+                if _tc_name in _EXPLORATION_TOOL_NAMES:
+                    _exploration_call_count += 1
+                _total_tool_call_count += 1
 
             # Model wants to call tool(s) -- execute each, tell the
             # frontend what's happening, then loop back with results
@@ -3489,7 +3818,41 @@ def chat_stream(req: ChatIn):
                 # The person always sees the real, full result above (nothing hidden) --
                 # only what actually goes back into the model's own context gets compressed,
                 # since that's the thing burning tokens, not what's shown in the UI.
-                _messages.append({"role": "tool", "content": json.dumps(_compress_tool_result(result))})
+                _result_for_context = result if tool_name in _UNCOMPRESSED_TOOL_NAMES else _compress_tool_result(result)
+                _messages.append({"role": "tool", "content": json.dumps(_result_for_context)})
+
+            if (_gate_was_open and _exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
+                    and mode == "athena_delegation" and not _investigation_gate_notified
+                    and not (_called_tool_names & _DELEGATION_TOOL_NAMES)):
+                _investigation_gate_notified = True
+                _messages.append({"role": "user", "content": (
+                    "You've made enough self-investigation tool calls this turn that direct exploration "
+                    "(bash, read_file, list_files, search_codebase, find_definition, find_references, "
+                    "type_info) is no longer available for the rest of this turn -- only delegation "
+                    "(run_delegation_step/plan_delegation), any write tools, and your existing findings "
+                    "so far remain. Use plan_delegation or run_delegation_step to get any further "
+                    "investigation done instead of continuing to look yourself."
+                )})
+
+            if (_plan_gate_was_open and _total_tool_call_count >= _PLAN_REQUIRED_THRESHOLD
+                    and not _plan_gate_notified and "write_plan" not in _called_tool_names):
+                _plan_gate_notified = True
+                _messages.append({"role": "user", "content": (
+                    "You've made several tool calls this turn without writing a plan. Every tool except "
+                    "write_plan is now unavailable until you call it. This does not limit how much you can "
+                    "do for the rest of this turn -- once you call write_plan with the ordered steps you're "
+                    "actually going to take, full tool access returns and stays available. Call write_plan now."
+                )})
+
+            if (mode == "athena_delegation" and _delegation_commitment_was_open
+                    and "plan_delegation" in _called_tool_names and not _delegation_commitment_notified):
+                _delegation_commitment_notified = True
+                _messages.append({"role": "user", "content": (
+                    "You called plan_delegation this turn, so run_delegation_step is no longer available for "
+                    "the rest of this turn -- that commitment is permanent once made. If a step was rejected "
+                    "or came back incomplete, do not work around it with a one-off run_delegation_step call: "
+                    "fix the step (or steps) and call plan_delegation again with the corrected list."
+                )})
         else:
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
             full_reply = fallback_msg
@@ -3592,10 +3955,22 @@ def get_history(session_id: str):
         resp = httpx.get(f"{LCM_URL}/messages/{session_id}", timeout=3)
         if resp.status_code == 200:
             msgs = resp.json()
-            return [{
-                "role": m["role"], "content": m["content"], "messageId": m["id"], "model": m.get("model"),
-                "hasImage": m.get("has_image", False), "thinking": m.get("thinking"), "toolCalls": m.get("tool_calls"),
-            } for m in msgs]
+            from datetime import datetime
+            result = []
+            for m in msgs:
+                ca = m.get("created_at")
+                if isinstance(ca, str):
+                    try:
+                        dt = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+                        ca = int(dt.timestamp() * 1000)
+                    except Exception:
+                        ca = None
+                result.append({
+                    "role": m["role"], "content": m["content"], "messageId": m["id"], "model": m.get("model"),
+                    "hasImage": m.get("has_image", False), "thinking": m.get("thinking"), "toolCalls": m.get("tool_calls"),
+                    "created_at": ca,
+                })
+            return result
     except Exception:
         pass
     return []
@@ -3814,6 +4189,10 @@ class SettingsIn(BaseModel):
     model_aliases: Optional[dict] = None
     bot_creation_defaults: Optional[dict] = None
     athena_agent_model: Optional[dict] = None
+    delegation_concurrency: Optional[int] = None
+    bot_ptc_enabled: Optional[bool] = None
+    delegation_async_enabled: Optional[bool] = None
+    laya_gating_enabled: Optional[bool] = None
 
 class MCPServerIn(BaseModel):
     name: str
@@ -4416,7 +4795,7 @@ def _room_messages_to_chat_messages(room_messages, responding_bot_id, system_pro
     return out
 
 
-def _call_bot_endpoint(bot, chat_messages, timeout=120):
+def _call_bot_endpoint(bot, chat_messages):
     """Run a bot's full turn to completion: send chat_messages, and if
     it calls a tool, actually execute it and loop back with the result
     until it produces a final answer with no more tool calls -- the
@@ -4439,22 +4818,38 @@ def _call_bot_endpoint(bot, chat_messages, timeout=120):
         api_key=bot.get("api_key") or "",
     )
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
-    workspace = _load_settings().get("workspace") or ""
-    tool_schemas = _bot_tool_schemas(bot.get("allowed_tools") or [])
+    _settings_snapshot = _load_settings()
+    workspace = _settings_snapshot.get("workspace") or ""
+    ptc_enabled = bool(_settings_snapshot.get("bot_ptc_enabled"))
+    allowed_tools = bot.get("allowed_tools") or []
     messages = list(chat_messages)
     session_key = f"bot-{bot.get('id', 'unknown')}"
 
     global _last_activity_ts
     round_reply = ""
     seen_fingerprints = []
+    # Every real tool call this turn makes, tool name + args + a
+    # compressed outcome (see _summarize_tool_outcome) -- returned
+    # alongside content/error so a caller can see HOW this turn reached
+    # its answer, not just what it said. _run_delegation_step_tool
+    # persists this to a per-task log; Athena2 only pays for it when she
+    # actually calls read_tool_call_history, not on every step by default.
+    tool_call_history = []
+    # Per-tool-type call counts for this turn, tracked independently so
+    # a binge on one group (e.g. explore) can't hide behind quiet use of
+    # another (e.g. web) -- see _BOT_TOOL_TYPE_GROUPS.
+    _tool_type_counts = {}
+    _tool_type_warned = set()
+    _tool_type_hard_stopped = set()
     for _ in range(_BOT_MAX_ROUNDS):
         _last_activity_ts = time.time()
         round_reply = ""
         round_tool_calls = []
         cancel_flag = threading.Event()
+        tool_schemas = _bot_tool_schemas(allowed_tools, _tool_type_hard_stopped, ptc_enabled)
         try:
             round_thinking = ""
-            for chunk in _stream_completion(fake_req, target_url, messages, tool_schemas if tool_schemas else None, _BOT_CTX_SIZE, cancel_flag):
+            for chunk in _stream_completion(fake_req, target_url, messages, tool_schemas if tool_schemas else None, _BOT_CTX_SIZE, cancel_flag, timeout=_SUB_AGENT_TIMEOUT):
                 msg = chunk.get("message", {})
                 thinking_delta = msg.get("thinking", "")
                 if thinking_delta:
@@ -4472,24 +4867,66 @@ def _call_bot_endpoint(bot, chat_messages, timeout=120):
                         print(f"[BOT DEBUG] bot={bot_name} round produced no content/tool_calls -- thinking was {len(round_thinking)} chars: {round_thinking[-500:]!r}", flush=True)
                     break
         except Exception as e:
-            return {"error": f"Bot endpoint call failed: {e}"}
+            return {"error": f"Bot endpoint call failed: {e}", "tool_call_history": tool_call_history}
 
         if not round_tool_calls:
-            return {"content": round_reply}
+            return {"content": round_reply, "tool_call_history": tool_call_history}
 
         messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
         for tc in round_tool_calls:
+            tool_name = tc.get("function", {}).get("name", "")
+            group = _bot_tool_type_group(tool_name)
+            if group:
+                _tool_type_counts[group] = _tool_type_counts.get(group, 0) + 1
+            fn_args = tc.get("function", {}).get("arguments", {})
+            if isinstance(fn_args, str):
+                try:
+                    fn_args = json.loads(fn_args)
+                except json.JSONDecodeError:
+                    fn_args = {}
             fingerprint = _tool_call_fingerprint(tc)
             if seen_fingerprints.count(fingerprint) >= 2:
                 result = {"error": "BLOCKED: this exact tool call (same tool, same arguments) has already been made twice this turn. Use what you already have, or make a genuinely different call."}
+                tool_call_history.append(_tool_call_history_entry(tool_name, fn_args, result))
+            elif tool_name == "run_tool_program":
+                result = _execute_bot_tool_program(
+                    fn_args.get("code", ""), workspace, bot, session_key, allowed_tools,
+                    _tool_type_counts, _tool_type_hard_stopped, seen_fingerprints,
+                )
+                tool_call_history.append(_tool_call_history_entry(tool_name, {"code": fn_args.get("code", "")}, {"status": result.get("status") or "error", "detail": result.get("detail") or result.get("error")}))
+                tool_call_history.extend(result.get("tool_call_history", []))
+                seen_fingerprints.append(fingerprint)
+                if len(seen_fingerprints) > 20:
+                    seen_fingerprints.pop(0)
             else:
                 result = _execute_bot_tool_call(tc, workspace, bot, session_key)
+                tool_call_history.append(_tool_call_history_entry(tool_name, fn_args, result))
                 seen_fingerprints.append(fingerprint)
                 if len(seen_fingerprints) > 20:
                     seen_fingerprints.pop(0)
             messages.append({"role": "tool", "content": json.dumps(result)})
 
-    return {"content": round_reply, "error": "Hit the round limit without a final answer after repeated real tool calls -- this may genuinely be too large a job for one turn; consider a narrower job_scope."}
+        for group, count in _tool_type_counts.items():
+            if count >= _BOT_TOOL_TYPE_HARD_STOP_AFTER and group not in _tool_type_hard_stopped:
+                _tool_type_hard_stopped.add(group)
+                messages.append({"role": "user", "content": (
+                    f"Your '{group}' tools are no longer available for the rest of this turn -- you've used "
+                    f"them {count} times without recording findings. Call append_scratch_note now with "
+                    "whatever you've actually found so far; do not keep investigating."
+                )})
+            elif count >= _BOT_TOOL_TYPE_WARN_AFTER and group not in _tool_type_warned:
+                _tool_type_warned.add(group)
+                messages.append({"role": "user", "content": (
+                    f"You've made {count} '{group}' tool calls this turn without calling append_scratch_note "
+                    "yet. If you already have enough to answer, call append_scratch_note now instead of "
+                    "continuing to investigate."
+                )})
+
+    return {
+        "content": round_reply,
+        "error": "Hit the round limit without a final answer after repeated real tool calls -- this may genuinely be too large a job for one turn; consider a narrower job_scope.",
+        "tool_call_history": tool_call_history,
+    }
 
 
 _bot_host_locks = {}
@@ -4852,7 +5289,7 @@ def send_room_message(room_id: int, req: RoomSendIn):
 
 _BOT_TOOL_DESCRIPTIONS = {
     "bash": "read-only shell commands (ls, cat, grep, find, etc.) to look at files and search",
-    "search_codebase": "semantic/keyword search over the indexed codebase for orientation",
+    "search_codebase": "semantic search over the indexed codebase for orientation",
     "find_definition": "jump to where a symbol is actually defined",
     "find_references": "find every real usage of a symbol across the workspace",
     "type_info": "check a symbol's real inferred type/signature",
@@ -4911,16 +5348,23 @@ Your job: {job_scope}
 That's what must be true when you're done. If a tool call fails, report the failure honestly rather than retrying blindly or guessing at an answer anyway.
 
 ## Relay, Don't Execute
-You investigate and report. You never write files, run commands, or make any real change yourself. When you've finished -- or when you're genuinely stuck -- if append_scratch_note is one of your tools, that is how your findings actually reach Athena -- call it when you've finished, or when you're genuinely stuck, rather than replying with your findings in plain text. If append_scratch_note is not one of your tools, reply with your findings directly instead. Either way, Athena is the one who acts on what you report -- you never do.{constraints_block}"""
+You investigate and report. You never write files, run commands, or make any real change yourself. When you've finished -- or when you're genuinely stuck -- if append_scratch_note is one of your tools, call it with your findings; that is the only way they actually reach Athena, so don't reply with them in plain text instead. If append_scratch_note is not one of your tools, reply with your findings directly. Either way, Athena is the one who acts on what you report -- you never do.{constraints_block}"""
 
 
 ATHENA_BOTS_SESSION_ID = "athena-bots-agent"
 
-def _get_bot_delegation_prompt_section(workspace=None):
+def _get_bot_delegation_prompt_section(workspace=None, async_enabled=False, laya_gating_enabled=False):
     base = """
 
+## Stay On the Current Task
+Treat the person's most recent message as your current task. Earlier messages are context and history, not standing instructions -- if something discussed a few messages ago feels similar to what's being asked now, that doesn't make it the same task. This doesn't change how you work: keep using search_codebase and delegating to bots for the current request exactly as you normally would. It only means match what you investigate or delegate to what was JUST asked, not to an earlier topic that happens to feel related.
+
 ## Bot Delegation
-You have access to a roster of specialist bots you can delegate investigate-only work to. Bots never write files or run commands -- they investigate and report back to you; you are the one who acts on their findings. Use list_bots to see who's available before delegating. draft_bot_prompt helps you write a new bot's system prompt in the right structure when creating one. Before creating a bot with create_bot, always check list_bots first and pick a name that isn't already in use -- a duplicate name will be rejected.
+You have access to a roster of specialist bots you can delegate investigate-only work to. Bots never write files or run commands -- they investigate and report back to you; you are the one who acts on their findings.
+
+Delegate the moment you don't already know exactly which file (or small, specific set of files) contains the answer to what you're being asked -- that's the concrete signal to delegate, not a subjective judgment call about how 'significant' the task feels. If you'd have to explore to find out where the answer lives, that exploration is a bot's job, not yours. Decide once, before your first tool call on the topic: either you already know exactly where to look (read it yourself, it's fine), or you don't (delegate it, and don't explore it yourself first). Never investigate something yourself first and then ALSO delegate the same investigation to a bot -- that wastes both your own context and the bot's work for no reason.
+
+Use list_bots to see who's available before delegating. draft_bot_prompt helps you write a new bot's system prompt in the right structure when creating one. Before creating a bot with create_bot, always check list_bots first and pick a name that isn't already in use -- a duplicate name will be rejected.
 
 Bots must be broad, general-purpose specialists (e.g. "web research", "UI/frontend code", "backend/API work") -- never a narrow one-off bot scoped to a single specific task. Check whether an existing bot's field already fits before creating a new one; reuse it rather than creating something redundant. If the roster is currently empty, the first bot you create must be a fully general-purpose one with no specific niche at all, since there's nothing yet to route more specialized work to.
 
@@ -4932,9 +5376,39 @@ message_bot and message_room are ONLY for quick, informal back-and-forth that is
 
 For real investigative work, use run_delegation_step or plan_delegation. These give a bot one single-topic instruction as a completely fresh, isolated call -- no DM history, no memory of prior steps -- which keeps a bot from getting bogged down or confused by its own past turns on a long investigation. The bot appends its findings to its own scratch file via append_scratch_note rather than replying with them directly; you then call read_scratch_file for that bot to see what it found. Use plan_delegation when you already know the full set of single-topic steps you want to run -- give it the whole list at once rather than calling run_delegation_step yourself one at a time. Bots run on small, resource-constrained local models, so a single step's instruction must cover ONE focused topic, never a compound multi-part request (e.g. "cover these nine areas: setup, config, LCM, voice, coding harness, web UI, API, dependencies, project structure") -- a bundled instruction like that overwhelms a small model and produces slow, incomplete, or truncated results regardless of which tool carries it.
 
-If run_delegation_step or plan_delegation reports status "no_scratch_note", that step genuinely failed -- the bot did not record findings, full stop. Retry that one step once, ideally with a more explicit instruction telling the bot to call append_scratch_note. If it fails a second time, or if read_scratch_file comes back with no file, report that failure to the person honestly. Under no circumstances switch to message_bot to "get an answer anyway" when a delegation step fails -- an informal reply obtained that way is not a substitute for a real investigation, was not produced under the same isolation guarantees, and must never be presented as a delegation finding. A reported failure is always the correct outcome over a message_bot workaround. The same applies if a scratch file's content looks fabricated or ungrounded (invented file structure, generic placeholder-style detail, claims that don't match anything you already know to be true) -- treat that as a failed step too, not a usable finding.
+If run_delegation_step or plan_delegation reports status "no_scratch_note", that step genuinely failed -- the bot did not record findings, full stop. Retry that one step once, ideally with a more explicit instruction telling the bot to call append_scratch_note. If it fails a second time, or if read_scratch_file comes back with no file, report that failure to the person honestly.
+
+## Committing to a Plan
+Once you call plan_delegation in a turn, that commitment is permanent for the rest of the turn: run_delegation_step structurally disappears from your tool list and will not come back. This is deliberate -- if a step in the plan comes back rejected (e.g. flagged as a compound, multi-topic instruction) or incomplete, the fix is to correct that step's wording (or split it into proper single-topic steps) and call plan_delegation again with the corrected list, never to fall back to one-off run_delegation_step calls as a workaround. Rewording the same ask and re-running it as an individual step instead of fixing and resubmitting the plan is exactly the pattern this exists to stop.
+
+Under no circumstances switch to message_bot to "get an answer anyway" when a delegation step fails -- an informal reply obtained that way is not a substitute for a real investigation, was not produced under the same isolation guarantees, and must never be presented as a delegation finding. A reported failure is always the correct outcome over a message_bot workaround.
+
+The same applies if a scratch file's content looks fabricated or ungrounded (invented file structure, generic placeholder-style detail, claims that don't match anything you already know to be true) -- treat that as a failed step too, not a usable finding. When you suspect that, use read_tool_call_history for that bot before deciding: it shows every tool call the bot actually made for each instruction and roughly what each one returned, so you can check whether the tool activity behind a note is really there instead of guessing from the note's wording alone.
 
 Do NOT use read_file yourself on a large file (main.py or anything else of comparable size) while doing delegation work. You have a limited context budget for your own turn, and reading a large file directly -- especially across the multiple paginated calls a big file requires -- burns through that budget on investigation you don't need to do yourself, since a bot has its own separate, isolated context for exactly this. If you need to know something about a large file, delegate that investigation to a bot via run_delegation_step or plan_delegation and read its findings back with read_scratch_file, the same as any other investigative work in this mode. read_file is fine for small, targeted files you already know are short."""
+    if async_enabled:
+        base += (
+            "\n\n## Async Delegation\n"
+            "run_delegation_step and plan_delegation no longer wait for the bot(s) to finish. They return "
+            "immediately with {\"status\": \"pending\", \"handle\": <job id>} -- that is not a failure, and "
+            "there is no findings content in that return value yet. You are free to keep working (answer the "
+            "person, delegate another step, or just end your turn) while the bot works in the background. "
+            "When it finishes, its result arrives as a brand new message in this same conversation, and you "
+            "should react to it then -- read the bot's scratch file (and tool call history if anything about "
+            "it looks fabricated or ungrounded) and continue from there. Do not treat a 'pending' status as "
+            "something to retry, poll, or wait on synchronously; just proceed with your turn."
+        )
+    if laya_gating_enabled:
+        base += (
+            "\n\n## Automatic Fabrication Screening\n"
+            "A step that returns status \"possibly_fabricated\" already went through an automatic check comparing "
+            "the bot's scratch note against its actual tool call history -- you don't need to also manually judge "
+            "whether the note looks fabricated or ungrounded the way you would otherwise. Treat this status exactly "
+            "like a failed step: don't use its findings, and use read_tool_call_history/read_scratch_file yourself "
+            "before deciding whether to retry. A step returning \"done\" already passed this screening; you can "
+            "still double-check it yourself if something about it still feels off, but you no longer have to "
+            "eyeball every note for fabrication signs on your own."
+        )
     defaults = (_load_settings().get("bot_creation_defaults") or {})
     naming_guidance = defaults.get("naming_guidance")
     if naming_guidance:
@@ -4989,6 +5463,45 @@ def _append_scratch_note(bot_name, content):
     return {"ok": True}
 
 
+def _summarize_tool_outcome(result, max_len=200):
+    """Compress one tool call's real result down to a short outcome
+    string for tool_call_history -- full results (a file's contents, a
+    page of search hits) can be huge, and the point of this history is
+    letting Athena2 see WHICH tools a bot actually used and roughly
+    whether each one worked, not duplicating everything the scratch
+    file already carries."""
+    if isinstance(result, dict) and "error" in result:
+        msg = str(result["error"])
+        return "error: " + (msg if len(msg) <= max_len else msg[:max_len] + "...")
+    try:
+        s = json.dumps(result)
+    except TypeError:
+        s = str(result)
+    return "ok: " + (s if len(s) <= max_len else s[:max_len] + "...")
+
+
+def _tool_call_history_entry(tool_name, args, result):
+    return {"tool": tool_name, "args": args, "outcome": _summarize_tool_outcome(result)}
+
+
+def _append_tool_call_history(bot_name, instruction, calls):
+    """Append one delegation step's tool-call trail to a per-bot,
+    per-task JSONL log -- same task-hash scoping and append-only shape
+    as _append_scratch_note, just a separate file so Athena2 only pays
+    for it when she actually asks (see read_tool_call_history), instead
+    of it riding along in every run_delegation_step/plan_delegation
+    response by default."""
+    task_hash = _current_task_hash.get()
+    if task_hash is None or not calls:
+        return
+    folder = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash)
+    os.makedirs(folder, exist_ok=True)
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
+    path2 = os.path.join(folder, f"{safe_name}.calls.jsonl")
+    with open(path2, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"instruction": instruction, "calls": calls}) + "\n")
+
+
 def _get_bot_row(bot_id):
     for b in _list_bots_tool():
         if b.get("id") == bot_id:
@@ -5008,7 +5521,49 @@ def _read_scratch_file(bot_name):
         return {"content": f.read()}
 
 
+def _read_tool_call_history(bot_name):
+    """Read back every tool call a bot actually made across every step
+    it's run in the current task, grouped by the instruction each batch
+    of calls belongs to -- for checking HOW a bot reached its findings,
+    e.g. when a scratch note looks fabricated or ungrounded and you want
+    to see whether the tool calls behind it are actually there."""
+    task_hash = _current_task_hash.get()
+    if task_hash is None:
+        return {"error": "No active task context -- nothing has been delegated yet this turn."}
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", bot_name.lower())
+    fpath = os.path.join(_BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.calls.jsonl")
+    if not os.path.exists(fpath):
+        return {"error": f"No tool-call history for '{bot_name}' in the current task yet."}
+    steps = []
+    with open(fpath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                steps.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return {"steps": steps}
+
+
 _NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*(?:\d+[\.\)]|[-*])\s+\S")
+
+# Below this single-topic probability, Laya's compound-instruction check
+# flags an instruction even though the regex above found nothing --
+# backs up the regex on prose-phrased compound asks it structurally can't
+# see (e.g. "check X and also see if Y", no numbering/bullets involved).
+# Picked from standalone testing: true compound instructions scored
+# 0.231-0.370 single-topic-probability, while most genuinely single-topic
+# instructions scored 0.42-0.48 -- some overlap exists (this check has
+# real recall over precision, accepted deliberately: a false positive
+# here just costs an unnecessarily cautious plan_delegation call, not a
+# wrong answer). Originally 0.4; lowered to 0.3 after real usage showed
+# it was flagging genuinely single-topic instructions too often -- still
+# catches every true-compound case from standalone testing except the
+# single highest-scoring one (0.370), trading a small amount of recall
+# for less over-flagging.
+_LAYA_COMPOUND_THRESHOLD = 0.3
 
 def _instruction_is_compound(instruction):
     """Cheap structural check: does this instruction try to cram
@@ -5022,7 +5577,116 @@ def _instruction_is_compound(instruction):
         return True, f"contains {len(items)} numbered/bulleted items"
     if len(instruction) > 1200:
         return True, f"is {len(instruction)} characters long (over the 1200 char guideline for a single-topic step)"
+    if _load_settings().get("laya_gating_enabled"):
+        p_single_topic = laya_gate.check_single_topic(instruction)
+        if p_single_topic is not None and p_single_topic < _LAYA_COMPOUND_THRESHOLD:
+            return True, "was flagged by the compound-instruction checker as covering more than one distinct topic"
     return False, ""
+
+# Async delegation job tracking (see _run_delegation_step_async_tool /
+# _plan_delegation_async_tool below) -- same shape as _bg_processes /
+# _bg_processes_lock / _bg_process_counter, which already does "start a
+# background unit of work, hand back an id immediately" for background
+# bash processes. Not pruned, consistent with _bg_processes never being
+# pruned either.
+_delegation_jobs = {}
+_delegation_jobs_lock = threading.Lock()
+_delegation_job_counter = [0]
+_delegation_delivery_locks = {}
+_delegation_delivery_locks_guard = threading.Lock()
+
+
+def _get_delegation_delivery_lock(session_id):
+    """Mirrors _get_host_lock -- serializes delivery per session so two
+    async jobs finishing close together on the same session can't both
+    fire a chat_stream(req) call at the same time."""
+    with _delegation_delivery_locks_guard:
+        if session_id not in _delegation_delivery_locks:
+            _delegation_delivery_locks[session_id] = threading.Lock()
+        return _delegation_delivery_locks[session_id]
+
+
+def _capture_req_fields(req):
+    """Snapshot the fields needed to rebuild an equivalent ChatIn later,
+    from the request object already in scope at the tool-dispatch site
+    (this is always the one fixed athena-bots-agent session, so the
+    same model/workspace/endpoint apply to the later, headless turn)."""
+    return {
+        "session_id": req.session_id,
+        "model": req.model,
+        "workspace": req.workspace,
+        "endpoint_url": req.endpoint_url,
+        "search_url": req.search_url,
+        "allowed_tools": req.allowed_tools,
+        "allowed_skills": req.allowed_skills,
+        "provider": req.provider,
+        "api_key": req.api_key,
+    }
+
+
+def _deliver_delegation_result(req_fields, content):
+    """Injects `content` as a new turn into the session, headless --
+    same discard-the-StreamingResponse trick _start_task_run uses to
+    drive a chat turn with no live HTTP client. Waits for the session to
+    be free of any in-progress generation first (mirrors
+    _task_scheduler_loop's own _active_generations check) so this never
+    fires a second concurrent generation into the same session."""
+    session_id = req_fields["session_id"]
+    lock = _get_delegation_delivery_lock(session_id)
+    with lock:
+        while session_id in _active_generations:
+            time.sleep(2)
+        req = ChatIn(
+            session_id=session_id,
+            message=content,
+            model=req_fields["model"],
+            workspace=req_fields["workspace"],
+            endpoint_url=req_fields["endpoint_url"],
+            search_url=req_fields["search_url"],
+            allowed_tools=req_fields["allowed_tools"],
+            allowed_skills=req_fields["allowed_skills"],
+            provider=req_fields["provider"],
+            api_key=req_fields["api_key"],
+        )
+        try:
+            chat_stream(req)  # returned StreamingResponse deliberately never read -- see _start_task_run for the same pattern
+        except Exception as e:
+            print(f"[DELEGATION] failed to deliver async result for session {session_id!r}: {e!r}", flush=True)
+
+
+def _next_delegation_job_id():
+    with _delegation_jobs_lock:
+        _delegation_job_counter[0] += 1
+        return str(_delegation_job_counter[0])
+
+
+# Below this accuracy probability, the fabrication check flags a scratch
+# note as not grounded in what the bot's tools actually returned this
+# step. Picked from standalone testing: a genuinely grounded note scored
+# 0.724 "accurate", while fabricated/vague variants scored 0.385 or
+# lower -- 0.45 sits in that gap with margin on both sides.
+_LAYA_FABRICATION_THRESHOLD = 0.45
+
+def _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history):
+    """Returns a possibly_fabricated result dict to use INSTEAD of a
+    "done" status, or None if the note looks fine (or the checker is off/
+    unavailable). Reads only the bytes appended since before_size, so this
+    checks exactly the note this step just wrote, not earlier steps'
+    accumulated content in the same scratch file."""
+    if not _load_settings().get("laya_gating_enabled"):
+        return None
+    with open(scratch_path, "r", encoding="utf-8") as f:
+        f.seek(before_size)
+        new_note = f.read()
+    p_accurate = laya_gate.check_note_accurate(new_note, step_history)
+    if p_accurate is not None and p_accurate < _LAYA_FABRICATION_THRESHOLD:
+        return {
+            "status": "possibly_fabricated",
+            "detail": f"This note doesn't look grounded in this step's actual tool activity (Laya's estimate: {p_accurate:.2f} probability it's accurate) -- treat this as a failed step, not a usable finding. Use read_tool_call_history to check what the bot actually did, and read_scratch_file to see the note itself before deciding whether to retry.",
+            "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history),
+        }
+    return None
+
 
 def _run_delegation_step_tool(bot_id, instruction):
     is_compound, reason = _instruction_is_compound(instruction)
@@ -5055,9 +5719,20 @@ def _run_delegation_step_tool(bot_id, instruction):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
-    result = _call_bot_endpoint(bot, chat_messages)
+    # Same per-host lock plan_delegation's own concurrency setting relies
+    # on (see _plan_delegation_tool) -- steps can run in parallel threads,
+    # but two of them landing on the same physical inference host must
+    # still never generate at the same time.
+    host_lock = _get_host_lock(_endpoint_host(bot.get("endpoint_url")))
+    with host_lock:
+        result = _call_bot_endpoint(bot, chat_messages)
+    # Accumulated across the initial call and (if it happens) the retry
+    # below, then persisted as one entry so read_tool_call_history shows
+    # everything this one step actually did, not just the final attempt.
+    step_history = list(result.get("tool_call_history", []))
     if result.get("error"):
-        return {"status": "error", "detail": result["error"], "bot": bot["name"], "instruction": instruction}
+        _append_tool_call_history(bot["name"], instruction, step_history)
+        return {"status": "error", "detail": result["error"], "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
 
     after_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
     if after_size <= before_size:
@@ -5076,35 +5751,155 @@ def _run_delegation_step_tool(bot_id, instruction):
                 "now with your findings from above. Do not reply with plain text again."
             ),
         })
-        retry_result = _call_bot_endpoint(bot, chat_messages)
+        with host_lock:
+            retry_result = _call_bot_endpoint(bot, chat_messages)
+        step_history += retry_result.get("tool_call_history", [])
         if retry_result.get("error"):
-            return {"status": "error", "detail": retry_result["error"], "bot": bot["name"], "instruction": instruction}
+            _append_tool_call_history(bot["name"], instruction, step_history)
+            return {"status": "error", "detail": retry_result["error"], "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
         after_retry_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
+        _append_tool_call_history(bot["name"], instruction, step_history)
         if after_retry_size <= before_size:
             return {
                 "status": "no_scratch_note",
                 "detail": "The bot replied without calling append_scratch_note, even after one internal retry -- no findings were recorded for this step.",
                 "bot": bot["name"],
                 "instruction": instruction,
+                "tool_calls_recorded": len(step_history),
             }
-        return {"status": "done", "detail": "Step complete after one internal retry. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction}
+        fabrication_flag = _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history)
+        if fabrication_flag is not None:
+            return fabrication_flag
+        return {"status": "done", "detail": "Step complete after one internal retry. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
 
-    return {"status": "done", "detail": "Step complete. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction}
+    _append_tool_call_history(bot["name"], instruction, step_history)
+    fabrication_flag = _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history)
+    if fabrication_flag is not None:
+        return fabrication_flag
+    return {"status": "done", "detail": "Step complete. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
 
 
 def _plan_delegation_tool(steps):
     if not steps or not isinstance(steps, list):
         return {"error": "steps must be a non-empty list of {bot_id, instruction} objects."}
-    results = []
+    results = [None] * len(steps)
+    runnable = []
     for i, step in enumerate(steps):
         bot_id = step.get("bot_id") if isinstance(step, dict) else None
         instruction = step.get("instruction", "") if isinstance(step, dict) else ""
         if not bot_id or not instruction:
-            results.append({"step": i, "status": "error", "detail": "Missing bot_id or instruction."})
+            results[i] = {"step": i, "status": "error", "detail": "Missing bot_id or instruction."}
             continue
-        r = _run_delegation_step_tool(bot_id, instruction)
-        results.append({"step": i, "bot_id": bot_id, **r})
+        runnable.append((i, bot_id, instruction))
+
+    # Sequential (1) by default -- Athena targets hardware of all sizes,
+    # including old/cheap machines that shouldn't pay for concurrency
+    # they can't afford. A person running stronger hardware can raise
+    # this in settings; the per-host lock in _run_delegation_step_tool
+    # still serializes any two steps that land on the same physical
+    # inference host regardless of what this is set to.
+    concurrency = max(1, int(_load_settings().get("delegation_concurrency") or 1))
+
+    if concurrency <= 1 or len(runnable) <= 1:
+        for i, bot_id, instruction in runnable:
+            r = _run_delegation_step_tool(bot_id, instruction)
+            results[i] = {"step": i, "bot_id": bot_id, **r}
+    else:
+        # Each worker thread starts with its own empty context, so
+        # _current_task_hash.get() would come back None in there and
+        # break scratch-file scoping -- read the value once up front and
+        # set it explicitly in each worker instead. (A single shared
+        # contextvars.Context can't be entered from more than one thread
+        # at a time, so copy_context() + one shared ctx.run() isn't an
+        # option here.)
+        task_hash = _current_task_hash.get()
+
+        def _run(item):
+            i, bot_id, instruction = item
+            _current_task_hash.set(task_hash)
+            r = _run_delegation_step_tool(bot_id, instruction)
+            return i, {"step": i, "bot_id": bot_id, **r}
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            for i, r in executor.map(_run, runnable):
+                results[i] = r
+
     return {"plan_results": results, "note": "Findings were not returned here -- use read_scratch_file per bot to review them."}
+
+
+def _delegation_step_worker(job_id, task_hash, req_fields, bot_id, instruction):
+    _current_task_hash.set(task_hash)  # each thread starts with its own empty context -- see _plan_delegation_tool's own comment on this
+    try:
+        result = _run_delegation_step_tool(bot_id, instruction)
+    except Exception as e:
+        result = {"status": "error", "detail": f"Unhandled exception during background delegation: {e}", "instruction": instruction}
+    with _delegation_jobs_lock:
+        _delegation_jobs[job_id] = {"status": "error" if result.get("status") in ("error", "rejected") else "done", "kind": "step", "session_id": req_fields["session_id"], "result": result}
+    bot_name = result.get("bot", "The bot")
+    summary = (
+        f"[Async delegation job {job_id} complete] {bot_name} on instruction {instruction!r} -- "
+        f"status: {result.get('status')}. {result.get('detail', result.get('error', ''))} "
+        f"Use read_scratch_file('{bot_name}') and read_tool_call_history('{bot_name}') for full findings."
+    )
+    _deliver_delegation_result(req_fields, summary)
+
+
+def _run_delegation_step_async_tool(req, bot_id, instruction):
+    is_compound, reason = _instruction_is_compound(instruction)
+    if is_compound:
+        return {
+            "status": "rejected",
+            "error": f"This instruction {reason} -- that is a compound, multi-topic request, not a single-topic step. "
+                     "Break it into separate single-topic steps and use plan_delegation instead of one run_delegation_step call.",
+            "instruction": instruction,
+        }
+    job_id = _next_delegation_job_id()
+    task_hash = _current_task_hash.get()
+    req_fields = _capture_req_fields(req)
+    with _delegation_jobs_lock:
+        _delegation_jobs[job_id] = {"status": "running", "kind": "step", "session_id": req.session_id, "result": None}
+    threading.Thread(target=_delegation_step_worker, args=(job_id, task_hash, req_fields, bot_id, instruction), daemon=True).start()
+    return {
+        "status": "pending",
+        "handle": job_id,
+        "detail": "Running in the background -- you'll get a new message in this conversation when it's done. "
+                  "You can keep working on other things or end your turn now; you don't need to wait on this.",
+    }
+
+
+def _delegation_plan_worker(job_id, task_hash, req_fields, steps):
+    _current_task_hash.set(task_hash)
+    try:
+        plan_result = _plan_delegation_tool(steps)
+    except Exception as e:
+        plan_result = {"error": f"Unhandled exception during background plan delegation: {e}"}
+    with _delegation_jobs_lock:
+        _delegation_jobs[job_id] = {"status": "done", "kind": "plan", "session_id": req_fields["session_id"], "result": plan_result}
+    step_results = plan_result.get("plan_results", [])
+    lines = [f"[Async delegation plan {job_id} complete] {len(step_results)} step(s) finished:"]
+    for r in step_results:
+        bot_name = r.get("bot", f"bot_id {r.get('bot_id')}")
+        lines.append(f"- step {r.get('step')} ({bot_name}): {r.get('status')} -- {r.get('detail', r.get('error', ''))}")
+    lines.append("Use read_scratch_file per bot for full findings.")
+    _deliver_delegation_result(req_fields, "\n".join(lines))
+
+
+def _plan_delegation_async_tool(req, steps):
+    if not steps or not isinstance(steps, list):
+        return {"error": "steps must be a non-empty list of {bot_id, instruction} objects."}
+    job_id = _next_delegation_job_id()
+    task_hash = _current_task_hash.get()
+    req_fields = _capture_req_fields(req)
+    with _delegation_jobs_lock:
+        _delegation_jobs[job_id] = {"status": "running", "kind": "plan", "session_id": req.session_id, "result": None}
+    threading.Thread(target=_delegation_plan_worker, args=(job_id, task_hash, req_fields, steps), daemon=True).start()
+    return {
+        "status": "pending",
+        "handle": job_id,
+        "detail": f"Running {len(steps)} step(s) in the background -- you'll get ONE new message in this conversation "
+                  "summarizing every step once the whole plan finishes. You can keep working on other things or end "
+                  "your turn now; you don't need to wait on this.",
+    }
 
 
 def _message_bot_tool(bot_id, content):
@@ -5222,6 +6017,13 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
         }, "required": ["bot_name"]},
     }},
     {"type": "function", "function": {
+        "name": "read_tool_call_history",
+        "description": "See exactly which tools a bot actually called (and roughly what each one returned) across every run_delegation_step it's done in the current task, grouped by instruction. Findings live in the scratch file, not here -- use this when you need to check HOW a bot reached what it wrote, not what it wrote. The clearest use: a scratch note looks fabricated or ungrounded (invented detail, claims that don't match anything real) -- check here for whether the tool calls that would back it up actually happened.",
+        "parameters": {"type": "object", "properties": {
+            "bot_name": {"type": "string", "description": "The bot's name, exactly as it appears in list_bots."},
+        }, "required": ["bot_name"]},
+    }},
+    {"type": "function", "function": {
         "name": "plan_delegation",
         "description": "Give a whole roadmap of single-topic delegation steps at once, instead of calling run_delegation_step yourself one at a time. Each step runs in the same strict isolation as run_delegation_step (fresh context, no history) -- but you supply the full list up front rather than remembering to call each one separately. Returns only per-step status; use read_scratch_file per bot afterward to see what each one found.",
         "parameters": {"type": "object", "properties": {
@@ -5303,6 +6105,44 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
 ]
 
 
+_ASYNC_RUN_DELEGATION_STEP_DESCRIPTION = (
+    "Give one bot one single-topic instruction. Runs in the background and returns immediately with "
+    "{\"status\": \"pending\", \"handle\": <job id>} -- it does NOT wait for the bot to finish. When the bot "
+    "is done, its result arrives as a new message in this same conversation; you don't need to poll or wait "
+    "for it, and you're free to keep working (including delegating another step) in the meantime. Use "
+    "read_scratch_file/read_tool_call_history once that message tells you the job is complete."
+)
+_ASYNC_PLAN_DELEGATION_DESCRIPTION = (
+    "Give a whole roadmap of single-topic delegation steps at once. Runs in the background and returns "
+    "immediately with {\"status\": \"pending\", \"handle\": <job id>} for the whole plan -- it does NOT wait "
+    "for the steps to finish. Once every step in the plan is done, ONE combined message summarizing all of "
+    "them arrives in this same conversation; you don't need to poll or wait for it."
+)
+
+
+def _bot_delegation_tool_schemas_for_mode(async_enabled):
+    """BOT_DELEGATION_TOOL_SCHEMAS describes run_delegation_step/plan_delegation
+    as blocking calls, which is accurate everywhere except Athena2's own
+    /api/chat loop when delegation_async_enabled is on (see
+    _run_delegation_step_async_tool/_plan_delegation_async_tool). The Athena
+    room loop and a bot's own tool pool never go through that async dispatch
+    path, so they must always keep the synchronous description regardless of
+    the setting -- only _get_mode_tools' athena_delegation branch calls this
+    with async_enabled=True."""
+    if not async_enabled:
+        return BOT_DELEGATION_TOOL_SCHEMAS
+    schemas = []
+    for s in BOT_DELEGATION_TOOL_SCHEMAS:
+        fn = s.get("function", {})
+        if fn.get("name") == "run_delegation_step":
+            schemas.append({"type": "function", "function": {**fn, "description": _ASYNC_RUN_DELEGATION_STEP_DESCRIPTION}})
+        elif fn.get("name") == "plan_delegation":
+            schemas.append({"type": "function", "function": {**fn, "description": _ASYNC_PLAN_DELEGATION_DESCRIPTION}})
+        else:
+            schemas.append(s)
+    return schemas
+
+
 # Hard server-side lock on what a bot may actually execute, independent
 # of anything stored in allowed_tools_json -- a bot's design principle
 # is strictly read-only/investigate-only (no bash_exec, no write_file/
@@ -5317,7 +6157,30 @@ BOT_ALLOWED_TOOL_NAMES = {
 }
 
 _BOT_CTX_SIZE = 32768
-_BOT_MAX_ROUNDS = 200  # real safety net is dedup + loop detection above, not this number
+_BOT_MAX_ROUNDS = 200  # absolute outer safety net; per-tool-type limits below are what actually catches an exploration binge in practice
+
+# Grouped, independently-budgeted counters -- the flat MAX_ROUNDS ceiling
+# let a bot burn dozens of bash/list_files calls without ever reaching
+# append_scratch_note, since nothing distinguished "still investigating"
+# from "stuck re-exploring." Each group gets its own warn/hard-stop
+# count instead, same structural pattern as Athena2's own exploration
+# gate (_get_mode_tools) -- append_scratch_note itself is never in a
+# group, so it's always reachable regardless of what else got throttled.
+_BOT_TOOL_TYPE_GROUPS = {
+    "explore": {"bash", "list_files", "read_file", "search_codebase", "find_definition", "find_references", "type_info"},
+    "web": {"web_search", "web_fetch"},
+    "social": {"list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt"},
+    "recall": {"lcm_recall_search", "lcm_recall_expand", "lcm_recall_range"},
+}
+_BOT_TOOL_TYPE_WARN_AFTER = 5
+_BOT_TOOL_TYPE_HARD_STOP_AFTER = 10
+
+
+def _bot_tool_type_group(tool_name):
+    for group, names in _BOT_TOOL_TYPE_GROUPS.items():
+        if tool_name in names:
+            return group
+    return None
 
 # name.lower() -> list of tool names, populated by _draft_bot_prompt so
 # create_bot can recover the real list if the model forgets to repeat
@@ -5355,11 +6218,268 @@ def _detect_text_loop(text):
     return _tail_repeats(40, 3) or _tail_repeats(18, 5)
 
 
-def _bot_tool_schemas(allowed_tools):
+# --- Programmatic Tool Calling (PTC) for bots -----------------------------
+# Settings-gated, off by default: lets a bot write one Python script that
+# calls several tools in sequence instead of one round-trip per call. This
+# is a reliability tradeoff, not a hardware one -- a small/weaker local
+# model is more likely to write buggy orchestration code than to make
+# clean individual tool calls, so it stays opt-in for whoever is running a
+# model capable enough to benefit from it.
+#
+# The script runs in a fresh subprocess (plain `python3 -u -c <stub>`, not
+# a re-import of this app), talking back to this process over a line-
+# delimited JSON pipe on stdin/stdout: it sends {"type":"call",...} for
+# each tool call, blocks for a {"type":"result"|"error",...} reply, and
+# finally sends {"type":"done"} or {"type":"script_error",...}. The real
+# tool implementations, DB connections, etc. never leave this process --
+# the child only ever gets thin proxy functions.
+#
+# This is a reliability boundary, not an adversarial security one: giving
+# the sandboxed exec() a restricted __builtins__ dict blocks accidental
+# `import`/`open`/`eval` use, but pure-Python builtin restriction is well
+# known to be escapable by a sufficiently deliberate script (e.g. via
+# __class__.__bases__ introspection reaching already-loaded classes). The
+# real backstops are process isolation (a runaway or crashed script can't
+# touch this process) and a hard wall-clock timeout enforced by killing
+# the OS process outright, which a thread-based timeout can't guarantee.
+# Bots have no write/exec tool access to begin with (BOT_ALLOWED_TOOL_NAMES),
+# so the tool surface reachable from inside a script is exactly what a bot
+# could already reach one call at a time.
+_PTC_TIMEOUT_SECONDS = 90
+_PTC_MAX_SUBCALLS = 30
+
+_PTC_CHILD_STUB = r"""
+import sys, json
+
+def main():
+    init = json.loads(sys.stdin.readline())
+    code = init["code"]
+    tool_names = init["tools"]
+
+    def _call_tool(name, kwargs):
+        sys.stdout.write(json.dumps({"type": "call", "tool": name, "args": kwargs}) + "\n")
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:
+            raise RuntimeError("tool channel closed")
+        resp = json.loads(line)
+        if resp.get("type") == "error":
+            raise RuntimeError(resp.get("message", "tool call failed"))
+        return resp.get("value")
+
+    def _make_proxy(name):
+        def proxy(**kwargs):
+            return _call_tool(name, kwargs)
+        proxy.__name__ = name
+        return proxy
+
+    # stdout is the JSON protocol channel back to the parent -- a script's
+    # own print() must never write there, or its output gets parsed as a
+    # protocol message and crashes the whole exchange. Redirect to stderr
+    # instead of dropping it, since the parent surfaces stderr on failure.
+    def _sandboxed_print(*args, **kwargs):
+        kwargs["file"] = sys.stderr
+        print(*args, **kwargs)
+
+    safe_builtins = {
+        "len": len, "range": range, "enumerate": enumerate, "min": min, "max": max,
+        "sum": sum, "sorted": sorted, "reversed": reversed, "list": list, "dict": dict,
+        "set": set, "tuple": tuple, "str": str, "int": int, "float": float, "bool": bool,
+        "print": _sandboxed_print, "abs": abs, "round": round, "zip": zip, "map": map, "filter": filter,
+        "any": any, "all": all, "isinstance": isinstance, "True": True, "False": False, "None": None,
+        "Exception": Exception, "ValueError": ValueError, "KeyError": KeyError, "TypeError": TypeError,
+        "RuntimeError": RuntimeError, "StopIteration": StopIteration, "IndexError": IndexError,
+    }
+    g = {"__builtins__": safe_builtins}
+    for name in tool_names:
+        g[name] = _make_proxy(name)
+
+    try:
+        exec(compile(code, "<bot_program>", "exec"), g)
+        sys.stdout.write(json.dumps({"type": "done"}) + "\n")
+        sys.stdout.flush()
+    except BaseException as e:
+        import traceback
+        sys.stdout.write(json.dumps({
+            "type": "script_error",
+            "message": str(e),
+            "traceback": traceback.format_exc()[-2000:],
+        }) + "\n")
+        sys.stdout.flush()
+
+main()
+"""
+
+
+def _ptc_signature_from_schema(schema):
+    fn = schema.get("function", {})
+    name = fn.get("name", "")
+    params = fn.get("parameters", {}) or {}
+    props = params.get("properties", {}) or {}
+    required = set(params.get("required", []) or [])
+    parts = [f"{pname}: {pschema.get('type', 'any')}" + ("" if pname in required else " (optional)")
+             for pname, pschema in props.items()]
+    return f"{name}({', '.join(parts)})"
+
+
+def _build_run_tool_program_schema(tool_schemas):
+    lines = [_ptc_signature_from_schema(s) for s in tool_schemas] + ["append_scratch_note(content: str)"]
+    catalogue = "\n".join(f"  {l}" for l in lines)
+    return {
+        "type": "function",
+        "function": {
+            "name": "run_tool_program",
+            "description": (
+                "Write a short Python script that calls your tools directly as plain functions, all in one "
+                "shot, instead of one tool call per round-trip -- use this when you already know the sequence "
+                "of calls you need (e.g. read three specific files, or search then fetch several results), "
+                "not when you're still deciding one call at a time. Each call is a real tool call, executed "
+                "exactly like calling it individually, and returns the same result shape (inspect it with "
+                "normal Python -- e.g. result.get(\"error\")). Only plain Python is available -- no imports, "
+                "no file or network access beyond the functions below. Available functions (keyword arguments "
+                "only):\n" + catalogue + "\n\nCall append_scratch_note(content=...) inside the script (or as a "
+                "separate tool call afterward) to record your findings -- printed output and return values are "
+                "not seen by Athena. The script has a limited number of tool calls and a time limit; going over "
+                "either ends it early with an error explaining what happened."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "The Python script to run."}},
+                "required": ["code"],
+            },
+        },
+    }
+
+
+def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, tool_type_counts, tool_type_hard_stopped, seen_fingerprints):
+    """Run one bot-authored script in an isolated subprocess (see the PTC
+    block comment above), dispatching each tool call it makes through the
+    exact same _execute_bot_tool_call used for individual tool calls, and
+    feeding the same per-turn dedup/tool-type-budget state so a script
+    can't be used to quietly exceed either."""
+    effective = sorted(set(allowed_tools or []) & BOT_ALLOWED_TOOL_NAMES) + [BOT_SCRATCH_TOOL_NAME]
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", _PTC_CHILD_STUB],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+    except Exception as e:
+        return {"error": f"Could not start the program sandbox: {e}"}
+
+    tool_call_history = []
+    sub_call_count = 0
+    deadline = time.time() + _PTC_TIMEOUT_SECONDS
+
+    def _cleanup():
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+    try:
+        proc.stdin.write(json.dumps({"code": code, "tools": effective}) + "\n")
+        proc.stdin.flush()
+    except Exception as e:
+        _cleanup()
+        return {"error": f"Could not send the program to the sandbox: {e}"}
+
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            _cleanup()
+            return {
+                "error": f"Program timed out after {_PTC_TIMEOUT_SECONDS}s -- write shorter scripts, or fewer tool calls per script.",
+                "tool_call_history": tool_call_history,
+            }
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            continue
+        line = proc.stdout.readline()
+        if not line:
+            stderr_tail = ""
+            try:
+                stderr_tail = (proc.stderr.read() or "")[-1000:]
+            except Exception:
+                pass
+            _cleanup()
+            return {
+                "error": "The program sandbox exited unexpectedly." + (f" stderr: {stderr_tail}" if stderr_tail else ""),
+                "tool_call_history": tool_call_history,
+            }
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg_type = msg.get("type")
+
+        if msg_type == "call":
+            name = msg.get("tool", "")
+            args = msg.get("args") or {}
+            sub_call_count += 1
+            group = _bot_tool_type_group(name)
+            if sub_call_count > _PTC_MAX_SUBCALLS:
+                blocked_msg = f"BLOCKED: this program has made more than {_PTC_MAX_SUBCALLS} tool calls -- stop and call append_scratch_note with what you have."
+            elif group and group in tool_type_hard_stopped:
+                blocked_msg = f"BLOCKED: '{group}' tools are no longer available this turn -- call append_scratch_note with what you have."
+            else:
+                blocked_msg = None
+            if blocked_msg:
+                tool_call_history.append(_tool_call_history_entry(name, args, {"error": blocked_msg}))
+                try:
+                    proc.stdin.write(json.dumps({"type": "error", "message": blocked_msg}) + "\n")
+                    proc.stdin.flush()
+                except Exception:
+                    _cleanup()
+                    return {"error": "Lost the sandbox's input pipe mid-program.", "tool_call_history": tool_call_history}
+                continue
+            if group:
+                tool_type_counts[group] = tool_type_counts.get(group, 0) + 1
+            fake_tc = {"function": {"name": name, "arguments": args}}
+            fingerprint = _tool_call_fingerprint(fake_tc)
+            if seen_fingerprints.count(fingerprint) >= 2:
+                result = {"error": "BLOCKED: this exact tool call (same tool, same arguments) has already been made twice this turn. Use what you already have, or make a genuinely different call."}
+            else:
+                result = _execute_bot_tool_call(fake_tc, workspace, bot, session_key)
+                seen_fingerprints.append(fingerprint)
+                if len(seen_fingerprints) > 20:
+                    seen_fingerprints.pop(0)
+            tool_call_history.append(_tool_call_history_entry(name, args, result))
+            try:
+                proc.stdin.write(json.dumps({"type": "result", "value": result}) + "\n")
+                proc.stdin.flush()
+            except Exception:
+                _cleanup()
+                return {"error": "Lost the sandbox's input pipe mid-program.", "tool_call_history": tool_call_history}
+
+        elif msg_type == "done":
+            _cleanup()
+            return {
+                "status": "done",
+                "detail": f"Program finished after {sub_call_count} tool call(s). Call append_scratch_note if you haven't already.",
+                "tool_call_history": tool_call_history,
+            }
+        elif msg_type == "script_error":
+            _cleanup()
+            return {"error": f"The program raised an error: {msg.get('message', 'unknown error')}", "tool_call_history": tool_call_history}
+        else:
+            continue
+
+
+def _bot_tool_schemas(allowed_tools, hard_stopped_groups=None, ptc_enabled=False):
     """Build real tool schemas for a bot's own Ollama request, filtered
     through BOT_ALLOWED_TOOL_NAMES regardless of what's stored -- a
     write tool name surviving in allowed_tools_json can never actually
-    produce a usable schema."""
+    produce a usable schema.
+
+    hard_stopped_groups drops every tool belonging to a tool-type group
+    that's hit its per-turn hard-stop count (see _call_bot_endpoint) --
+    append_scratch_note is never in a group, so it survives any of
+    these cuts and stays the one way out. ptc_enabled adds run_tool_program
+    (see the PTC block above) alongside the individual tools, never instead
+    of them -- a bot can always fall back to calling tools one at a time."""
     pool = (
         BASH_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS
         + WEB_TOOL_SCHEMAS + get_lcm_tools()
@@ -5367,7 +6487,13 @@ def _bot_tool_schemas(allowed_tools):
            if s.get("function", {}).get("name") in ("list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt")]
     )
     effective = set(allowed_tools or []) & BOT_ALLOWED_TOOL_NAMES
-    return [s for s in pool if s.get("function", {}).get("name") in effective] + [APPEND_SCRATCH_NOTE_SCHEMA]
+    tools = [s for s in pool if s.get("function", {}).get("name") in effective]
+    if hard_stopped_groups:
+        tools = [s for s in tools if _bot_tool_type_group(s.get("function", {}).get("name")) not in hard_stopped_groups]
+    schemas = tools + [APPEND_SCRATCH_NOTE_SCHEMA]
+    if ptc_enabled and tools:
+        schemas = schemas + [_build_run_tool_program_schema(tools)]
+    return schemas
 
 
 def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
@@ -5860,6 +6986,24 @@ if __name__ == "__main__":
 
     _check_requirements()
     _start_bundled_lcm()
+
+    def _startup_reindex():
+        # Warm the embedding model here, explicitly, before touching any
+        # files -- so the potentially slow first-run model load (and its
+        # own [RAG] log lines, see rag._get_embedder) happens at a known
+        # point in the background at boot, decoupled from whichever thread
+        # (this one or a live chat request's search_codebase call) would
+        # otherwise have triggered it incidentally first.
+        rag.warm_up()
+        print("[Athena] Re-indexing codebase for RAG...", flush=True)
+        try:
+            rag.index_codebase(".")
+        except Exception as e:
+            print(f"[RAG] startup reindex failed: {e!r}", flush=True)
+            return
+        print("[Athena] RAG re-index complete.", flush=True)
+    threading.Thread(target=_startup_reindex, daemon=True).start()
+
     threading.Thread(target=_memory_scan_loop, daemon=True).start()
     threading.Thread(target=_task_scheduler_loop, daemon=True).start()
 

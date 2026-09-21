@@ -244,6 +244,7 @@
                                     </div>
                                     <div :class="msg.role === 'user' ? 'bubble-user text-white rounded-2xl rounded-tr-md px-4 py-2.5' : 'text-neutral-800 dark:text-neutral-100 surface-raised px-4 py-3'"
                                          class="text-[15px] leading-relaxed prose-msg" x-html="renderMarkdown(msg.content)"></div>
+                                    <span x-show="msg.created_at" x-text="relativeTime(msg.created_at)" class="text-xs text-neutral-400 dark:text-neutral-500 mt-1"></span>
                                     <div class="flex items-center gap-1" x-show="msg.role === 'user'">
                                         <button @click="copyMessage(msg.content, $event)" title="Copy" class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 opacity-0 group-hover:opacity-100 transition">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -1168,6 +1169,32 @@
                         <input type="text" x-model="searchUrl" @change="saveSearchUrl()" placeholder="http://localhost:4444" class="w-full text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2">
                         <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1.5" x-show="!searchUrl">Web search tools are unavailable until this is set.</div>
                     </div>
+                    <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm shrink-0">Delegation concurrency</span>
+                        <input type="number" min="1" max="16" step="1" x-model.number="delegationConcurrency" @change="saveDelegationConcurrency()" class="w-20 text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5 text-right">
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">How many plan_delegation steps can run at once. Defaults to 1 (one at a time) so this stays usable on modest hardware -- raise it only if your machine can actually run multiple bot turns in parallel. Two steps that land on the same inference endpoint still never run at the same moment, regardless of this setting.</div>
+                    <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm shrink-0">Programmatic tool calling for bots</span>
+                        <button @click="botPtcEnabled = !botPtcEnabled; saveBotPtcEnabled()" class="relative w-10 h-6 rounded-full transition shrink-0" :class="botPtcEnabled ? 'bg-[var(--accent)]' : 'bg-neutral-300 dark:bg-neutral-600'">
+                            <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition" :class="botPtcEnabled ? 'left-[18px]' : 'left-0.5'"></span>
+                        </button>
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">Lets bots write a short script that batches several tool calls into one turn instead of one round-trip per call. Off by default -- small/weaker local models are more likely to write buggy orchestration code than to make clean individual calls, so only turn this on if you're running a stronger model.</div>
+                    <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm shrink-0">Async delegation</span>
+                        <button @click="asyncDelegationEnabled = !asyncDelegationEnabled; saveAsyncDelegationEnabled()" class="relative w-10 h-6 rounded-full transition shrink-0" :class="asyncDelegationEnabled ? 'bg-[var(--accent)]' : 'bg-neutral-300 dark:bg-neutral-600'">
+                            <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition" :class="asyncDelegationEnabled ? 'left-[18px]' : 'left-0.5'"></span>
+                        </button>
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">Lets Athena2 keep working while a delegated bot runs in the background instead of waiting on it -- the result arrives as a new message once the bot (or the whole plan) finishes. Off by default.</div>
+                    <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm shrink-0">Laya-based guardrails</span>
+                        <button @click="layaGatingEnabled = !layaGatingEnabled; saveLayaGatingEnabled()" class="relative w-10 h-6 rounded-full transition shrink-0" :class="layaGatingEnabled ? 'bg-[var(--accent)]' : 'bg-neutral-300 dark:bg-neutral-600'">
+                            <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition" :class="layaGatingEnabled ? 'left-[18px]' : 'left-0.5'"></span>
+                        </button>
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">Uses a small local decision model to back up compound-instruction detection on prose-phrased asks the regex can't see, and to automatically flag delegation steps whose scratch note doesn't look grounded in what the bot's tools actually returned. Off by default.</div>
                 </div>
 
                 <div class="surface-raised p-5">

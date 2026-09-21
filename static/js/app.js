@@ -89,6 +89,10 @@ function athenaApp() {
         audioChunks: [],
         defaultModel: null,
         searchUrl: "",
+        delegationConcurrency: 1,
+        botPtcEnabled: false,
+        asyncDelegationEnabled: false,
+        layaGatingEnabled: false,
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
@@ -624,7 +628,7 @@ function athenaApp() {
             if (hours < 24) return hours + "h";
             const days = Math.floor(hours / 24);
             if (days < 7) return days + "d";
-            return new Date(timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+            return new Date(timestamp).toLocaleString(undefined, {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
         },
 
         groupedSessions() {
@@ -1332,6 +1336,24 @@ function athenaApp() {
             fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({search_url: this.searchUrl})}).catch(e => console.error("Failed to save search URL:", e));
         },
 
+        saveDelegationConcurrency() {
+            const n = Math.max(1, parseInt(this.delegationConcurrency, 10) || 1);
+            this.delegationConcurrency = n;
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({delegation_concurrency: n})}).catch(e => console.error("Failed to save delegation concurrency:", e));
+        },
+
+        saveBotPtcEnabled() {
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({bot_ptc_enabled: this.botPtcEnabled})}).catch(e => console.error("Failed to save PTC setting:", e));
+        },
+
+        saveAsyncDelegationEnabled() {
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({delegation_async_enabled: this.asyncDelegationEnabled})}).catch(e => console.error("Failed to save async delegation setting:", e));
+        },
+
+        saveLayaGatingEnabled() {
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({laya_gating_enabled: this.layaGatingEnabled})}).catch(e => console.error("Failed to save Laya gating setting:", e));
+        },
+
         openSaveNoteFilePopup() {
             this.saveNoteFilePopupOpen = true;
             this.saveNoteNewFolderName = "";
@@ -1615,6 +1637,10 @@ function athenaApp() {
                 if (data.endpoints !== undefined) this.endpoints = data.endpoints;
                 if (data.model_aliases !== undefined) this.modelAliases = data.model_aliases;
                 if (data.search_url !== undefined) this.searchUrl = data.search_url;
+                if (data.delegation_concurrency !== undefined && data.delegation_concurrency !== null) this.delegationConcurrency = data.delegation_concurrency;
+                if (data.bot_ptc_enabled !== undefined && data.bot_ptc_enabled !== null) this.botPtcEnabled = data.bot_ptc_enabled;
+                if (data.delegation_async_enabled !== undefined && data.delegation_async_enabled !== null) this.asyncDelegationEnabled = data.delegation_async_enabled;
+                if (data.laya_gating_enabled !== undefined && data.laya_gating_enabled !== null) this.layaGatingEnabled = data.laya_gating_enabled;
                 if (data.default_model !== undefined) this.defaultModel = data.default_model;
                 if (data.theme) {
                     this.customTheme = data.theme;
@@ -2372,7 +2398,7 @@ function athenaApp() {
             this.pendingAttachments = [];
             this.sending = true;
 
-            this.messages.push({role: "user", content: text, hasImage: imagesToSend.length > 0});
+            this.messages.push({role: "user", content: text, hasImage: imagesToSend.length > 0, created_at: Date.now()});
             let activeSession = this.sessions.find(s => s.id === this.sessionId);
             if (!activeSession) {
                 activeSession = {id: this.sessionId, label: text.slice(0, 40), createdAt: Date.now(), pinned: false};
@@ -2386,7 +2412,7 @@ function athenaApp() {
             }
             this.forceScrollToBottom();
 
-            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, tokensPerSec: null, model: this.modelLabel, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null};
+            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, tokensPerSec: null, model: this.modelLabel, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null, created_at: Date.now()};
             this.messages.push(assistantMsg);
             const msgIndex = this.messages.length - 1;
 

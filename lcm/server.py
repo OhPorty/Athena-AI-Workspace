@@ -85,13 +85,13 @@ def add_message(msg: MessageIn):
 def get_messages(session_id: str):
     conn = lcm._conn()
     rows = conn.execute(
-        "SELECT id, role, content, covered_by_node, model, has_image, thinking, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id",
+        "SELECT id, role, content, created_at, covered_by_node, model, has_image, thinking, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id",
         (session_id,)
     ).fetchall()
     conn.close()
     return [{
-        "id": r[0], "role": r[1], "content": r[2], "covered_by_node": r[3], "model": r[4], "has_image": bool(r[5]),
-        "thinking": r[6], "tool_calls": json.loads(r[7]) if r[7] else None,
+        "id": r[0], "role": r[1], "content": r[2], "created_at": r[3], "covered_by_node": r[4], "model": r[5], "has_image": bool(r[6]),
+        "thinking": r[7], "tool_calls": json.loads(r[8]) if r[8] else None,
     } for r in rows]
 
 @app.delete("/session/{session_id}")
