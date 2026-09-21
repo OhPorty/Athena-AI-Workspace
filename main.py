@@ -2,6 +2,7 @@
 Athena — a lean, LCM-backed chat/agent workspace with voice support.
 """
 import os
+import re
 import subprocess
 from urllib.parse import urlparse
 import sqlite3
@@ -29,8 +30,6 @@ import psutil
 import argparse
 from fastapi import FastAPI, UploadFile, File, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse, JSONResponse, FileResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from auth import AuthManager
 from rag import SimpleCodeRAG
 import laya_gate
 import settings
@@ -38,6 +37,12 @@ import task_context
 import activity
 import generation_streaming
 import lcm_client
+import voice
+import lsp_tools
+import skills
+import annotations
+import auth_routes
+import tool_output
 
 RAG_DB_PATH = os.environ.get("ATHENA_RAG_DB", "rag_index.db")
 rag = SimpleCodeRAG(RAG_DB_PATH)
@@ -61,159 +66,15 @@ OLLAMA_URL = os.environ.get("ATHENA_OLLAMA_URL", "http://localhost:11434/api/cha
 _SUB_AGENT_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)      # 10 minutes -- one bot round
 _MAIN_AGENT_TIMEOUT = httpx.Timeout(connect=10.0, read=3600.0, write=30.0, pool=10.0)    # 1 hour -- Athena's own turn
 DEFAULT_MODEL = os.environ.get("ATHENA_DEFAULT_MODEL", "gpt-oss-20b-32k:latest")
-WHISPER_MODEL_SIZE = os.environ.get("ATHENA_WHISPER_MODEL", "large-v3-turbo")
-PIPER_VOICE_PATH = os.environ.get("ATHENA_PIPER_VOICE_PATH", "/home/ohporty/athena/voices/en_US-lessac-medium.onnx")
 
 app = FastAPI(title="Athena")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(generation_streaming.router)
-
-# ---------------------------------------------------------------------------
-# Authentication -- single-user login gate. Adapted from Odysseus's proven
-# pattern: an outermost ASGI middleware rejects/redirects every request
-# except a small explicit exemption list, so nothing (no page, no API route)
-# is reachable without a valid session, matching Odysseus's own "0 UI access
-# without login" behavior.
-# ---------------------------------------------------------------------------
-auth_manager = AuthManager(os.path.join(os.path.dirname(os.path.abspath(__file__)), "athena_auth.json"))
-SESSION_COOKIE = "athena_auth_token"
-
-AUTH_EXEMPT_EXACT = {
-    "/login",
-    "/api/auth/setup",
-    "/api/auth/login",
-    "/api/auth/verify-2fa",
-    "/api/auth/status",
-    "/health",
-}
-AUTH_EXEMPT_PREFIXES = ["/static"]
-
-def _is_auth_exempt(path: str) -> bool:
-    if path in AUTH_EXEMPT_EXACT:
-        return True
-    return any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES)
-
-class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if _is_auth_exempt(path):
-            return await call_next(request)
-        if not auth_manager.is_configured:
-            if path.startswith("/api/"):
-                return JSONResponse(status_code=401, content={"error": "Setup required"})
-            return RedirectResponse(url="/login", status_code=302)
-        token = request.cookies.get(SESSION_COOKIE)
-        if not auth_manager.validate_token(token):
-            if path.startswith("/api/"):
-                return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-            return RedirectResponse(url="/login", status_code=302)
-        request.state.current_user = auth_manager.username
-        return await call_next(request)
-
-app.add_middleware(AuthMiddleware)
-
-class AuthSetupIn(BaseModel):
-    username: str
-    password: str
-
-class AuthLoginIn(BaseModel):
-    username: str
-    password: str
-
-class Auth2FAVerifyIn(BaseModel):
-    pending_token: str
-    code: str
-
-class ChangePasswordIn(BaseModel):
-    current_password: str
-    new_password: str
-
-class Totp2FAConfirmIn(BaseModel):
-    code: str
-
-class Totp2FADisableIn(BaseModel):
-    password: str
-
-def _set_session_cookie(response: Response, token: str):
-    response.set_cookie(
-        key=SESSION_COOKIE, value=token, max_age=60 * 60 * 24 * 30,
-        httponly=True, secure=True, samesite="lax",
-    )
-
-@app.get("/login", response_class=HTMLResponse)
-def login_page():
-    with open(os.path.join("static", "login.html")) as f:
-        return f.read()
-
-@app.get("/api/auth/status")
-def auth_status(request: Request):
-    token = request.cookies.get(SESSION_COOKIE)
-    return auth_manager.status(token)
-
-@app.post("/api/auth/setup")
-def auth_setup(req: AuthSetupIn, response: Response):
-    if auth_manager.is_configured:
-        return JSONResponse(status_code=400, content={"error": "Already configured"})
-    if not auth_manager.setup(req.username, req.password):
-        return JSONResponse(status_code=400, content={"error": f"Setup failed -- username required, password must be at least {auth_manager.policy()['password_min_length']} characters"})
-    token = auth_manager.create_session()
-    _set_session_cookie(response, token)
-    return {"ok": True}
-
-@app.post("/api/auth/login")
-def auth_login(req: AuthLoginIn, response: Response):
-    if not auth_manager.verify_password(req.username, req.password):
-        return JSONResponse(status_code=401, content={"error": "Invalid credentials"})
-    if auth_manager.totp_enabled:
-        pending_token = auth_manager.create_pending_2fa()
-        return {"requires_totp": True, "pending_token": pending_token}
-    token = auth_manager.create_session()
-    _set_session_cookie(response, token)
-    return {"ok": True}
-
-@app.post("/api/auth/verify-2fa")
-def auth_verify_2fa(req: Auth2FAVerifyIn, response: Response):
-    if not auth_manager.consume_pending_2fa(req.pending_token):
-        return JSONResponse(status_code=401, content={"error": "Login expired -- please try again"})
-    if not auth_manager.totp_verify(req.code):
-        return JSONResponse(status_code=401, content={"error": "Invalid code"})
-    token = auth_manager.create_session()
-    _set_session_cookie(response, token)
-    return {"ok": True}
-
-@app.post("/api/auth/logout")
-def auth_logout(request: Request, response: Response):
-    token = request.cookies.get(SESSION_COOKIE)
-    if token:
-        auth_manager.revoke_token(token)
-    response.delete_cookie(SESSION_COOKIE)
-    return {"ok": True}
-
-@app.post("/api/auth/change-password")
-def auth_change_password(req: ChangePasswordIn):
-    if not auth_manager.change_password(req.current_password, req.new_password):
-        return JSONResponse(status_code=400, content={"error": "Current password incorrect, or new password too short"})
-    return {"ok": True}
-
-@app.post("/api/auth/2fa/setup")
-def auth_2fa_setup():
-    secret = auth_manager.totp_generate_secret()
-    if not secret:
-        return JSONResponse(status_code=400, content={"error": "Account not configured"})
-    return {"secret": secret, "otpauth_uri": auth_manager.totp_provisioning_uri(secret)}
-
-@app.post("/api/auth/2fa/confirm")
-def auth_2fa_confirm(req: Totp2FAConfirmIn):
-    backup_codes = auth_manager.totp_confirm_enable(req.code)
-    if backup_codes is None:
-        return JSONResponse(status_code=400, content={"error": "Invalid code"})
-    return {"ok": True, "backup_codes": backup_codes}
-
-@app.post("/api/auth/2fa/disable")
-def auth_2fa_disable(req: Totp2FADisableIn):
-    if not auth_manager.totp_disable(req.password):
-        return JSONResponse(status_code=400, content={"error": "Incorrect password"})
-    return {"ok": True}
+app.include_router(voice.router)
+app.include_router(skills.router)
+app.include_router(annotations.router)
+app.include_router(auth_routes.router)
+app.add_middleware(auth_routes.AuthMiddleware)
 
 BASE_SYSTEM_PROMPT = (
     "You are Athena, a helpful assistant. Be direct and concise."
@@ -452,85 +313,6 @@ def _search_query_similarity(a, b):
     return len(words_a & words_b) / min(len(words_a), len(words_b))
 
 
-_large_tool_outputs = {}
-
-_large_tool_output_counter = [0]
-_LARGE_TOOL_OUTPUT_THRESHOLD = 3000
-_LARGE_TOOL_OUTPUT_MAX_STORED = 50
-
-# A bot's scratch file is already a deliberately curated, information-dense
-# deliverable -- not raw noise like a read_file dump -- so a generic head/
-# tail preview cuts exactly the itemized findings out of the middle. Exempt
-# these from _compress_tool_result entirely rather than relying on Athena2
-# remembering to call get_full_tool_output every time.
-_UNCOMPRESSED_TOOL_NAMES = {"read_scratch_file", "read_tool_call_history"}
-
-
-def _compress_tool_result(result):
-    """If a tool's result is large enough to meaningfully burn
-    context, store the full original and return a compressed version
-    instead -- head and tail shown (where the immediately relevant
-    content usually is), with a clear note on how much was cut and
-    how to retrieve the rest if genuinely needed. Rather than either
-    silently truncating with no way back, or always paying the full
-    token cost regardless of whether the omitted middle ever
-    matters."""
-    try:
-        serialized = json.dumps(result)
-    except (TypeError, ValueError):
-        return result
-    if len(serialized) <= _LARGE_TOOL_OUTPUT_THRESHOLD:
-        return result
-
-    _large_tool_output_counter[0] += 1
-    output_id = str(_large_tool_output_counter[0])
-    _large_tool_outputs[output_id] = result
-    if len(_large_tool_outputs) > _LARGE_TOOL_OUTPUT_MAX_STORED:
-        oldest_id = min(_large_tool_outputs.keys(), key=lambda k: int(k))
-        _large_tool_outputs.pop(oldest_id, None)
-
-    if isinstance(result, dict):
-        compressed = dict(result)
-        for field in ("output", "content"):
-            value = compressed.get(field)
-            if isinstance(value, str) and len(value) > _LARGE_TOOL_OUTPUT_THRESHOLD:
-                head, tail = value[:1200], value[-800:]
-                omitted = len(value) - len(head) - len(tail)
-                compressed[field] = (
-                    f"{head}\n\n... [{omitted} characters omitted -- use get_full_tool_output with "
-                    f"output_id '{output_id}' if you genuinely need the omitted middle] ...\n\n{tail}"
-                )
-                return compressed
-    return {
-        "note": f"This result was large ({len(serialized)} characters) and has been stored in full. "
-        f"Use get_full_tool_output with output_id '{output_id}' to retrieve it if genuinely needed.",
-        "preview": serialized[:1500],
-    }
-
-
-def _get_full_tool_output_tool(output_id):
-    result = _large_tool_outputs.get(str(output_id))
-    if result is None:
-        return {"error": f"No stored output with id '{output_id}'. It may have aged out, or the id is wrong."}
-    return result
-
-
-CONTEXT_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_full_tool_output",
-            "description": "Retrieve the full, uncompressed result of an earlier tool call that was shown to you as a compressed head/tail preview because it was too large. Only call this if the omitted middle genuinely matters -- most of the time the preview already has what you need.",
-            "parameters": {
-                "type": "object",
-                "properties": {"output_id": {"type": "string", "description": "The output_id named in the compressed result's note."}},
-                "required": ["output_id"],
-            },
-        },
-    },
-]
-
-
 def _resolve_mode_and_workspace(req):
     """Explicit, named mode resolution -- not inferred piecemeal from
     workspace truthiness scattered across several call sites. Athena's
@@ -572,7 +354,7 @@ def _get_dynamic_context_message(req):
     own separate message rather than string-concatenated onto the
     system prompt. Returns None when there's genuinely nothing to
     include, so the caller can skip adding an empty message."""
-    content = _get_memory_context() + _get_skills_context(req.allowed_skills) + _get_pinned_context(req.session_id)
+    content = _get_memory_context() + skills.get_skills_context(req.allowed_skills) + annotations.get_pinned_context(req.session_id)
     if not content.strip():
         return None
     return {"role": "user", "content": content}
@@ -634,9 +416,9 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
     if req.search_url:
         tools = tools + WEB_TOOL_SCHEMAS
     if mode in ("workspace", "athena_delegation"):
-        tools = tools + BASH_TOOL_SCHEMAS + BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS + CONTEXT_TOOL_SCHEMAS
-    if _scan_skills():
-        tools = tools + SKILL_TOOL_SCHEMAS
+        tools = tools + BASH_TOOL_SCHEMAS + BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS
+    if skills.scan_skills():
+        tools = tools + skills.SKILL_TOOL_SCHEMAS
     if mode == "athena_delegation":
         tools = tools + _bot_delegation_tool_schemas_for_mode(bool(settings.load_settings().get("delegation_async_enabled")))
     called = called_tool_names or set()
@@ -713,162 +495,6 @@ class ChatIn(BaseModel):
     api_key: str = ""  # only used when provider is set
 
 
-class TtsIn(BaseModel):
-    text: str
-
-
-
-
-RATINGS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratings.db")
-
-def _ratings_conn():
-    conn = sqlite3.connect(RATINGS_DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS ratings (
-            message_id INTEGER PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            model TEXT NOT NULL,
-            rating TEXT NOT NULL,
-            reason TEXT,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    return conn
-
-class RatingIn(BaseModel):
-    message_id: int
-    session_id: str
-    model: str
-    rating: str = ""  # "up", "down", or "" to remove the rating entirely
-    reason: str = ""
-
-@app.post("/api/rate")
-def rate_message(req: RatingIn):
-    """Upsert-or-delete semantics: re-rating or removing a vote always
-    recomputes cleanly from current state, since /api/model-stats
-    aggregates directly from whatever rows currently exist -- a changed
-    or removed vote is automatically reflected with no separate
-    increment/decrement bookkeeping to get wrong."""
-    conn = _ratings_conn()
-    try:
-        if not req.rating:
-            conn.execute("DELETE FROM ratings WHERE message_id = ?", (req.message_id,))
-        else:
-            conn.execute("""
-                INSERT INTO ratings (message_id, session_id, model, rating, reason, updated_at)
-                VALUES (?, ?, ?, ?, ?, datetime('now'))
-                ON CONFLICT(message_id) DO UPDATE SET
-                    rating = excluded.rating,
-                    reason = excluded.reason,
-                    updated_at = excluded.updated_at
-            """, (req.message_id, req.session_id, req.model, req.rating, req.reason))
-        conn.commit()
-        return {"ok": True}
-    finally:
-        conn.close()
-
-@app.get("/api/ratings/{session_id}")
-def get_ratings(session_id: str):
-    """Returns {message_id: {rating, reason}} for a session, so the
-    frontend can re-apply which button should show as selected after
-    a reload -- ratings live in this DB, not in the message history
-    LCM returns, since LCM has no concept of a 'rating' field."""
-    conn = _ratings_conn()
-    try:
-        rows = conn.execute(
-            "SELECT message_id, rating, reason FROM ratings WHERE session_id = ?",
-            (session_id,)
-        ).fetchall()
-        return {str(r[0]): {"rating": r[1], "reason": r[2]} for r in rows}
-    finally:
-        conn.close()
-
-PINS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins.db")
-def _pins_conn():
-    conn = sqlite3.connect(PINS_DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS pinned_messages (
-            message_id INTEGER PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            content TEXT NOT NULL,
-            pinned_at TEXT NOT NULL
-        )
-    """)
-    return conn
-class PinIn(BaseModel):
-    message_id: int
-    session_id: str
-    content: str = ""
-    pinned: bool = True
-@app.post("/api/pin")
-def pin_message(req: PinIn):
-    """Upsert-or-delete, mirroring /api/rate. Stores the message's
-actual
-    content at pin time (a snapshot), not just a reference to it --
-    that's deliberate: the whole point of pinning is to survive LCM's
-    own auto-compaction of older context, so the pinned copy has to be
-    completely independent of whatever LCM does to its own history
-    later."""
-    conn = _pins_conn()
-    try:
-        if not req.pinned:
-            conn.execute("DELETE FROM pinned_messages WHERE message_id = ?", (req.message_id,))
-        else:
-            conn.execute("""
-                INSERT INTO pinned_messages (message_id, session_id, content, pinned_at)
-                VALUES (?, ?, ?, datetime('now'))
-                ON CONFLICT(message_id) DO UPDATE SET
-                    content = excluded.content,
-                    pinned_at = excluded.pinned_at
-            """, (req.message_id, req.session_id, req.content))
-        conn.commit()
-        return {"ok": True}
-    finally:
-        conn.close()
-@app.get("/api/pins/{session_id}")
-def get_pins(session_id: str):
-    """Returns {message_id: {content}} for a session, so the frontend
-    can re-apply which messages show the pin toggle as active after a
-    reload."""
-    conn = _pins_conn()
-    try:
-        rows = conn.execute(
-            "SELECT message_id, content FROM pinned_messages WHERE session_id = ? ORDER BY pinned_at ASC",
-            (session_id,)
-        ).fetchall()
-        return {str(r[0]): {"content": r[1]} for r in rows}
-    finally:
-        conn.close()
-def _get_pinned_context(session_id: str) -> str:
-    """Formats currently-pinned messages for this session into a system-
-    prompt block. Injected fresh on every turn regardless of how far
-    back in the conversation the original message now sits, or whether
-    LCM's own recall/compaction would have surfaced it -- this is the
-    actual fix for the model losing track of an earlier multi-step plan
-    a few messages later instead of consulting it."""
-    conn = _pins_conn()
-    try:
-        rows = conn.execute(
-            "SELECT content FROM pinned_messages WHERE session_id = ? ORDER BY pinned_at ASC",
-            (session_id,)
-        ).fetchall()
-    finally:
-        conn.close()
-    if not rows:
-        return ""
-    items = "\n\n".join(f"[Pinned message {i+1}]\n{r[0]}" for i, r in enumerate(rows))
-    return (
-        "\n\n--- PINNED CONTEXT ---\n"
-        "The user has pinned the following message(s) to stay in context for the "
-        "rest of this session, regardless of how far back they now sit in the "
-        "conversation. Treat this as still-active, authoritative context -- for "
-        "example, if this is a step-by-step plan, keep following it exactly rather "
-        "than reconstructing or guessing the steps from memory.\n\n"
-        f"{items}\n"
-        "--- END PINNED CONTEXT ---"
-    )
-
-
 def _search_codebase(query: str, limit: int = 3):
     """Tool-callable RAG search over the indexed codebase, returning
     structured results the model can inspect and, if needed, refine
@@ -919,7 +545,7 @@ def get_model_stats():
     """Aggregate up/down counts per model, for showing real quality
     signal on the Models page -- computed fresh from current rows every
     call, so it's always correct even after votes change or get removed."""
-    conn = _ratings_conn()
+    conn = annotations.ratings_conn()
     try:
         rows = conn.execute("""
             SELECT model,
@@ -1148,160 +774,6 @@ def delete_workspace_entry(workspace: str, path: str = ""):
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"delete failed: {e}"}
-
-
-import yaml
-import re
-
-SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
-
-def _parse_skill_frontmatter(content: str):
-    """Splits a SKILL.md's YAML frontmatter from its Markdown body.
-    Matches the open Agent Skills / SKILL.md standard, so skills
-    built here are usable elsewhere too and vice versa. Returns
-    (metadata, body), or (None, content) if there's no valid
-    frontmatter block."""
-    if not content.startswith("---"):
-        return None, content
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return None, content
-    try:
-        metadata = yaml.safe_load(parts[1]) or {}
-    except yaml.YAMLError:
-        return None, content
-    return metadata, parts[2].lstrip(chr(10))
-
-def _scan_skills():
-    """Lists every skill: a folder under SKILLS_DIR with a SKILL.md
-    that has at least a name and description in its frontmatter.
-    Only name+description are read here (progressive disclosure
-    level 1) -- cheap enough to include for every skill on every
-    request."""
-    skills = []
-    if not os.path.isdir(SKILLS_DIR):
-        return skills
-    for entry in sorted(os.listdir(SKILLS_DIR)):
-        skill_md = os.path.join(SKILLS_DIR, entry, "SKILL.md")
-        if not os.path.isfile(skill_md):
-            continue
-        try:
-            content = open(skill_md, encoding="utf-8").read()
-        except Exception:
-            continue
-        metadata, _ = _parse_skill_frontmatter(content)
-        if not metadata or not metadata.get("name") or not metadata.get("description"):
-            continue
-        skills.append({"name": metadata["name"], "description": metadata["description"], "folder": entry})
-    return skills
-
-def _load_skill(name: str):
-    """Returns one skill's full body -- progressive disclosure level
-    2, called by the model via the load_skill tool once it decides a
-    skill is relevant based on its description."""
-    for s in _scan_skills():
-        if s["name"] == name:
-            content = open(os.path.join(SKILLS_DIR, s["folder"], "SKILL.md"), encoding="utf-8").read()
-            _, body = _parse_skill_frontmatter(content)
-            return {"name": name, "content": body}
-    return {"error": "No skill named '" + name + "' found."}
-
-def _slugify(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug or "skill"
-
-class SkillParseIn(BaseModel):
-    content: str
-
-@app.post("/api/skills/parse")
-def parse_skill_upload(req: SkillParseIn):
-    """Parses an uploaded SKILL.md's frontmatter+body without saving
-    anything, so the person can review/edit in the form before it
-    actually gets written to disk."""
-    metadata, body = _parse_skill_frontmatter(req.content)
-    if not metadata or not metadata.get("name") or not metadata.get("description"):
-        return {"error": "This file doesn't have valid SKILL.md frontmatter (needs at least name and description)."}
-    return {"name": metadata.get("name"), "description": metadata.get("description"), "body": body}
-
-from bs4 import BeautifulSoup
-import re as _re
-
-@app.get("/api/skills")
-def list_skills():
-    return {"skills": _scan_skills()}
-
-@app.get("/api/skills/{folder}")
-def get_skill(folder: str):
-    if ".." in folder or "/" in folder:
-        return {"error": "Invalid folder name."}
-    skill_md = os.path.join(SKILLS_DIR, folder, "SKILL.md")
-    if not os.path.isfile(skill_md):
-        return {"error": "Skill not found."}
-    content = open(skill_md, encoding="utf-8").read()
-    metadata, body = _parse_skill_frontmatter(content)
-    if not metadata:
-        return {"error": "Skill file has no valid frontmatter."}
-    return {"name": metadata.get("name"), "description": metadata.get("description"), "body": body, "folder": folder}
-
-class SkillIn(BaseModel):
-    name: str
-    description: str
-    body: str
-    folder: Optional[str] = None
-
-@app.post("/api/skills")
-def save_skill(req: SkillIn):
-    os.makedirs(SKILLS_DIR, exist_ok=True)
-    folder = req.folder or _slugify(req.name)
-    if ".." in folder or "/" in folder:
-        return {"error": "Invalid folder name."}
-    skill_dir = os.path.join(SKILLS_DIR, folder)
-    os.makedirs(skill_dir, exist_ok=True)
-    frontmatter = yaml.safe_dump({"name": req.name, "description": req.description}, default_flow_style=False, sort_keys=False)
-    content = "---" + chr(10) + frontmatter + "---" + chr(10) + chr(10) + req.body
-    with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-        f.write(content)
-    return {"ok": True, "folder": folder}
-
-@app.delete("/api/skills/{folder}")
-def delete_skill(folder: str):
-    if ".." in folder or "/" in folder:
-        return {"error": "Invalid folder name."}
-    skill_dir = os.path.join(SKILLS_DIR, folder)
-    if os.path.isdir(skill_dir):
-        import shutil
-        shutil.rmtree(skill_dir)
-        return {"ok": True}
-    return {"error": "Skill not found."}
-
-SKILL_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "load_skill",
-            "description": "Loads the full instructions for one available skill by name. Call this when a skill's description (listed in your system context) matches what you're being asked to do.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "The exact skill name, as listed in your available skills."},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-]
-
-def _get_skills_context(allowed_skills=None) -> str:
-    skills = _scan_skills()
-    if allowed_skills is not None:
-        allowed_set = set(allowed_skills)
-        skills = [s for s in skills if s["name"] in allowed_set]
-    if not skills:
-        return ""
-    lines = ["Available skills: call load_skill(name) to load one's full instructions when its description matches the current task."]
-    for s in skills:
-        lines.append("- " + s["name"] + ": " + s["description"])
-    return chr(10) + chr(10) + chr(10).join(lines)
 
 
 WEB_TOOL_SCHEMAS = [
@@ -2108,106 +1580,6 @@ RAG_TOOL_SCHEMAS = [
                     "limit": {"type": "integer", "description": "Maximum number of result chunks to return (default 3, max 10)."},
                 },
                 "required": ["query"],
-            },
-        },
-    },
-]
-
-
-# Long-lived LSP process registry, mirroring the bundled-LCM subprocess
-# pattern above: one pyright-langserver process per workspace root,
-# started lazily on first use and reused across sessions/turns rather
-# than restarted per query (re-indexing a real codebase from cold is
-# slow, and every session working on the same workspace should share
-# one warm process the same way multiple editor windows on one project
-# share a single language server). An idle sweep tears down processes
-# nobody has used in a while, since a self-hosted server that runs for
-# weeks shouldn't accumulate one live pyright process per workspace
-# ever touched.
-_lsp_clients = {}
-_lsp_clients_lock = threading.Lock()
-LSP_IDLE_TIMEOUT_SECONDS = 1800
-
-
-def _get_lsp_client(workspace: str):
-    from lsp_client import LSPClient
-    root = os.path.realpath(workspace)
-    now = time.time()
-    with _lsp_clients_lock:
-        for key, client in list(_lsp_clients.items()):
-            if now - client.last_used > LSP_IDLE_TIMEOUT_SECONDS:
-                try:
-                    client.shutdown()
-                except Exception:
-                    pass
-                del _lsp_clients[key]
-        client = _lsp_clients.get(root)
-        if client is None:
-            client = LSPClient(root)
-            _lsp_clients[root] = client
-        client.last_used = now
-        return client
-
-
-def _shutdown_lsp_clients():
-    with _lsp_clients_lock:
-        for client in _lsp_clients.values():
-            try:
-                client.shutdown()
-            except Exception:
-                pass
-        _lsp_clients.clear()
-
-
-atexit.register(_shutdown_lsp_clients)
-
-
-LSP_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "find_definition",
-            "description": "Find where a symbol (function, class, variable) is actually defined, using real semantic code analysis (not text search) -- follows imports and scoping the way a real editor's 'go to definition' does. Give the line where the symbol is USED (or defined), and the exact visible text of the symbol itself; no character/column counting needed. Requires an active workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file, relative to the workspace root."},
-                    "line": {"type": "integer", "description": "1-indexed line number where the symbol appears."},
-                    "symbol": {"type": "string", "description": "The exact visible text of the symbol, e.g. '_execute_readonly_bash'."},
-                },
-                "required": ["path", "line", "symbol"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_references",
-            "description": "Find every real usage of a symbol across the whole workspace, using semantic analysis -- not a text/grep match, so it won't miss aliased imports or false-match unrelated identical names elsewhere. Give the line where the symbol is defined (or any usage of it) and its exact visible text; no character/column counting needed. Requires an active workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file, relative to the workspace root."},
-                    "line": {"type": "integer", "description": "1-indexed line number where the symbol appears."},
-                    "symbol": {"type": "string", "description": "The exact visible text of the symbol, e.g. '_execute_readonly_bash'."},
-                },
-                "required": ["path", "line", "symbol"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "type_info",
-            "description": "Get the real inferred type and signature of a symbol at a specific point in the code, the way hovering in a real editor would show -- more reliable than guessing from context. Give the line where the symbol appears and its exact visible text; no character/column counting needed. Requires an active workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file, relative to the workspace root."},
-                    "line": {"type": "integer", "description": "1-indexed line number where the symbol appears."},
-                    "symbol": {"type": "string", "description": "The exact visible text of the symbol, e.g. '_execute_readonly_bash'."},
-                },
-                "required": ["path", "line", "symbol"],
             },
         },
     },
@@ -3136,7 +2508,7 @@ def chat_stream(req: ChatIn):
         if name == "web_fetch":
             return _web_fetch(args.get("url", ""))
         if name == "load_skill":
-            return _load_skill(args.get("name", ""))
+            return skills.load_skill(args.get("name", ""))
         if name == "bash":
             return _execute_readonly_bash(args.get("command", ""), args.get("args", []), req.workspace)
         if name == "bash_exec":
@@ -3148,13 +2520,13 @@ def chat_stream(req: ChatIn):
         if name == "bash_exec_stop":
             return _stop_background_bash(args.get("process_id", ""), args.get("force", False))
         if name == "get_full_tool_output":
-            return _get_full_tool_output_tool(args.get("output_id", ""))
+            return tool_output.get_full_tool_output_tool(args.get("output_id", ""))
         if name == "find_definition":
-            return _get_lsp_client(req.workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+            return lsp_tools.get_lsp_client(req.workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
         if name == "find_references":
-            return _get_lsp_client(req.workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+            return lsp_tools.get_lsp_client(req.workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
         if name == "type_info":
-            return _get_lsp_client(req.workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+            return lsp_tools.get_lsp_client(req.workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
         if name == "list_files":
             return _list_files(req.workspace, args.get("path", "."))
         if name == "read_file":
@@ -3578,7 +2950,7 @@ def chat_stream(req: ChatIn):
                 # The person always sees the real, full result above (nothing hidden) --
                 # only what actually goes back into the model's own context gets compressed,
                 # since that's the thing burning tokens, not what's shown in the UI.
-                _result_for_context = result if tool_name in _UNCOMPRESSED_TOOL_NAMES else _compress_tool_result(result)
+                _result_for_context = result if tool_name in tool_output.UNCOMPRESSED_TOOL_NAMES else tool_output.compress_tool_result(result)
                 _messages.append({"role": "tool", "content": json.dumps(_result_for_context)})
 
             if (_gate_was_open and _exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
@@ -3640,73 +3012,6 @@ def chat_stream(req: ChatIn):
 
     return StreamingResponse(_stream_from_queue(), media_type="text/event-stream")
 
-
-# ---------------------------------------------------------------------------
-# Voice: faster-whisper (local, free) for STT, Piper (local, free, ONNX) for TTS
-# ---------------------------------------------------------------------------
-_whisper_model = None
-_piper_voice = None
-
-def _get_piper_voice():
-    global _piper_voice
-    if _piper_voice is None:
-        from piper import PiperVoice
-        if not os.path.exists(PIPER_VOICE_PATH):
-            raise FileNotFoundError(
-                f"Piper voice model not found at {PIPER_VOICE_PATH}. "
-                f"Download one from https://github.com/rhasspy/piper/releases "
-                f"or https://huggingface.co/rhasspy/piper-voices "
-                f"(need both the .onnx file and its matching .onnx.json config)."
-            )
-        _piper_voice = PiperVoice.load(PIPER_VOICE_PATH)
-    return _piper_voice
-
-def _get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
-    return _whisper_model
-
-
-@app.post("/api/transcribe")
-async def transcribe(file: UploadFile = File(...)):
-    try:
-        model = _get_whisper_model()
-    except Exception as e:
-        return {"error": f"Whisper model failed to load: {e}"}
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
-
-    try:
-        segments, _info = model.transcribe(tmp_path, beam_size=5)
-        text = " ".join(seg.text.strip() for seg in segments)
-        return {"text": text}
-    except Exception as e:
-        return {"error": f"Transcription failed: {e}"}
-    finally:
-        os.unlink(tmp_path)
-
-
-@app.post("/api/tts")
-async def tts(req: TtsIn):
-    import wave
-    try:
-        voice = _get_piper_voice()
-    except Exception as e:
-        return {"error": f"Piper TTS unavailable: {e}"}
-
-    buf = io.BytesIO()
-    try:
-        with wave.open(buf, "wb") as wav_file:
-            voice.synthesize(req.text, wav_file)
-    except Exception as e:
-        return {"error": f"TTS synthesis failed: {e}"}
-
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="audio/wav")
 
 
 @app.get("/api/history/{session_id}")
@@ -6195,7 +5500,7 @@ def _bot_tool_schemas(allowed_tools, hard_stopped_groups=None, ptc_enabled=False
     (see the PTC block above) alongside the individual tools, never instead
     of them -- a bot can always fall back to calling tools one at a time."""
     pool = (
-        BASH_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + LSP_TOOL_SCHEMAS
+        BASH_TOOL_SCHEMAS + FILE_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS
         + WEB_TOOL_SCHEMAS + lcm_client.get_lcm_tools()
         + [s for s in BOT_DELEGATION_TOOL_SCHEMAS
            if s.get("function", {}).get("name") in ("list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt")]
@@ -6236,11 +5541,11 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key):
     if name == "search_codebase":
         return _search_codebase(args.get("query", ""), args.get("limit", 3))
     if name == "find_definition":
-        return _get_lsp_client(workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+        return lsp_tools.get_lsp_client(workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
     if name == "find_references":
-        return _get_lsp_client(workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+        return lsp_tools.get_lsp_client(workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
     if name == "type_info":
-        return _get_lsp_client(workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+        return lsp_tools.get_lsp_client(workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
     if name == "web_search":
         return _web_search(None, args.get("query", ""))
     if name == "web_fetch":
@@ -6410,7 +5715,7 @@ def task_capabilities():
     return {
         "tools": _available_task_tools(),
         "default_enabled_tools": sorted(_DEFAULT_ENABLED_TASK_TOOLS),
-        "skills": [{"name": s.get("name"), "description": s.get("description", "")} for s in _scan_skills()],
+        "skills": [{"name": s.get("name"), "description": s.get("description", "")} for s in skills.scan_skills()],
     }
 
 @app.get("/api/tasks")
