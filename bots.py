@@ -11,7 +11,6 @@ import threading
 from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 
-import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -1397,9 +1396,12 @@ def _bot_tool_schemas(allowed_tools, hard_stopped_groups=None, ptc_enabled=False
 
 
 def _execute_bot_tool_call(tool_call, workspace, bot, session_key, search_url=""):
-    """Dispatch one tool call a bot actually made. Gated against
-    BOT_ALLOWED_TOOL_NAMES a second time here, independent of what
-    schemas it was even offered -- belt and suspenders."""
+    """Dispatch one tool call a bot actually made -- a thin wrapper over
+    the shared main.dispatch_tool (see the plan-first/dispatch-unification
+    work), gated by BOT_ALLOWED_TOOL_NAMES. append_scratch_note is handled
+    here directly, before that gate, since it's bot-specific and was never
+    part of BOT_ALLOWED_TOOL_NAMES to begin with."""
+    from main import dispatch_tool, ToolContext  # deferred: main.py imports bots.py at module load
     fn = tool_call.get("function", {})
     name = fn.get("name", "")
     print(f"[BOT TOOL CALL] {bot.get('name', '?')} -> {name}", flush=True)
@@ -1411,45 +1413,12 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key, search_url=""
             args = {}
     if name == BOT_SCRATCH_TOOL_NAME:
         return _append_scratch_note(bot["name"], args.get("content", ""))
-    if name not in BOT_ALLOWED_TOOL_NAMES:
-        return {"error": f"'{name}' is not a tool this bot is permitted to use."}
-    from main import _search_codebase  # deferred: main.py imports bots.py at module load
-    import rooms  # deferred: rooms.py imports bots.py at module load
-    if name == "bash":
-        return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), workspace)
-    if name == "list_files":
-        return file_tools.list_files(workspace, args.get("path", "."))
-    if name == "read_file":
-        return file_tools.read_file(workspace, args.get("path", ""), args.get("offset", 0))
-    if name == "search_codebase":
-        return _search_codebase(args.get("query", ""), args.get("limit", 3))
-    if name == "find_definition":
-        return lsp_tools.get_lsp_client(workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
-    if name == "find_references":
-        return lsp_tools.get_lsp_client(workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
-    if name == "type_info":
-        return lsp_tools.get_lsp_client(workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
-    if name == "web_search":
-        if not search_url:
-            return {"error": "No search engine is configured (search_url is empty in Athena's settings) -- web_search is unavailable until one is set."}
-        return web_tools.web_search(search_url, args.get("query", ""))
-    if name == "web_fetch":
-        return web_tools.web_fetch(args.get("url", ""))
-    if name == "list_bots":
-        return _list_bots_tool()
-    if name == "list_rooms":
-        return rooms._list_rooms_tool()
-    if name == "message_bot":
-        return _message_bot_tool(args.get("bot_id"), args.get("content", ""))
-    if name == "read_room_messages":
-        return rooms._read_room_messages_tool(args.get("room_id"))
-    if name == "draft_bot_prompt":
-        return _draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
-    args["session_id"] = session_key
-    try:
-        resp = httpx.post(f"{lcm_client.LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
-        if resp.status_code == 200:
-            return resp.json().get("result")
-        return {"error": f"Tool call failed: HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"error": f"Tool call failed: {e}"}
+    ctx = ToolContext(
+        workspace=workspace,
+        search_url=search_url,
+        bot=bot,
+        session_key=session_key,
+        passthrough_session_id=session_key,
+        require_athena_bots_session=False,
+    )
+    return dispatch_tool(name, args, ctx, allowed_names=BOT_ALLOWED_TOOL_NAMES)
