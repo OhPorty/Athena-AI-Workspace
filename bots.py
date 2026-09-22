@@ -798,6 +798,8 @@ def _plan_delegation_tool(steps):
 
 def _message_bot_tool(bot_id, content):
     import rooms  # deferred: rooms.py imports bots.py at module load
+    if task_context.current_task_hash.get() is not None:
+        return {"error": "A delegation task is already active this turn -- message_bot cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
     conn = _bots_conn()
     try:
         room_row = conn.execute(

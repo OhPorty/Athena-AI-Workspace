@@ -523,6 +523,183 @@ def _search_codebase(query: str, limit: int = 3):
     }
 
 
+# The bot-delegation tool cluster used to be gated only inside chat_stream's
+# own closure-based dispatcher -- bots.py's and rooms.py's dispatchers reach
+# several of these same names too, but without the ATHENA_BOTS_SESSION_ID
+# restriction, since that restriction only ever meant "a regular user chat
+# session can't use these directly," not "no non-Athena-chat caller ever
+# can." ToolContext.require_athena_bots_session below is what preserves
+# that distinction with one shared table instead of three separate ones.
+_BOT_DELEGATION_CLUSTER_NAMES = {
+    "list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages",
+    "message_room", "create_bot", "update_bot", "run_delegation_step", "read_scratch_file",
+    "read_tool_call_history", "plan_delegation",
+}
+
+
+class ToolContext:
+    """Shared per-call context for dispatch_tool below, built differently
+    by each of the three call sites (chat_stream's own dispatch, bot
+    delegation, Athena's room-turn loop) from whatever fields that caller
+    actually has. A plain class, not pydantic -- this is internal,
+    per-tool-call hot-path state, never parsed from external input, so
+    validation overhead isn't worth paying on every single tool call."""
+    def __init__(self, session_id="", workspace="", search_url="", bot=None, session_key=None,
+                 req=None, plan_state=None, passthrough_session_id=None,
+                 require_athena_bots_session=False,
+                 unknown_tool_message_template="Unknown tool: {name}"):
+        self.session_id = session_id
+        self.workspace = workspace
+        self.search_url = search_url
+        self.bot = bot
+        self.session_key = session_key
+        self.req = req
+        self.plan_state = plan_state  # None unless the caller supports write_plan (only chat_stream does)
+        self.passthrough_session_id = passthrough_session_id  # None disables the generic LCM tools/call fallback entirely
+        self.require_athena_bots_session = require_athena_bots_session
+        self.unknown_tool_message_template = unknown_tool_message_template
+
+
+def _render_plan_state(plan_state):
+    if not plan_state:
+        return {"plan": [], "note": "No plan recorded yet -- call write_plan first."}
+    lines = []
+    for i, step in enumerate(plan_state):
+        marker = {"done": "[x]", "failed": "[!]", "in_progress": "[~]"}.get(step["status"], "[ ]")
+        note = f" -- {step['note']}" if step.get("note") else ""
+        lines.append(f"{i}. {marker} {step['text']}{note}")
+    return {"plan": "\n".join(lines)}
+
+
+def dispatch_tool(name, args, ctx, allowed_names=None):
+    """Single shared tool dispatcher -- replaces what used to be three
+    independently hand-written copies (chat_stream's own closure,
+    bots._execute_bot_tool_call, rooms._dispatch_athena_room_tool_call),
+    which had already started drifting apart (the room one covered a
+    narrower, separately-maintained set). allowed_names is the calling
+    loop's own permission scope: None means the full table, used by
+    chat_stream since _get_mode_tools already controls what the model can
+    even see -- this is a defensive second layer there, not the primary
+    gate. bots.py and rooms.py pass their own real allow-sets, since this
+    IS the primary enforcement for them."""
+    if allowed_names is not None and name not in allowed_names:
+        return {"error": f"'{name}' is not a tool available in this context."}
+
+    if name == "web_search":
+        if not ctx.search_url:
+            return {"error": "No search engine is configured (search_url is empty in Athena's settings) -- web_search is unavailable until one is set."}
+        return web_tools.web_search(ctx.search_url, args.get("query", ""))
+    if name == "web_fetch":
+        return web_tools.web_fetch(args.get("url", ""))
+    if name == "load_skill":
+        return skills.load_skill(args.get("name", ""))
+    if name == "bash":
+        return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
+    if name == "bash_exec":
+        return bash_tools.execute_write_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
+    if name == "bash_exec_start":
+        return bash_tools.start_background_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
+    if name == "bash_exec_check":
+        return bash_tools.check_background_bash(args.get("process_id", ""))
+    if name == "bash_exec_stop":
+        return bash_tools.stop_background_bash(args.get("process_id", ""), args.get("force", False))
+    if name == "get_full_tool_output":
+        return tool_output.get_full_tool_output_tool(args.get("output_id", ""))
+    if name == "find_definition":
+        return lsp_tools.get_lsp_client(ctx.workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+    if name == "find_references":
+        return lsp_tools.get_lsp_client(ctx.workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+    if name == "type_info":
+        return lsp_tools.get_lsp_client(ctx.workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
+    if name == "list_files":
+        return file_tools.list_files(ctx.workspace, args.get("path", "."))
+    if name == "read_file":
+        return file_tools.read_file(ctx.workspace, args.get("path", ""), args.get("offset", 0))
+    if name == "write_file":
+        return file_tools.write_file(ctx.workspace, args.get("path", ""), args.get("content", ""))
+    if name == "edit_file":
+        return file_tools.edit_file(ctx.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
+    if name == "replace_lines":
+        return file_tools.replace_lines(ctx.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
+    if name == "backup_file":
+        return backup_tools.backup_file(args.get("path", ""))
+    if name == "restore_file":
+        return backup_tools.restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
+
+    if name in _BOT_DELEGATION_CLUSTER_NAMES:
+        if ctx.require_athena_bots_session and ctx.session_id != bots.ATHENA_BOTS_SESSION_ID:
+            return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
+        if name == "list_bots":
+            return bots._list_bots_tool()
+        if name == "draft_bot_prompt":
+            return bots._draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
+        if name == "message_bot":
+            return bots._message_bot_tool(args.get("bot_id"), args.get("content", ""))
+        if name == "list_rooms":
+            return rooms._list_rooms_tool()
+        if name == "read_room_messages":
+            return rooms._read_room_messages_tool(args.get("room_id"))
+        if name == "message_room":
+            return rooms._message_room_tool(args.get("room_id"), args.get("content", ""))
+        if name == "create_bot":
+            return bots._create_bot_tool(args.get("name", ""), args.get("description", ""), args.get("allowed_tools", []))
+        if name == "update_bot":
+            return bots._update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
+        if name == "run_delegation_step":
+            task_context.get_task_hash(ctx.session_id)
+            if ctx.req is not None and settings.load_settings().get("delegation_async_enabled"):
+                return delegation_jobs._run_delegation_step_async_tool(ctx.req, args.get("bot_id"), args.get("instruction", ""))
+            return bots._run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""))
+        if name == "read_scratch_file":
+            return bots._read_scratch_file(args.get("bot_name", ""))
+        if name == "read_tool_call_history":
+            return bots._read_tool_call_history(args.get("bot_name", ""))
+        if name == "plan_delegation":
+            task_context.get_task_hash(ctx.session_id)
+            if ctx.req is not None and settings.load_settings().get("delegation_async_enabled"):
+                return delegation_jobs._plan_delegation_async_tool(ctx.req, args.get("steps", []))
+            return bots._plan_delegation_tool(args.get("steps", []))
+
+    if name == "search_codebase":
+        return _search_codebase(args.get("query", ""), args.get("limit", 3))
+
+    if name == "write_plan":
+        if ctx.plan_state is None:
+            return {"error": "Planning is not available in this context."}
+        steps = args.get("steps", [])
+        if not steps or not isinstance(steps, list) or not all(isinstance(s, str) and s.strip() for s in steps):
+            return {"error": "steps must be a non-empty list of non-empty strings."}
+        ctx.plan_state.clear()
+        ctx.plan_state.extend({"text": s, "status": "pending", "note": ""} for s in steps)
+        return _render_plan_state(ctx.plan_state)
+    if name == "update_plan_step":
+        if ctx.plan_state is None:
+            return {"error": "Planning is not available in this context."}
+        if not ctx.plan_state:
+            return {"error": "No plan recorded yet -- call write_plan first."}
+        index = args.get("index")
+        status = args.get("status", "")
+        if not isinstance(index, int) or not (0 <= index < len(ctx.plan_state)):
+            return {"error": f"index must be between 0 and {len(ctx.plan_state) - 1}, got {index!r}."}
+        if status not in ("pending", "in_progress", "done", "failed"):
+            return {"error": f"status must be one of pending/in_progress/done/failed, got {status!r}."}
+        ctx.plan_state[index]["status"] = status
+        ctx.plan_state[index]["note"] = args.get("note", "")
+        return _render_plan_state(ctx.plan_state)
+
+    if ctx.passthrough_session_id is not None:
+        args = dict(args)
+        args["session_id"] = ctx.passthrough_session_id
+        try:
+            resp = httpx.post(f"{lcm_client.LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
+            if resp.status_code == 200:
+                return resp.json().get("result")
+            return {"error": f"Tool call failed: HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"error": f"Tool call failed: {e}"}
+    return {"error": ctx.unknown_tool_message_template.format(name=name)}
+
+
 class RAGIndexIn(BaseModel):
     workspace: str = "."
 
@@ -1392,27 +1569,17 @@ def chat_stream(req: ChatIn):
         ctx_size = req.max_ctx
     prompt_tokens = estimate_tokens(messages, tools)
 
-    # Per-turn plan state, mutated in place (never rebound) so both
-    # _execute_tool_call and generate() -- sibling closures directly inside
-    # chat_stream, not nested inside each other -- see the same list without
-    # needing `nonlocal`. Each entry: {"text": str, "status": str, "note": str}.
+    # Per-turn plan state, mutated in place (never rebound) via
+    # ToolContext.plan_state -- see dispatch_tool. Each entry:
+    # {"text": str, "status": str, "note": str}.
     _current_plan = []
 
-    def _render_plan():
-        if not _current_plan:
-            return {"plan": [], "note": "No plan recorded yet -- call write_plan first."}
-        lines = []
-        for i, step in enumerate(_current_plan):
-            marker = {"done": "[x]", "failed": "[!]", "in_progress": "[~]"}.get(step["status"], "[ ]")
-            note = f" -- {step['note']}" if step.get("note") else ""
-            lines.append(f"{i}. {marker} {step['text']}{note}")
-        return {"plan": "\n".join(lines)}
-
     def _execute_tool_call(tool_call):
-        """Dispatch a single tool call. Right now only LCM's own tools
-        (lcm_recall_search, lcm_recall_expand) exist -- forward those to
-        LCM's generic /tools/call endpoint. Anything else currently has
-        nowhere to go and returns a clear error rather than failing silently."""
+        """Thin per-turn wrapper around the shared dispatch_tool: build a
+        ToolContext from this request/turn's own state, then dispatch.
+        allowed_names=None (the default) since _get_mode_tools already
+        controls what the model can even see this turn -- this call site
+        doesn't need a second restrictive allow-list on top of that."""
         fn = tool_call.get("function", {})
         name = fn.get("name", "")
         args = fn.get("arguments") or {}
@@ -1421,111 +1588,16 @@ def chat_stream(req: ChatIn):
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
-        if name == "web_search":
-            return web_tools.web_search(req.search_url, args.get("query", ""))
-        if name == "web_fetch":
-            return web_tools.web_fetch(args.get("url", ""))
-        if name == "load_skill":
-            return skills.load_skill(args.get("name", ""))
-        if name == "bash":
-            return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), req.workspace)
-        if name == "bash_exec":
-            return bash_tools.execute_write_bash(args.get("command", ""), args.get("args", []), req.workspace)
-        if name == "bash_exec_start":
-            return bash_tools.start_background_bash(args.get("command", ""), args.get("args", []), req.workspace)
-        if name == "bash_exec_check":
-            return bash_tools.check_background_bash(args.get("process_id", ""))
-        if name == "bash_exec_stop":
-            return bash_tools.stop_background_bash(args.get("process_id", ""), args.get("force", False))
-        if name == "get_full_tool_output":
-            return tool_output.get_full_tool_output_tool(args.get("output_id", ""))
-        if name == "find_definition":
-            return lsp_tools.get_lsp_client(req.workspace).find_definition(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
-        if name == "find_references":
-            return lsp_tools.get_lsp_client(req.workspace).find_references(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
-        if name == "type_info":
-            return lsp_tools.get_lsp_client(req.workspace).type_info(args.get("path", ""), args.get("line", 0), args.get("symbol", ""))
-        if name == "list_files":
-            return file_tools.list_files(req.workspace, args.get("path", "."))
-        if name == "read_file":
-            return file_tools.read_file(req.workspace, args.get("path", ""), args.get("offset", 0))
-        if name == "write_file":
-            return file_tools.write_file(req.workspace, args.get("path", ""), args.get("content", ""))
-        if name == "edit_file":
-            return file_tools.edit_file(req.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
-        if name == "replace_lines":
-            return file_tools.replace_lines(req.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
-        if name == "backup_file":
-            return backup_tools.backup_file(args.get("path", ""))
-        if name == "restore_file":
-            return backup_tools.restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
-        if name in ("list_bots", "draft_bot_prompt", "message_bot", "list_rooms", "read_room_messages", "message_room", "create_bot", "update_bot", "run_delegation_step", "read_scratch_file", "read_tool_call_history", "plan_delegation"):
-            if req.session_id != bots.ATHENA_BOTS_SESSION_ID:
-                return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
-            if name == "list_bots":
-                return bots._list_bots_tool()
-            if name == "draft_bot_prompt":
-                return bots._draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
-            if name == "message_bot":
-                if task_context.current_task_hash.get() is not None:
-                    return {"error": "A delegation task is already active this turn -- message_bot cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
-                return bots._message_bot_tool(args.get("bot_id"), args.get("content", ""))
-            if name == "list_rooms":
-                return rooms._list_rooms_tool()
-            if name == "read_room_messages":
-                return rooms._read_room_messages_tool(args.get("room_id"))
-            if name == "message_room":
-                if task_context.current_task_hash.get() is not None:
-                    return {"error": "A delegation task is already active this turn -- message_room cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
-                return rooms._message_room_tool(args.get("room_id"), args.get("content", ""))
-            if name == "create_bot":
-                return bots._create_bot_tool(args.get("name", ""), args.get("description", ""), args.get("allowed_tools", []))
-            if name == "update_bot":
-                return bots._update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
-            if name == "run_delegation_step":
-                task_context.get_task_hash(req.session_id)
-                if settings.load_settings().get("delegation_async_enabled"):
-                    return delegation_jobs._run_delegation_step_async_tool(req, args.get("bot_id"), args.get("instruction", ""))
-                return bots._run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""))
-            if name == "read_scratch_file":
-                return bots._read_scratch_file(args.get("bot_name", ""))
-            if name == "read_tool_call_history":
-                return bots._read_tool_call_history(args.get("bot_name", ""))
-            if name == "plan_delegation":
-                task_context.get_task_hash(req.session_id)
-                if settings.load_settings().get("delegation_async_enabled"):
-                    return delegation_jobs._plan_delegation_async_tool(req, args.get("steps", []))
-                return bots._plan_delegation_tool(args.get("steps", []))
-        if name == "search_codebase":
-            return _search_codebase(args.get("query", ""), args.get("limit", 3))
-        if name == "write_plan":
-            steps = args.get("steps", [])
-            if not steps or not isinstance(steps, list) or not all(isinstance(s, str) and s.strip() for s in steps):
-                return {"error": "steps must be a non-empty list of non-empty strings."}
-            _current_plan.clear()
-            _current_plan.extend({"text": s, "status": "pending", "note": ""} for s in steps)
-            return _render_plan()
-        if name == "update_plan_step":
-            if not _current_plan:
-                return {"error": "No plan recorded yet -- call write_plan first."}
-            index = args.get("index")
-            status = args.get("status", "")
-            if not isinstance(index, int) or not (0 <= index < len(_current_plan)):
-                return {"error": f"index must be between 0 and {len(_current_plan) - 1}, got {index!r}."}
-            if status not in ("pending", "in_progress", "done", "failed"):
-                return {"error": f"status must be one of pending/in_progress/done/failed, got {status!r}."}
-            _current_plan[index]["status"] = status
-            _current_plan[index]["note"] = args.get("note", "")
-            return _render_plan()
-
-        args["session_id"] = req.session_id
-        try:
-            resp = httpx.post(f"{lcm_client.LCM_URL}/tools/call", json={"name": name, "arguments": args}, timeout=10)
-            if resp.status_code == 200:
-                return resp.json().get("result")
-            return {"error": f"Tool call failed: HTTP {resp.status_code}"}
-        except Exception as e:
-            return {"error": f"Tool call failed: {e}"}
+        ctx = ToolContext(
+            session_id=req.session_id,
+            workspace=req.workspace,
+            search_url=req.search_url,
+            req=req,
+            plan_state=_current_plan,
+            passthrough_session_id=req.session_id,
+            require_athena_bots_session=True,
+        )
+        return dispatch_tool(name, args, ctx)
 
     def generate():
         cancel_flag = threading.Event()

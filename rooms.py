@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 import settings
 import activity
+import task_context
 import generation_streaming
 import host_locks
 from host_locks import OLLAMA_URL
@@ -515,6 +516,8 @@ def send_room_message(room_id: int, req: RoomSendIn):
 
 
 def _message_room_tool(room_id, content):
+    if task_context.current_task_hash.get() is not None:
+        return {"error": "A delegation task is already active this turn -- message_room cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
     return send_room_message(room_id, RoomSendIn(sender_type="athena", sender_bot_id=None, content=content))
 
 
