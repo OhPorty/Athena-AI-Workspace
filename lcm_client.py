@@ -34,7 +34,6 @@ def _set_pdeathsig():
 
 
 def stop_bundled_lcm():
-    global _lcm_process
     if _lcm_process and _lcm_process.poll() is None:
         print("[Athena] Stopping bundled LCM...", flush=True)
         _lcm_process.terminate()

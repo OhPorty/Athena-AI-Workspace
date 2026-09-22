@@ -1,5 +1,4 @@
 import json
-import threading
 
 from fastapi import APIRouter
 from pydantic import BaseModel
