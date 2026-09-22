@@ -228,14 +228,22 @@ def _resolve_dm_responder(room, sender_bot_id):
 
 
 
+_ATHENA_ROOM_ALLOWED_TOOL_NAMES = {
+    "list_bots", "draft_bot_prompt", "message_bot", "list_rooms",
+    "read_room_messages", "message_room", "create_bot", "update_bot",
+}
+
+
 def _dispatch_athena_room_tool_call(tc):
-    """Delegation-only dispatcher for Athena's room-turn loop -- a
-    small, dedicated table for just the delegation tools, since the
-    main generate() loop's own _execute_tool_call is a closure over a
-    live req object that doesn't exist for a mention-triggered room
-    turn. Never includes workspace write tools (bash_exec, file
-    edits) -- those stay confined to her private 1:1 session, per the
-    agreed design."""
+    """Delegation-only dispatcher for Athena's room-turn loop -- a thin
+    wrapper over the shared main.dispatch_tool, restricted to just the
+    delegation tools above. Never includes workspace write tools
+    (bash_exec, file edits) -- those stay confined to her private 1:1
+    session, per the agreed design. No passthrough to the generic LCM
+    tools/call endpoint either (passthrough_session_id=None) -- an
+    unrecognized name here is genuinely unexpected, not a valid LCM
+    recall tool the way it might be for the other two dispatchers."""
+    from main import dispatch_tool, ToolContext  # deferred: main.py imports rooms.py at module load
     fn = tc.get("function", {})
     name = fn.get("name", "")
     args = fn.get("arguments", {})
@@ -244,23 +252,11 @@ def _dispatch_athena_room_tool_call(tc):
             args = json.loads(args)
         except json.JSONDecodeError:
             args = {}
-    if name == "list_bots":
-        return bots._list_bots_tool()
-    if name == "draft_bot_prompt":
-        return bots._draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
-    if name == "message_bot":
-        return bots._message_bot_tool(args.get("bot_id"), args.get("content", ""))
-    if name == "list_rooms":
-        return _list_rooms_tool()
-    if name == "read_room_messages":
-        return _read_room_messages_tool(args.get("room_id"))
-    if name == "message_room":
-        return _message_room_tool(args.get("room_id"), args.get("content", ""))
-    if name == "create_bot":
-        return bots._create_bot_tool(args.get("name", ""), args.get("description", ""), args.get("allowed_tools", []))
-    if name == "update_bot":
-        return bots._update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
-    return {"error": f"Unknown tool for Athena's room turn: {name}"}
+    ctx = ToolContext(
+        passthrough_session_id=None,
+        unknown_tool_message_template="Unknown tool for Athena's room turn: {name}",
+    )
+    return dispatch_tool(name, args, ctx, allowed_names=_ATHENA_ROOM_ALLOWED_TOOL_NAMES)
 
 
 

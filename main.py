@@ -547,7 +547,7 @@ class ToolContext:
     def __init__(self, session_id="", workspace="", search_url="", bot=None, session_key=None,
                  req=None, plan_state=None, passthrough_session_id=None,
                  require_athena_bots_session=False,
-                 unknown_tool_message_template="Unknown tool: {name}"):
+                 unknown_tool_message_template="'{name}' is not a tool available in this context."):
         self.session_id = session_id
         self.workspace = workspace
         self.search_url = search_url
@@ -583,7 +583,7 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
     gate. bots.py and rooms.py pass their own real allow-sets, since this
     IS the primary enforcement for them."""
     if allowed_names is not None and name not in allowed_names:
-        return {"error": f"'{name}' is not a tool available in this context."}
+        return {"error": ctx.unknown_tool_message_template.format(name=name)}
 
     if name == "web_search":
         if not ctx.search_url:
