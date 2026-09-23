@@ -11,6 +11,8 @@ GPU is already fully occupied by an existing Ollama process on this machine.
 """
 import threading
 
+from logging_setup import logger
+
 _agent = None
 _agent_lock = threading.Lock()
 _load_failed = False  # cache a load failure so we don't retry every call
@@ -26,7 +28,7 @@ def _get_agent():
                 import laya
                 _agent = laya.load("convaiinnovations/laya-typed-decisions", device="cpu")
             except Exception as e:
-                print(f"[LAYA] failed to load: {e!r}", flush=True)
+                logger.warning(f"failed to load: {e!r}")
                 _load_failed = True
     return _agent
 
@@ -42,7 +44,7 @@ def check_single_topic(instruction: str):
         r = agent.predict({"instruction": instruction}, q)
         return r["answers"]["single_topic"]["noul"]
     except Exception as e:
-        print(f"[LAYA] check_single_topic failed: {e!r}", flush=True)
+        logger.warning(f"check_single_topic failed: {e!r}")
         return None
 
 
@@ -57,5 +59,5 @@ def check_note_accurate(note: str, tool_call_history: list):
         r = agent.predict({"tool_call_history": tool_call_history, "note": note}, q)
         return r["answers"]["accurate"]["noul"]
     except Exception as e:
-        print(f"[LAYA] check_note_accurate failed: {e!r}", flush=True)
+        logger.warning(f"check_note_accurate failed: {e!r}")
         return None

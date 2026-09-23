@@ -8,6 +8,8 @@ from typing import List, Dict, Any, Tuple
 
 import numpy as np
 
+from logging_setup import logger
+
 # CPU-only ONNX embeddings via fastembed -- chosen over calling Ollama's own
 # /api/embeddings endpoint because onnxruntime is already a hard dependency
 # here (piper-tts/faster-whisper), so this adds no new dependency category,
@@ -55,14 +57,14 @@ def _get_embedder():
         return _embedder
     with _embedder_lock:
         if _embedder is None and _load_failed_reason is None:
-            print(f"[RAG] loading embedding model {EMBEDDING_MODEL_NAME} (first run downloads it from HuggingFace, ~130MB, may take a while)...", flush=True)
+            logger.info(f"loading embedding model {EMBEDDING_MODEL_NAME} (first run downloads it from HuggingFace, ~130MB, may take a while)...")
             try:
                 from fastembed import TextEmbedding
                 _embedder = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
-                print("[RAG] embedding model ready.", flush=True)
+                logger.info("embedding model ready.")
             except Exception as e:
                 _load_failed_reason = repr(e)
-                print(f"[RAG] embedding model failed to load, search_codebase will be unavailable until Athena restarts: {e!r}", flush=True)
+                logger.error(f"embedding model failed to load, search_codebase will be unavailable until Athena restarts: {e!r}")
     return _embedder
 
 
@@ -270,7 +272,7 @@ class SimpleCodeRAG:
                 # was already committed for earlier files in this pass
                 # stays valid; this file and the rest are simply left as
                 # not-yet-(re)indexed for the next successful reindex.
-                print(f"[RAG] stopping index_codebase early -- {e}", flush=True)
+                logger.warning(f"stopping index_codebase early -- {e}")
                 break
 
             # Clear this file's existing chunks first -- otherwise a file
@@ -293,7 +295,7 @@ class SimpleCodeRAG:
             conn.commit()
             reindexed_count += 1
             if reindexed_count % 25 == 0:
-                print(f"[RAG] indexed {reindexed_count} changed file(s) so far...", flush=True)
+                logger.info(f"indexed {reindexed_count} changed file(s) so far...")
 
         # Orphaned-chunk cleanup: a file that no longer exists on disk (
         # renamed, deleted) never gets visited by the glob above, so its old
@@ -309,7 +311,7 @@ class SimpleCodeRAG:
         conn.commit()
         conn.close()
         if reindexed_count:
-            print(f"[RAG] index_codebase done: {reindexed_count} file(s) (re)embedded.", flush=True)
+            logger.info(f"index_codebase done: {reindexed_count} file(s) (re)embedded.")
 
     def search(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
         if not query or not query.strip():

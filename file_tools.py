@@ -3,6 +3,7 @@ import os
 from fastapi import APIRouter
 
 import rag
+from logging_setup import logger
 
 router = APIRouter()
 
@@ -173,7 +174,7 @@ def edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
         try:
             rag.index_codebase(workspace)
         except Exception as e:
-            print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
+            logger.warning(f"auto-reindex after write failed: {e}")
         return {"path": rel_path, "edited": True}
     except ValueError as e:
         return {"error": str(e)}
@@ -238,7 +239,7 @@ def replace_lines(workspace: str, rel_path: str, start_line, end_line, new_conte
                 try:
                     rag.index_codebase(workspace)
                 except Exception as e:
-                    print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
+                    logger.warning(f"auto-reindex after write failed: {e}")
                 return {
                     "path": rel_path,
                     "edited": True,
@@ -257,7 +258,7 @@ def replace_lines(workspace: str, rel_path: str, start_line, end_line, new_conte
         try:
             rag.index_codebase(workspace)
         except Exception as e:
-            print(f"[RAG] auto-reindex after write failed: {e}", flush=True)
+            logger.warning(f"auto-reindex after write failed: {e}")
 
         delta = len(new_lines) - (end - start_line + 1)
         result = {"path": rel_path, "edited": True, "lines_replaced": f"{start_line}-{end_line}"}

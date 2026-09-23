@@ -3,6 +3,8 @@ import json
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from logging_setup import logger
+
 router = APIRouter()
 
 # Generic "run a background generation, stream it via a queue" machinery,
@@ -79,7 +81,7 @@ def drain_generator_to_queue(gen, event_queue, session_id):
             update_snapshot(session_id, chunk)
             event_queue.put(chunk)
     except Exception as e:
-        print(f"[DEBUG] background generation for session {session_id!r} raised: {e!r}", flush=True)
+        logger.error(f"background generation for session {session_id!r} raised: {e!r}")
     finally:
         event_queue.put(None)  # sentinel: no more chunks coming
         active_generations.pop(session_id, None)
@@ -92,13 +94,13 @@ class CancelIn(BaseModel):
 
 @router.post("/api/chat/cancel")
 def cancel_chat(req: CancelIn):
-    print(f"[CANCEL-DEBUG] cancel request for session_id={req.session_id!r}, known flags={list(cancel_flags.keys())!r}", flush=True)
+    logger.debug(f"cancel request for session_id={req.session_id!r}, known flags={list(cancel_flags.keys())!r}")
     flag = cancel_flags.get(req.session_id)
     if flag:
         flag.set()
-        print(f"[CANCEL-DEBUG] flag found and set for {req.session_id!r}", flush=True)
+        logger.debug(f"cancel flag found and set for {req.session_id!r}")
     else:
-        print(f"[CANCEL-DEBUG] NO matching flag for {req.session_id!r}", flush=True)
+        logger.debug(f"cancel request: no matching flag for {req.session_id!r}")
     return {"cancelled": bool(flag)}
 
 

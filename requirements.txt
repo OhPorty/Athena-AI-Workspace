@@ -15,12 +15,14 @@ faster-whisper==1.2.1
 filelock==3.32.4
 flatbuffers==25.12.19
 fsspec==2026.7.0
+greenlet==3.5.6
 h11==0.16.0
 hf-xet==1.6.0
 httpcore==1.0.9
 httpx==0.28.1
 huggingface_hub==1.29.0
 idna==3.19
+iniconfig==2.3.0
 laya==0.3.4
 loguru==0.7.3
 mmh3==5.3.0
@@ -30,11 +32,22 @@ packaging==26.3
 pathvalidate==3.3.1
 pillow==12.3.0
 piper-tts==1.7.0
+# playwright is web_fetch's local, JS-rendering fallback for pages a plain
+# HTTP fetch can't get real content from (React/Vue/etc SPAs). Installing
+# this package is NOT enough on its own -- run `playwright install chromium`
+# once after `pip install -r requirements.txt` to fetch the actual browser
+# binary (pip can't do this part; it's a separate ~300MB download). Athena
+# degrades gracefully without it -- JS-heavy pages just stay unreadable,
+# the same as before this fallback existed.
+playwright==1.63.0
+pluggy==1.6.0
 protobuf==7.36.0
 psutil==7.2.2
 py_rust_stemmers==0.1.8
 pydantic==2.13.5
 pydantic_core==2.46.5
+pyee==13.0.1
+pytest==9.1.1
 python-multipart==0.0.32
 mcp==2.0.0
 PyOTP==2.10.0

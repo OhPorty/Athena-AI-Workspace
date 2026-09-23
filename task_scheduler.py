@@ -1,8 +1,6 @@
-import os
 import json
 import time
 import uuid
-import sqlite3
 import calendar
 from datetime import datetime, timedelta
 from typing import Optional, List
@@ -18,6 +16,8 @@ import bash_tools
 import file_tools
 import web_tools
 import generation_streaming
+from logging_setup import logger
+import db
 
 router = APIRouter()
 
@@ -31,11 +31,8 @@ router = APIRouter()
 # and (per the safety default) start disabled until explicitly opted
 # into on a given task.
 
-TASKS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.db")
-
-
 def _tasks_conn():
-    conn = sqlite3.connect(TASKS_DB_PATH)
+    conn = db.get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -323,7 +320,7 @@ def _start_task_run(task):
                 "pinned": False, "created_at": now_ms, "last_active": now_ms,
             }, timeout=5)
         except Exception as e:
-            print(f"[TASKS] failed to (re)create session for task {task_id}: {e!r}", flush=True)
+            logger.warning(f"failed to (re)create session for task {task_id}: {e!r}")
             return
         conn = _tasks_conn()
         try:
@@ -347,7 +344,7 @@ def _start_task_run(task):
                 "last_active": now_ms,
             }, timeout=5)
         except Exception as e:
-            print(f"[TASKS] failed to bump last_active for task {task_id}: {e!r}", flush=True)
+            logger.warning(f"failed to bump last_active for task {task_id}: {e!r}")
 
     message_count_before = _lcm_message_count(session_id) or 0
     enabled_tools = task["enabled_tools"]
@@ -365,7 +362,7 @@ def _start_task_run(task):
     try:
         chat_stream(req)  # returned StreamingResponse is deliberately never read -- the background thread it starts keeps running regardless, same mechanism already proven for a closed browser tab
     except Exception as e:
-        print(f"[TASKS] task {task_id} failed to start: {e!r}", flush=True)
+        logger.warning(f"task {task_id} failed to start: {e!r}")
         _record_task_run_result(task_id, task, success=False)
         return
     _task_runs_in_progress[task_id] = {"session_id": session_id, "message_count_before": message_count_before}
@@ -433,9 +430,9 @@ def _task_scheduler_loop():
                 task = _row_to_task(row)
                 if task["id"] in _task_runs_in_progress:
                     continue
-                print(f"[TASKS] starting task {task['id']!r}: {task['prompt'][:60]!r}", flush=True)
+                logger.info(f"starting task {task['id']!r}: {task['prompt'][:60]!r}")
                 _start_task_run(task)
         except Exception as e:
-            print(f"[TASKS] scheduler loop error: {e!r}", flush=True)
+            logger.warning(f"scheduler loop error: {e!r}")
         time.sleep(30)
 

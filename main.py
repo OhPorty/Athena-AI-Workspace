@@ -40,6 +40,7 @@ import bots
 import rooms
 import delegation_jobs
 import task_scheduler
+from logging_setup import logger, log_trace_event
 from host_locks import OLLAMA_URL
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -399,6 +400,45 @@ _SELF_INVESTIGATION_TOOL_THRESHOLD = 6
 _PLAN_REQUIRED_THRESHOLD = 3
 
 
+def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count):
+    """The four structural tool-availability gates, checked against a
+    snapshot of state as of the START of the current round (not the
+    live-updating turn totals) -- so a tool unlocked by a call earlier
+    THIS round (e.g. search_codebase and bash requested in the same
+    parallel tool-call batch) still can't be used until the round after,
+    matching the sequencing the old schema-hiding approach enforced.
+    Returns an error dict if `name` is currently gated, else None. A
+    standalone function (not inlined in chat_stream's _execute_tool_call)
+    so it's independently testable without spinning up a real turn."""
+    if mode in ("workspace", "athena_delegation") and name in _SEARCH_GATED_TOOL_NAMES and "search_codebase" not in pre_round_called:
+        return {"error": f"BLOCKED: '{name}' is not available yet this turn -- call search_codebase first before using bash or read_file directly, so you're working from search results rather than blind exploration."}
+    if (mode == "athena_delegation" and name in _EXPLORATION_TOOL_NAMES
+            and pre_round_exploration_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
+            and not (pre_round_called & _DELEGATION_TOOL_NAMES)):
+        return {"error": (
+            "BLOCKED: you've made enough self-investigation tool calls this turn that direct exploration "
+            "(bash, read_file, list_files, search_codebase, find_definition, find_references, type_info) is "
+            "no longer available for the rest of this turn -- only delegation (run_delegation_step/"
+            "plan_delegation), any write tools, and your existing findings so far remain. Use plan_delegation "
+            "or run_delegation_step to get any further investigation done instead of continuing to look yourself."
+        )}
+    if mode == "athena_delegation" and name == "run_delegation_step" and "plan_delegation" in pre_round_called:
+        return {"error": (
+            "BLOCKED: you called plan_delegation this turn, so run_delegation_step is no longer available for "
+            "the rest of this turn -- that commitment is permanent once made. If a step was rejected or came "
+            "back incomplete, do not work around it with a one-off run_delegation_step call: fix the step (or "
+            "steps) and call plan_delegation again with the corrected list."
+        )}
+    if pre_round_total_count >= _PLAN_REQUIRED_THRESHOLD and "write_plan" not in pre_round_called and name != "write_plan":
+        return {"error": (
+            "BLOCKED: you've made several tool calls this turn without writing a plan. Every tool except "
+            "write_plan is now unavailable until you call it. This does not limit how much you can do for the "
+            "rest of this turn -- once you call write_plan with the ordered steps you're actually going to "
+            "take, full tool access returns and stays available. Call write_plan now."
+        )}
+    return None
+
+
 def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0):
     """Casual chat no longer carries bash/backup_file -- a mode only
     gets tools it actually needs, matching the same principle behind
@@ -491,6 +531,7 @@ class ChatIn(BaseModel):
     allowed_skills: Optional[List[str]] = None  # same, for which skills load_skill can actually load
     provider: str = ""  # "" = Ollama-native (default); "openai"/"openrouter"/"custom"/"anthropic"/"google" route through an adapter in _stream_completion
     api_key: str = ""  # only used when provider is set
+    think: str = ""  # ""=don't ask (today's behavior); "none"/"low"/"medium"/"high"/"max" -- Ollama-native only for now, see _stream_completion
 
 
 def _search_codebase(query: str, limit: int = 3):
@@ -590,7 +631,7 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
             return {"error": "No search engine is configured (search_url is empty in Athena's settings) -- web_search is unavailable until one is set."}
         return web_tools.web_search(ctx.search_url, args.get("query", ""))
     if name == "web_fetch":
-        return web_tools.web_fetch(args.get("url", ""))
+        return web_tools.web_fetch(args.get("url", ""), args.get("offset", 0))
     if name == "load_skill":
         return skills.load_skill(args.get("name", ""))
     if name == "bash":
@@ -1492,13 +1533,55 @@ def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag, 
     if req.provider == "google":
         yield from _stream_google(req, messages, tools, cancel_flag, timeout=timeout)
         return
-    with httpx.stream("POST", target_url, json={
+    payload = {
         "model": req.model,
         "messages": messages,
         "tools": tools if tools else None,
         "options": {"num_ctx": ctx_size},
         "stream": True,
-    }, timeout=timeout) as resp:
+    }
+    if req.think:
+        # Ollama's own accepted shape: a boolean, or one of the exact
+        # strings "low"/"medium"/"high"/"max" -- "none" (Athena's own
+        # "force thinking off" option) is the one value that needs
+        # translating, to the boolean False.
+        payload["think"] = False if req.think == "none" else req.think
+    with httpx.stream("POST", target_url, json=payload, timeout=timeout) as resp:
+        if resp.status_code != 200:
+            # Ollama returning a non-200 (most often 500 -- the model
+            # failed to load, typically not enough RAM/VRAM for it, or an
+            # unsupported quantization on this device) used to be
+            # silently mistaken for a normal empty streaming chunk here:
+            # httpx.stream doesn't raise on its own for a bad status
+            # code, so the error body's JSON just got parsed as if it
+            # were a real chat chunk, found no "message"/"done" fields
+            # it recognized, and the round quietly finished with nothing
+            # -- no error shown at all. Surface it explicitly instead,
+            # mirroring the same friendly-error pattern already used for
+            # the online-provider adapters below.
+            error_text = resp.read().decode(errors="replace")
+            try:
+                error_detail = json.loads(error_text).get("error") or error_text[:300]
+            except (json.JSONDecodeError, AttributeError):
+                error_detail = error_text[:300]
+            if "unknown model architecture" in str(error_detail).lower():
+                friendly = (
+                    "This model's architecture isn't supported by llama.cpp (the engine Ollama runs models with) -- "
+                    "not a RAM/VRAM/quantization issue, and not fixable by retrying or picking a different endpoint. "
+                    "llama.cpp only understands a specific, hardcoded list of architectures (llama, qwen2/3, gemma, "
+                    "mistral, etc.); this GGUF was converted from one that isn't in that list yet, so it fails at the "
+                    "exact same point on any device until llama.cpp adds support for it upstream. Look for a "
+                    f"differently-converted GGUF of the same model using a supported architecture, or use a different "
+                    f"model.\n\n{error_detail}"
+                )
+            elif resp.status_code >= 500:
+                friendly = f"Ollama itself returned an error (HTTP {resp.status_code}) -- this usually means the model failed to load, often because there isn't enough RAM/VRAM for it, or this device doesn't support its quantization format.\n\n{error_detail}"
+            elif resp.status_code == 404:
+                friendly = f"Ollama doesn't have this model pulled, or the endpoint URL is wrong.\n\n{error_detail}"
+            else:
+                friendly = f"Ollama request failed (HTTP {resp.status_code}).\n\n{error_detail}"
+            yield {"message": {"content": f"[Ollama error] {friendly}"}, "done": True}
+            return
         for line in resp.iter_lines():
             if cancel_flag.is_set():
                 return
@@ -1513,7 +1596,7 @@ def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag, 
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
     activity.touch()
-    print(f"[DEBUG] model={req.model!r} endpoint_url={req.endpoint_url!r}", flush=True)
+    logger.debug(f"model={req.model!r} endpoint_url={req.endpoint_url!r}")
     effective_message = req.message
     for att in req.attachments:
         att_content = (att.get("content") or "")[:20000]
@@ -1540,12 +1623,16 @@ def chat_stream(req: ChatIn):
     mode, effective_workspace = _resolve_mode_and_workspace(req)
     req.workspace = effective_workspace
     system_prompt = _get_mode_system_prompt(mode, req)
-    # Sized off the maximum tool set this turn could ever reach (as if
-    # search_codebase were already called), not whatever round 1 actually
-    # starts with -- ctx_size must not be picked too small for a tool
-    # list that later grows back as the turn progresses.
+    # The maximum tool set this turn could ever reach (as if
+    # search_codebase were already called) -- used both for ctx_size
+    # estimation below AND as the actual tools payload sent every round
+    # (see generate()'s round loop). Keeping this one stable list for the
+    # whole turn, instead of recomputing a narrower one as gates close,
+    # is what keeps the tool schema an unchanging prefix across rounds --
+    # gate enforcement itself now happens in _execute_tool_call at the
+    # moment a call is attempted, not by hiding tools from the schema.
     tools = _get_mode_tools(mode, req, called_tool_names={"search_codebase"})
-    print(f"[TOOLS DEBUG] {[t.get('function', {}).get('name') for t in tools]}", flush=True)
+    logger.debug(f"tools for this turn: {[t.get('function', {}).get('name') for t in tools]}")
 
     _dynamic_context_msg = _get_dynamic_context_message(req)
     _raw_messages = [{"role": "system", "content": system_prompt}] + ([_dynamic_context_msg] if _dynamic_context_msg else []) + context
@@ -1574,12 +1661,19 @@ def chat_stream(req: ChatIn):
     # {"text": str, "status": str, "note": str}.
     _current_plan = []
 
-    def _execute_tool_call(tool_call):
+    def _execute_tool_call(tool_call, pre_round_called, pre_round_exploration_count, pre_round_total_count):
         """Thin per-turn wrapper around the shared dispatch_tool: build a
         ToolContext from this request/turn's own state, then dispatch.
         allowed_names=None (the default) since _get_mode_tools already
         controls what the model can even see this turn -- this call site
-        doesn't need a second restrictive allow-list on top of that."""
+        doesn't need a second restrictive allow-list on top of that.
+
+        Gate enforcement (see _check_tool_gate) used to happen by omitting
+        a gated tool from the schema sent to the model each round -- but
+        the schema is now the same stable, maximal list for the whole turn
+        (see the `tools` computed once before the round loop), so gating
+        happens here instead, at the moment a call is actually attempted,
+        which keeps the schema itself cache-friendly across every round."""
         fn = tool_call.get("function", {})
         name = fn.get("name", "")
         args = fn.get("arguments") or {}
@@ -1588,6 +1682,9 @@ def chat_stream(req: ChatIn):
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
+        gate_error = _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count)
+        if gate_error is not None:
+            return gate_error
         ctx = ToolContext(
             session_id=req.session_id,
             workspace=req.workspace,
@@ -1651,13 +1748,21 @@ def chat_stream(req: ChatIn):
                     return False  # mostly whitespace -- not a meaningful signal
                 return text.count(tail) >= min_repeats
             return _tail_repeats(40, 3) or _tail_repeats(18, 5)
+
+        def _log_turn_end(outcome, **extra):
+            log_trace_event(
+                req.session_id, "turn_end", mode=mode, round=_round,
+                total_tool_calls=_total_tool_call_count, outcome=outcome, **extra,
+            )
+
+        log_trace_event(req.session_id, "turn_start", mode=mode, model=req.model, workspace=req.workspace, endpoint_url=req.endpoint_url, think=req.think)
         yield f"data: {json.dumps({'user_message_id': _user_msg_id})}\n\n"
         full_reply = ""
         full_thinking = ""
         full_tool_calls = []
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
         _messages = list(messages)
-        print(f"[DEBUG] _messages roles={[m.get("role") for m in _messages]!r}", flush=True)
+        logger.debug(f"_messages roles={[m.get('role') for m in _messages]!r}")
         MAX_ROUNDS = 1000  # effectively unbounded; the stop button is the real safety net now
         last_eval_count = None
         last_eval_duration = None
@@ -1682,7 +1787,6 @@ def chat_stream(req: ChatIn):
             round_reply = ""
             round_tool_calls = []
             loop_detected = False
-            _round_tools = _get_mode_tools(mode, req, _called_tool_names, _exploration_call_count, _total_tool_call_count)
 
             # Same per-host lock bot delegation calls already use
             # (_get_host_lock / _run_delegation_step_tool) -- without it,
@@ -1698,7 +1802,7 @@ def chat_stream(req: ChatIn):
             # bot call still gets a fair turn between rounds.
             try:
                 with host_locks.get_host_lock(host_locks.endpoint_host(req.endpoint_url)):
-                    for chunk in _stream_completion(req, _target_url, _messages, _round_tools, ctx_size, cancel_flag):
+                    for chunk in _stream_completion(req, _target_url, _messages, tools, ctx_size, cancel_flag):
                         if cancel_flag.is_set():
                             break
                         # Refresh on every real chunk received, not just once
@@ -1711,7 +1815,7 @@ def chat_stream(req: ChatIn):
                         # one is still actively streaming.
                         activity.touch()
                         msg = chunk.get("message", {})
-                        print(f"[DEBUG] chunk={chunk}", flush=True)
+                        logger.debug(f"chunk={chunk}")
                         thinking_delta = msg.get("thinking", "")
                         if thinking_delta:
                             full_thinking += thinking_delta
@@ -1740,18 +1844,20 @@ def chat_stream(req: ChatIn):
                 # quietly cleaned up, so the turn appeared to silently stop
                 # with zero explanation. Persist and show a real message
                 # instead, reusing whatever partial reply already streamed.
-                print(f"[DEBUG] generation for session {req.session_id!r} raised: {e!r}", flush=True)
+                logger.error(f"generation for session {req.session_id!r} raised: {e!r}")
                 error_msg = f"Generation failed partway through: {e!r}. The model backend likely became unreachable or dropped the connection -- try again in a moment."
                 _had_prior_content = bool(full_reply)
                 full_reply += ("\n\n" if _had_prior_content else "") + error_msg
                 _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 yield f"data: {json.dumps({'delta': ('\n\n' if _had_prior_content else '') + error_msg})}\n\n"
+                _log_turn_end("generation_error", error=repr(e))
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id, 'generation_error': True})}\n\n"
                 return
 
             if cancel_flag.is_set():
                 if full_reply:
                     lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                _log_turn_end("cancelled")
                 yield f"data: {json.dumps({'done': True, 'cancelled': True})}\n\n"
                 generation_streaming.cancel_flags.pop(req.session_id, None)
                 return
@@ -1778,6 +1884,7 @@ def chat_stream(req: ChatIn):
                     full_reply = (full_reply.rsplit(round_reply, 1)[0] if round_reply in full_reply else full_reply) + ("\n\n" + failure_msg if full_reply else failure_msg)
                     _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                     yield f"data: {json.dumps({'delta': ('\n\n' if trimmed_reply.strip() else '') + failure_msg})}\n\n"
+                    _log_turn_end("loop_detected_giveup")
                     yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                     return
                 _messages.append({"role": "user", "content": (
@@ -1814,6 +1921,7 @@ def chat_stream(req: ChatIn):
                         full_reply += ("\n\n" + failure_msg if full_reply else failure_msg)
                         _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                         yield f"data: {json.dumps({'delta': '\n\n' + failure_msg})}\n\n"
+                        _log_turn_end("ungrounded_claims_giveup")
                         yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                         return
                     _messages.append({"role": "assistant", "content": round_reply})
@@ -1847,6 +1955,7 @@ def chat_stream(req: ChatIn):
                         full_reply = failure_msg
                         _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                         yield f"data: {json.dumps({'delta': failure_msg})}\n\n"
+                        _log_turn_end("empty_final_answer_giveup")
                         yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                         return
                     _messages.append({"role": "user", "content": (
@@ -1860,6 +1969,7 @@ def chat_stream(req: ChatIn):
 
                 _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
+                _log_turn_end("completed")
                 yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'assistant_message_id': _msg_id})}\n\n"
                 return
 
@@ -1869,6 +1979,14 @@ def chat_stream(req: ChatIn):
             _gate_was_open = _exploration_call_count < _SELF_INVESTIGATION_TOOL_THRESHOLD
             _plan_gate_was_open = _total_tool_call_count < _PLAN_REQUIRED_THRESHOLD
             _delegation_commitment_was_open = "plan_delegation" not in _called_tool_names
+            # Snapshot of gate state as of the START of this round, before
+            # this round's own calls get folded into the running totals
+            # below -- passed into _execute_tool_call so a tool unlocked by
+            # a call earlier THIS round can't be used until the round
+            # after, matching what schema-hiding used to enforce.
+            _pre_round_called = set(_called_tool_names)
+            _pre_round_exploration_count = _exploration_call_count
+            _pre_round_total_count = _total_tool_call_count
             for tc in round_tool_calls:
                 _tc_name = tc.get("function", {}).get("name", "")
                 _called_tool_names.add(_tc_name)
@@ -1882,6 +2000,7 @@ def chat_stream(req: ChatIn):
             _messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
             for tc in round_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "unknown")
+                log_trace_event(req.session_id, "tool_call", round=_round, tool=tool_name, args=tc.get("function", {}).get("arguments"))
                 yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
                 fingerprint = _tool_call_fingerprint(tc)
                 repeat_count = _tool_call_fingerprints.count(fingerprint)
@@ -1913,7 +2032,7 @@ def chat_stream(req: ChatIn):
                         f"already returned, or search for something genuinely different if you actually need it."
                     }
                 else:
-                    result = _execute_tool_call(tc)
+                    result = _execute_tool_call(tc, _pre_round_called, _pre_round_exploration_count, _pre_round_total_count)
                     _tool_call_fingerprints.append(fingerprint)
                     if len(_tool_call_fingerprints) > 20:
                         _tool_call_fingerprints.pop(0)
@@ -1929,6 +2048,11 @@ def chat_stream(req: ChatIn):
                             _recent_search_queries.append(query)
                             if len(_recent_search_queries) > 10:
                                 _recent_search_queries.pop(0)
+                _result_error = result.get("error") if isinstance(result, dict) else None
+                log_trace_event(
+                    req.session_id, "tool_blocked" if isinstance(_result_error, str) and _result_error.startswith("BLOCKED:") else "tool_result",
+                    round=_round, tool=tool_name, success=_result_error is None, output=result,
+                )
                 yield f"data: {json.dumps({'type': 'tool_output', 'tool': tool_name, 'output': result})}\n\n"
                 # Saved in the same shape the frontend's own live tool-call
                 # display already uses (tool/status/output) -- NOT the raw
@@ -1981,6 +2105,7 @@ def chat_stream(req: ChatIn):
             yield f"data: {json.dumps({'delta': fallback_msg})}\n\n"
             _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
             tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
+            _log_turn_end("max_rounds_reached")
             yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'tokens_per_sec': tokens_per_sec, 'note': 'max tool rounds reached', 'assistant_message_id': _msg_id})}\n\n"
 
     # Run the generation loop above in a background thread, draining it
@@ -2334,9 +2459,9 @@ def _load_mcp_ui_backends():
                 spec.loader.exec_module(module)
                 if hasattr(module, "router"):
                     app.include_router(module.router, prefix=f"/mcp-ui-api/{name}")
-                    print(f"[Athena] Loaded custom backend for MCP UI plugin '{name}'", flush=True)
+                    logger.info(f"Loaded custom backend for MCP UI plugin '{name}'")
             except Exception as e:
-                print(f"[Athena] Failed to load custom backend for MCP UI plugin '{name}': {e}", flush=True)
+                logger.error(f"Failed to load custom backend for MCP UI plugin '{name}': {e}")
 
 _load_mcp_ui_backends()
 
@@ -2450,7 +2575,7 @@ def _run_memory_scan(model: str):
             raw = raw.strip("`").lstrip("json").strip()
         new_facts = json.loads(raw)
     except Exception as e:
-        print(f"[Athena] Memory scan: extraction failed, will retry next cycle: {e}", flush=True)
+        logger.warning(f"Memory scan: extraction failed, will retry next cycle: {e}")
         return  # deliberately do NOT advance scan-state, so this batch gets retried
 
     for fact_text in new_facts:
@@ -2463,27 +2588,27 @@ def _run_memory_scan(model: str):
             }, timeout=10)
 
     if new_facts:
-        print(f"[Athena] Memory scan: added {len(new_facts)} new fact(s)", flush=True)
+        logger.info(f"Memory scan: added {len(new_facts)} new fact(s)")
     httpx.post(f"{lcm_client.LCM_URL}/scan-state", json={"last_scanned_message_id": max_id_seen}, timeout=10)
 
 def _memory_scan_loop():
-    print("[Athena] Memory scan loop started (checks every 60s)", flush=True)
+    logger.info("Memory scan loop started (checks every 60s)")
     while True:
         time.sleep(_MEMORY_SCAN_INTERVAL_SECONDS)
         try:
             model = settings.load_settings().get("memory_extraction_model")
             if not model:
-                print("[Athena] Memory scan check: no model configured, skipping", flush=True)
+                logger.debug("Memory scan check: no model configured, skipping")
                 continue  # no model configured -- do nothing, no error
             idle_seconds = time.time() - activity.last_activity_ts
             if idle_seconds < _MEMORY_IDLE_THRESHOLD_SECONDS:
                 remaining = int(_MEMORY_IDLE_THRESHOLD_SECONDS - idle_seconds)
-                print(f"[Athena] Memory scan check: still active, {remaining}s until idle threshold", flush=True)
+                logger.debug(f"Memory scan check: still active, {remaining}s until idle threshold")
                 continue  # still active, wait for a real idle window
-            print(f"[Athena] Memory scan check: idle threshold reached, scanning with {model}", flush=True)
+            logger.info(f"Memory scan check: idle threshold reached, scanning with {model}")
             _run_memory_scan(model)
         except Exception as e:
-            print(f"[Athena] Memory scan loop error (will retry next cycle): {e}", flush=True)
+            logger.warning(f"Memory scan loop error (will retry next cycle): {e}")
 
 @app.get("/health")
 def health():
@@ -2515,15 +2640,10 @@ def _check_requirements():
             except _im.PackageNotFoundError:
                 missing.append(name)
     if missing:
-        print("=" * 70, flush=True)
-        print("[Athena] Missing required packages:", ", ".join(missing), flush=True)
-        print("[Athena] Run: pip install -r requirements.txt", flush=True)
-        print("=" * 70, flush=True)
+        logger.error(f"Missing required packages: {', '.join(missing)}. Run: pip install -r requirements.txt")
         sys.exit(1)
     if mismatched:
-        print("[Athena] WARNING: version mismatch (may still work fine):", flush=True)
-        for m in mismatched:
-            print(f"  - {m}", flush=True)
+        logger.warning("Version mismatch (may still work fine): " + "; ".join(mismatched))
 
 if __name__ == "__main__":
     import uvicorn
@@ -2533,12 +2653,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.reindex:
-        print("[Athena] Re-indexing codebase for RAG...", flush=True)
+        logger.info("Re-indexing codebase for RAG...")
         db_path = os.environ.get("ATHENA_RAG_DB", "rag_index.db")
         # Clear existing index by deleting the old DB file
         if os.path.exists(db_path):
             os.remove(db_path)
-            print(f"[Athena] Removed existing RAG index: {db_path}", flush=True)
+            logger.info(f"Removed existing RAG index: {db_path}")
         # Create fresh index
         fresh_rag = SimpleCodeRAG(db_path)
         fresh_rag.index_codebase(root_dir=".")
@@ -2548,7 +2668,7 @@ if __name__ == "__main__":
         cursor.execute("SELECT COUNT(*) FROM chunks")
         count = cursor.fetchone()[0]
         conn.close()
-        print(f"[Athena] Re-index complete: {count} chunks indexed in {db_path}", flush=True)
+        logger.info(f"Re-index complete: {count} chunks indexed in {db_path}")
         sys.exit(0)
 
     _check_requirements()
@@ -2562,13 +2682,13 @@ if __name__ == "__main__":
         # (this one or a live chat request's search_codebase call) would
         # otherwise have triggered it incidentally first.
         rag.warm_up()
-        print("[Athena] Re-indexing codebase for RAG...", flush=True)
+        logger.info("Re-indexing codebase for RAG...")
         try:
             rag.index_codebase(".")
         except Exception as e:
-            print(f"[RAG] startup reindex failed: {e!r}", flush=True)
+            logger.error(f"startup reindex failed: {e!r}")
             return
-        print("[Athena] RAG re-index complete.", flush=True)
+        logger.info("RAG re-index complete.")
     threading.Thread(target=_startup_reindex, daemon=True).start()
 
     threading.Thread(target=_memory_scan_loop, daemon=True).start()
@@ -2579,9 +2699,9 @@ if __name__ == "__main__":
     for server_cfg in settings.load_settings().get("mcp_servers", []):
         try:
             tools = mcp_manager.connect_server(server_cfg["name"], server_cfg["command"], server_cfg.get("args", []))
-            print(f"[Athena] Connected to MCP server '{server_cfg['name']}' -- {len(tools)} tools discovered", flush=True)
+            logger.info(f"Connected to MCP server '{server_cfg['name']}' -- {len(tools)} tools discovered")
         except Exception as e:
-            print(f"[Athena] Failed to connect to MCP server '{server_cfg['name']}': {e}", flush=True)
+            logger.error(f"Failed to connect to MCP server '{server_cfg['name']}': {e}")
 
     port = int(os.environ.get("ATHENA_PORT", "9500"))
     uvicorn.run(app, host="0.0.0.0", port=port)

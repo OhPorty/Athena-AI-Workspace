@@ -15,3 +15,5 @@ bots.db
 rag_index.db
 tasks.db
 bot_task_scratch/
+logs/
+athena.db

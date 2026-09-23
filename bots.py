@@ -4,7 +4,6 @@ import sys
 import json
 import time
 import select
-import sqlite3
 import hashlib
 import subprocess
 import threading
@@ -25,15 +24,14 @@ import bash_tools
 import file_tools
 import lsp_tools
 import web_tools
+from logging_setup import logger, log_trace_event
+import db
 
 router = APIRouter()
 
 
-BOTS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bots.db")
-
-
 def _bots_conn():
-    conn = sqlite3.connect(BOTS_DB_PATH)
+    conn = db.get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +54,8 @@ def _bots_conn():
             label TEXT NOT NULL,
             member_bot_ids_json TEXT NOT NULL,
             created_at REAL NOT NULL,
-            last_active REAL
+            last_active REAL,
+            is_everyone_room INTEGER NOT NULL DEFAULT 0
         )
     """)
     conn.execute("""
@@ -203,6 +202,11 @@ def _call_bot_endpoint(bot, chat_messages):
     messages = list(chat_messages)
     session_key = f"bot-{bot.get('id', 'unknown')}"
 
+    def _log_bot_turn_end(outcome, **extra):
+        log_trace_event(session_key, "turn_end", bot=bot.get("name"), outcome=outcome, **extra)
+
+    log_trace_event(session_key, "turn_start", bot=bot.get("name"), model=bot.get("model"))
+
     round_reply = ""
     seen_fingerprints = []
     # Every real tool call this turn makes, tool name + args + a
@@ -218,12 +222,18 @@ def _call_bot_endpoint(bot, chat_messages):
     _tool_type_counts = {}
     _tool_type_warned = set()
     _tool_type_hard_stopped = set()
+    # Computed once for the whole turn, not per round -- a stable schema
+    # keeps the model backend's prefix cache usable across every round
+    # instead of resetting it whenever a group gets hard-stopped. Gate
+    # enforcement for hard-stopped groups happens at call time below
+    # instead (see the per-tc loop), the same way _execute_bot_tool_program
+    # already enforces it for calls made inside a PTC script.
+    tool_schemas = _bot_tool_schemas(allowed_tools, None, ptc_enabled)
     for _ in range(_BOT_MAX_ROUNDS):
         activity.touch()
         round_reply = ""
         round_tool_calls = []
         cancel_flag = threading.Event()
-        tool_schemas = _bot_tool_schemas(allowed_tools, _tool_type_hard_stopped, ptc_enabled)
         try:
             round_thinking = ""
             for chunk in _stream_completion(fake_req, target_url, messages, tool_schemas if tool_schemas else None, _BOT_CTX_SIZE, cancel_flag, timeout=_SUB_AGENT_TIMEOUT):
@@ -241,12 +251,14 @@ def _call_bot_endpoint(bot, chat_messages):
                 if chunk.get("done"):
                     if not round_reply and not round_tool_calls:
                         bot_name = bot.get("name")
-                        print(f"[BOT DEBUG] bot={bot_name} round produced no content/tool_calls -- thinking was {len(round_thinking)} chars: {round_thinking[-500:]!r}", flush=True)
+                        logger.debug(f"bot={bot_name} round produced no content/tool_calls -- thinking was {len(round_thinking)} chars: {round_thinking[-500:]!r}")
                     break
         except Exception as e:
+            _log_bot_turn_end("endpoint_error", error=str(e))
             return {"error": f"Bot endpoint call failed: {e}", "tool_call_history": tool_call_history}
 
         if not round_tool_calls:
+            _log_bot_turn_end("completed")
             return {"content": round_reply, "tool_call_history": tool_call_history}
 
         messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
@@ -261,8 +273,13 @@ def _call_bot_endpoint(bot, chat_messages):
                     fn_args = json.loads(fn_args)
                 except json.JSONDecodeError:
                     fn_args = {}
+            log_trace_event(session_key, "tool_call", tool=tool_name, args=fn_args)
             fingerprint = _tool_call_fingerprint(tc)
-            if seen_fingerprints.count(fingerprint) >= 2:
+            _gate_error = _check_bot_tool_gate(group, _tool_type_hard_stopped)
+            if _gate_error is not None:
+                result = _gate_error
+                tool_call_history.append(_tool_call_history_entry(tool_name, fn_args, result))
+            elif seen_fingerprints.count(fingerprint) >= 2:
                 result = {"error": "BLOCKED: this exact tool call (same tool, same arguments) has already been made twice this turn. Use what you already have, or make a genuinely different call."}
                 tool_call_history.append(_tool_call_history_entry(tool_name, fn_args, result))
             elif tool_name == "run_tool_program":
@@ -281,6 +298,11 @@ def _call_bot_endpoint(bot, chat_messages):
                 seen_fingerprints.append(fingerprint)
                 if len(seen_fingerprints) > 20:
                     seen_fingerprints.pop(0)
+            _result_error = result.get("error") if isinstance(result, dict) else None
+            log_trace_event(
+                session_key, "tool_blocked" if isinstance(_result_error, str) and _result_error.startswith("BLOCKED:") else "tool_result",
+                tool=tool_name, success=_result_error is None, output=result,
+            )
             messages.append({"role": "tool", "content": json.dumps(result)})
 
         for group, count in _tool_type_counts.items():
@@ -299,6 +321,7 @@ def _call_bot_endpoint(bot, chat_messages):
                     "continuing to investigate."
                 )})
 
+    _log_bot_turn_end("max_rounds_reached")
     return {
         "content": round_reply,
         "error": "Hit the round limit without a final answer after repeated real tool calls -- this may genuinely be too large a job for one turn; consider a narrower job_scope.",
@@ -1072,6 +1095,20 @@ def _bot_tool_type_group(tool_name):
             return group
     return None
 
+
+def _check_bot_tool_gate(group, tool_type_hard_stopped):
+    """Hard-stop enforcement for the outer (non-PTC) tool-call loop in
+    _call_bot_endpoint. Used to happen by omitting a hard-stopped group's
+    tools from the schema sent to the model each round -- but the schema
+    is now built once for the whole turn (see tool_schemas above), so
+    this checks at call time instead, matching the same message
+    _execute_bot_tool_program already uses for calls made inside a PTC
+    script. Returns an error dict if `group` is currently hard-stopped,
+    else None. A standalone function so it's independently testable."""
+    if group and group in tool_type_hard_stopped:
+        return {"error": f"BLOCKED: '{group}' tools are no longer available this turn -- call append_scratch_note with what you have."}
+    return None
+
 # name.lower() -> list of tool names, populated by _draft_bot_prompt so
 # create_bot can recover the real list if the model forgets to repeat
 # allowed_tools on the follow-up create_bot call.
@@ -1314,6 +1351,7 @@ def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, 
         if msg_type == "call":
             name = msg.get("tool", "")
             args = msg.get("args") or {}
+            log_trace_event(session_key, "tool_call", tool=name, args=args, via="run_tool_program")
             sub_call_count += 1
             group = _bot_tool_type_group(name)
             if sub_call_count > _PTC_MAX_SUBCALLS:
@@ -1323,6 +1361,7 @@ def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, 
             else:
                 blocked_msg = None
             if blocked_msg:
+                log_trace_event(session_key, "tool_blocked", tool=name, success=False, output={"error": blocked_msg}, via="run_tool_program")
                 tool_call_history.append(_tool_call_history_entry(name, args, {"error": blocked_msg}))
                 try:
                     proc.stdin.write(json.dumps({"type": "error", "message": blocked_msg}) + "\n")
@@ -1342,6 +1381,11 @@ def _execute_bot_tool_program(code, workspace, bot, session_key, allowed_tools, 
                 seen_fingerprints.append(fingerprint)
                 if len(seen_fingerprints) > 20:
                     seen_fingerprints.pop(0)
+            _result_error = result.get("error") if isinstance(result, dict) else None
+            log_trace_event(
+                session_key, "tool_blocked" if isinstance(_result_error, str) and _result_error.startswith("BLOCKED:") else "tool_result",
+                tool=name, success=_result_error is None, output=result, via="run_tool_program",
+            )
             tool_call_history.append(_tool_call_history_entry(name, args, result))
             try:
                 proc.stdin.write(json.dumps({"type": "result", "value": result}) + "\n")
@@ -1404,7 +1448,7 @@ def _execute_bot_tool_call(tool_call, workspace, bot, session_key, search_url=""
     from main import dispatch_tool, ToolContext  # deferred: main.py imports bots.py at module load
     fn = tool_call.get("function", {})
     name = fn.get("name", "")
-    print(f"[BOT TOOL CALL] {bot.get('name', '?')} -> {name}", flush=True)
+    logger.debug(f"bot tool call: {bot.get('name', '?')} -> {name}")
     args = fn.get("arguments") or {}
     if isinstance(args, str):
         try:

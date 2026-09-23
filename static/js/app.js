@@ -108,6 +108,16 @@ function athenaApp() {
         maxCtx: 0,
         maxCtxText: "0",
         modelPopupOpen: false,
+        thinkingLevel: localStorage.getItem("athena_thinking_level") || "medium",
+        thinkingMenuOpen: false,
+        thinkingPopupOpen: false,
+        thinkingLevels: [
+            {value: "none", label: "None"},
+            {value: "low", label: "Low"},
+            {value: "medium", label: "Medium"},
+            {value: "high", label: "High"},
+            {value: "max", label: "xHigh"},
+        ],
         workspace: "",
         workspacePopupOpen: false,
         workspaceBrowsePath: "",
@@ -583,6 +593,17 @@ function athenaApp() {
             }
         },
 
+        setThinkingLevel(value) {
+            this.thinkingLevel = value;
+            localStorage.setItem("athena_thinking_level", value);
+            this.thinkingMenuOpen = false;
+            this.thinkingPopupOpen = false;
+        },
+
+        thinkingLevelLabel() {
+            return (this.thinkingLevels.find(t => t.value === this.thinkingLevel) || {}).label || "Think";
+        },
+
         // --- session helpers ---
         async loadSessions() {
             try {
@@ -629,6 +650,16 @@ function athenaApp() {
             const days = Math.floor(hours / 24);
             if (days < 7) return days + "d";
             return new Date(timestamp).toLocaleString(undefined, {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
+        },
+
+        formatDateTime(seconds) {
+            const date = new Date(seconds * 1000);
+            const now = new Date();
+            const isToday = date.toDateString() === now.toDateString();
+            const options = isToday
+                ? { hour: 'numeric', minute: '2-digit', hour12: true }
+                : { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true };
+            return date.toLocaleDateString(undefined, options);
         },
 
         groupedSessions() {
@@ -2434,6 +2465,7 @@ function athenaApp() {
                         attachments: attachmentsToSend,
                         provider: this.modelProvider,
                         api_key: this.modelApiKey,
+                        think: this.thinkingLevel,
                     }),
                 });
 

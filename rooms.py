@@ -17,6 +17,7 @@ import generation_streaming
 import host_locks
 from host_locks import OLLAMA_URL
 import bots
+from logging_setup import logger
 
 router = APIRouter()
 
@@ -196,7 +197,7 @@ def _unload_bot_model(bot):
         # when a real custom-backend use case needs it, rather than
         # building unused config ahead of time.
     except Exception as e:
-        print(f"[Bots] unload failed for bot {bot.get('id')} ({strategy}): {e}", flush=True)
+        logger.warning(f"unload failed for bot {bot.get('id')} ({strategy}): {e}")
 
 
 

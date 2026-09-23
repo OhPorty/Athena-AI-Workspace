@@ -6,6 +6,7 @@ import uuid
 import hashlib
 
 import rag
+from logging_setup import logger
 
 # Stored next to Athena's own app data (pins.db, tasks.db, etc.), never
 # inside a workspace -- so a backup can never be accidentally
@@ -143,7 +144,7 @@ def _restore_one_entry(entry):
     try:
         rag.index_codebase(".")
     except Exception as e:
-        print(f"[RAG] auto-reindex after restore failed: {e}", flush=True)
+        logger.warning(f"auto-reindex after restore failed: {e}")
     return {
         "path": target_path,
         "restored_hash": content_hash,

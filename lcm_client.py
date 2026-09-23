@@ -8,6 +8,8 @@ import subprocess
 
 import httpx
 
+from logging_setup import logger
+
 LCM_URL = os.environ.get("ATHENA_LCM_URL", "http://localhost:8421")
 
 # --- Bundled LCM (Lossless Context Management) service ---
@@ -35,7 +37,7 @@ def _set_pdeathsig():
 
 def stop_bundled_lcm():
     if _lcm_process and _lcm_process.poll() is None:
-        print("[Athena] Stopping bundled LCM...", flush=True)
+        logger.info("Stopping bundled LCM...")
         _lcm_process.terminate()
         try:
             _lcm_process.wait(timeout=5)
@@ -66,21 +68,21 @@ def start_bundled_lcm():
     for _ in range(30):
         try:
             httpx.get(f"http://localhost:{lcm_port}/messages/__athena_startup_check__", timeout=1)
-            print(f"[Athena] Bundled LCM ready on port {lcm_port}", flush=True)
+            logger.info(f"Bundled LCM ready on port {lcm_port}")
             return
         except httpx.ConnectError:
             time.sleep(0.3)
-    print("[Athena] WARNING: bundled LCM did not become reachable in time", flush=True)
+    logger.error("bundled LCM did not become reachable in time")
 
 
 def get_lcm_context(session_id: str) -> list:
     try:
         resp = httpx.get(f"{LCM_URL}/context/{session_id}", timeout=30)
-        print(f"[DEBUG] LCM context status={resp.status_code} body={resp.text[:300]!r}", flush=True)
+        logger.debug(f"LCM context status={resp.status_code} body={resp.text[:300]!r}")
         if resp.status_code == 200:
             return resp.json().get("context", [])
     except Exception as e:
-        print(f"[DEBUG] LCM context EXCEPTION: {e!r}", flush=True)
+        logger.warning(f"LCM context fetch raised: {e!r}")
     return []
 
 
@@ -126,7 +128,7 @@ def send_to_lcm(session_id: str, role: str, content: str, model: str = None, has
         }, timeout=30)
         if resp.status_code == 200:
             return resp.json().get("id")
-        print(f"[Athena] send_to_lcm got HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+        logger.warning(f"send_to_lcm got HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        print(f"[Athena] send_to_lcm failed: {e}", flush=True)
+        logger.warning(f"send_to_lcm failed: {e}")
     return None

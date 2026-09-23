@@ -4,6 +4,7 @@ import threading
 import task_context
 import generation_streaming
 import bots
+from logging_setup import logger
 
 _delegation_jobs = {}
 _delegation_jobs_lock = threading.Lock()
@@ -71,7 +72,7 @@ def _deliver_delegation_result(req_fields, content):
         try:
             chat_stream(req)  # returned StreamingResponse deliberately never read -- see _start_task_run for the same pattern
         except Exception as e:
-            print(f"[DELEGATION] failed to deliver async result for session {session_id!r}: {e!r}", flush=True)
+            logger.warning(f"failed to deliver async result for session {session_id!r}: {e!r}")
 
 
 

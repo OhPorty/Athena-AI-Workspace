@@ -1,16 +1,13 @@
-import os
-import sqlite3
-
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-router = APIRouter()
+import db
 
-RATINGS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratings.db")
+router = APIRouter()
 
 
 def ratings_conn():
-    conn = sqlite3.connect(RATINGS_DB_PATH)
+    conn = db.get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ratings (
             message_id INTEGER PRIMARY KEY,
@@ -75,11 +72,8 @@ def get_ratings(session_id: str):
         conn.close()
 
 
-PINS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins.db")
-
-
 def _pins_conn():
-    conn = sqlite3.connect(PINS_DB_PATH)
+    conn = db.get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pinned_messages (
             message_id INTEGER PRIMARY KEY,

@@ -152,20 +152,65 @@
     box-shadow: var(--elevation-raised);
 }
 
-/* Session list rows: same card-definition principle as the icon
-   rail -- a faint border appears on hover, and the selected session
-   gets real border + shadow definition instead of relying on
-   background tint alone. */
+/* Session list rows: previously had zero visual weight at rest --
+   transparent background, border only on hover/active -- so a full
+   list of real sessions read as one continuous run of plain text with
+   nothing to tell one row from the next. A persistent, subtle
+   background now gives every row real definition at all times, with
+   hover and active states building on top of that same baseline
+   instead of being the only source of any visual weight at all. */
 .session-row {
     border: 1px solid transparent;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    background: rgba(0,0,0,0.012);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.dark .session-row {
+    background: rgba(255,255,255,0.015);
 }
 .session-row:hover {
     border-color: var(--surface-raised-border);
+    background: rgba(0,0,0,0.03);
+}
+.dark .session-row:hover {
+    background: rgba(255,255,255,0.035);
 }
 .session-row.active {
     border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
     box-shadow: var(--elevation-raised);
+}
+
+/* Pinned sessions: a soft accent-tinted band behind the whole group
+   (not just the small amber star per row), so pinned items read as
+   their own distinct zone in the list rather than blending into the
+   same undifferentiated stack as everything else. */
+.pinned-group-band {
+    background: color-mix(in srgb, var(--accent) 3%, transparent);
+    border-radius: 12px;
+    padding: 0.5rem 0.25rem;
+}
+.dark .pinned-group-band {
+    background: color-mix(in srgb, var(--accent) 4.5%, transparent);
+}
+
+/* Session group labels (Pinned/Today/Yesterday/Earlier): a thin
+   divider rule gives each group real section boundaries instead of
+   relying on a small, low-contrast caption alone to imply structure.
+   Scoped from .session-list (not a plain :first-child on the label
+   itself) because each group renders in its own wrapper div via
+   x-for -- the label is always its own wrapper's first child, so a
+   bare :first-child would strip the divider from every group instead
+   of just the first one. :first-of-type (not :first-child) on the
+   wrapper itself skips over the x-for loop's own <template> anchor
+   tag, which is invisible but still occupies the true first-child
+   position in the DOM. */
+.session-group-label {
+    border-top: 1px solid var(--surface-raised-border);
+    padding-top: 0.625rem;
+}
+.session-list > div:first-of-type .session-group-label {
+    border-top: none;
+    padding-top: 0;
 }
 
 /* Mobile: every page's actual content renders as the sibling right
@@ -251,6 +296,23 @@
         color-mix(in srgb, var(--accent) 100%, white 12%),
         color-mix(in srgb, var(--accent) 92%, black 10%));
     box-shadow: var(--elevation-floating), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+/* Assistant reply bubble: previously reused .surface-raised, whose
+   dark-mode fill (rgba(255,255,255,0.025)) is nearly invisible against
+   a near-black canvas -- only the border read at all, so every reply
+   looked like a bare outline rather than a real bubble. This is a
+   dedicated treatment with an actually-visible fill in both themes,
+   with a faint accent tint in dark mode for a touch of the same
+   designed feel .bubble-user already has, without competing with it
+   (still a neutral, readable surface, not accent-colored text). */
+.bubble-assistant {
+    background: rgba(255,255,255,0.9);
+    border: 1px solid var(--surface-raised-border);
+    box-shadow: var(--elevation-raised);
+}
+.dark .bubble-assistant {
+    background: color-mix(in srgb, var(--accent) 5%, rgba(255,255,255,0.07));
+    border: 1px solid var(--surface-raised-border);
 }
 /* Separate, stronger elevation specifically for true modal panels --
    these sit above a dimmed backdrop already, so they can and should
