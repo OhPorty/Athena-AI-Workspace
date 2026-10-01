@@ -69,7 +69,7 @@ def _available_task_tools():
     return names
 
 # Read-only and low-risk, useful for the vast majority of "check
-# something and tell me" tasks -- everything else (file writes, bash,
+# something and tell me" tasks -- everything else (file writes, bash_read_only,
 # LCM memory tools) starts off so a new task can never do more than
 # intended just because a checkbox list was skipped over.
 _DEFAULT_ENABLED_TASK_TOOLS = {"web_search", "web_fetch", "read_file"}

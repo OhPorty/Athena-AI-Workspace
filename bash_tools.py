@@ -1,3 +1,4 @@
+import glob
 import os
 import time
 import subprocess
@@ -27,9 +28,93 @@ BASH_DANGEROUS_FLAGS = {
     "sed": {"-i", "--in-place"},
     "find": {"-delete", "-exec", "-execdir", "-fprintf", "-fprint", "-fprint0", "-fls"},
 }
+_RAW_OUTPUT_CAP = 50000
+_READONLY_TIMEOUT_SECONDS = 60
+
+# Plain GNU grep -r has no idea what a vendor/build directory or a binary
+# blob is -- unlike ripgrep, it'll happily churn through .git internals,
+# node_modules, and match inside binary DB files, burying real hits in
+# noise. Auto-inject sensible default excludes for a recursive grep, but
+# only when the model hasn't already narrowed things down itself --
+# respect explicit --exclude-dir/--include/--binary-files/-a/-I flags
+# rather than overriding them.
+_GREP_DEFAULT_EXCLUDE_DIRS = [
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "dist", "build", ".next", "target",
+]
 
 
-def execute_readonly_bash(command: str, args: list, cwd: str = ""):
+def _grep_is_recursive(args: list) -> bool:
+    for a in args:
+        if a == "--recursive":
+            return True
+        # combined short flags (e.g. -rn, -Hnr) count too, not just a bare -r/-R
+        if a.startswith("-") and not a.startswith("--") and ("r" in a[1:] or "R" in a[1:]):
+            return True
+    return False
+
+
+def _grep_has_own_filter(args: list) -> bool:
+    for a in args:
+        if a.startswith(("--exclude", "--include", "--binary-files")) or a in ("-a", "--text"):
+            return True
+        # combined short flags (e.g. -rI, -ai) count too, not just bare -I/-a
+        if a.startswith("-") and not a.startswith("--") and ("I" in a[1:] or "a" in a[1:]):
+            return True
+    return False
+
+
+def _add_grep_default_excludes(args: list) -> list:
+    if not _grep_is_recursive(args) or _grep_has_own_filter(args):
+        return args
+    extra = [f"--exclude-dir={d}" for d in _GREP_DEFAULT_EXCLUDE_DIRS]
+    extra.append("--binary-files=without-match")
+    return extra + args
+
+
+# With no real shell (shell=False), there's no automatic glob expansion --
+# a model writing "grep pattern *.py" or "sed -n 1,5p src/**/*.ts" the way
+# it would in a real shell gets back a literal, confusing "No such file or
+# directory" for "*.py" instead of a search across every .py file, because
+# nothing ever turned that glob into a list of real paths. That made grep
+# and sed effectively unusable for their most common invocation shape.
+# Expand globs here in Python instead: pure filesystem listing, no code
+# execution, so it adds no injection surface. Only an argument that
+# actually matches >=1 real path gets replaced -- an unmatched glob is left
+# as the literal string, same as bash's own default (non-nullglob)
+# behavior, so a regex/script argument that happens to contain *, ?, or []
+# (e.g. grep's own pattern, or sed's script) is untouched unless it
+# coincidentally names real files on disk. find is excluded entirely: its
+# -name/-path/-iname patterns are matched internally by find itself and
+# must reach it as the literal, unexpanded string.
+def _expand_globs(command: str, args: list, cwd: str) -> list:
+    if command == "find":
+        return list(args)
+    base = cwd or "."
+    expanded = []
+    for arg in args:
+        if glob.has_magic(arg):
+            try:
+                matches = sorted(glob.glob(arg, root_dir=base, recursive=True))
+            except (OSError, ValueError):
+                matches = []
+            if matches:
+                expanded.extend(matches)
+                continue
+        expanded.append(arg)
+    return expanded
+
+
+MAX_PIPELINE_STAGES = 5
+
+
+def _validate_readonly_stage(command: str, args: list):
+    """The complete set of per-command safety checks a single bash stage
+    needs -- bare-name shape, allowlist membership, dangerous-flag
+    rejection, shell-operator-as-literal-text rejection. Shared between a
+    lone command and every stage of a pipe_to chain: a pipeline stage is
+    exactly as capable of misuse as a standalone call, so it gets exactly
+    the same guarantees, never a weaker set just because it's downstream."""
     if not command:
         return {"error": "Missing 'command'. Example: to run grep -n pattern file.txt, set command to 'grep' (just the program name) and args to ['-n', 'pattern', 'file.txt'] (a list of separate arguments)."}
     if not isinstance(command, str) or " " in command or command.startswith("[") or command.startswith('"'):
@@ -42,6 +127,8 @@ def execute_readonly_bash(command: str, args: list, cwd: str = ""):
         }
     if command not in BASH_ALLOWED_COMMANDS:
         return {"error": "Command '" + command + "' is not allowed. Allowed commands: " + ", ".join(sorted(BASH_ALLOWED_COMMANDS))}
+    if not isinstance(args, list):
+        return {"error": "'args' must be a list of strings."}
     dangerous = BASH_DANGEROUS_FLAGS.get(command, set())
     shell_operators = ("|", ">", "<", "&", ";", "$(", "`", "&&", "||")
     for arg in args:
@@ -52,31 +139,180 @@ def execute_readonly_bash(command: str, args: list, cwd: str = ""):
                 "error": "Argument '" + arg + "' contains a shell operator (pipe, redirect, chaining, or substitution). "
                 "There is no shell here at all -- this tool runs the program directly, so operators like |, >, 2>/dev/null, "
                 "&&, or $(...) have no special meaning and can't do what they'd do in a real shell; they'd just be passed "
-                "as literal, meaningless text to the program. Make separate bash calls instead and read each result "
-                "yourself -- for example, to ignore a 'not found' error from find, just call find normally and ignore "
-                "any error in the response, rather than trying to redirect it away."
+                "as literal, meaningless text to the program. To actually pipe one command's output into another, use "
+                "this tool's own pipe_to parameter instead, e.g. command='grep', args=['-rn', 'foo', '.'], "
+                "pipe_to=[{'command': 'wc', 'args': ['-l']}]."
             }
         if arg in dangerous or any(arg.startswith(d) for d in dangerous):
             return {"error": "Argument '" + arg + "' is not allowed for '" + command + "' -- this tool is strictly read-only, no in-place edits or deletions."}
+    return None
+
+
+def _cap_output(output: str) -> str:
+    # A hard, silent cutoff here would be unrecoverable -- unlike the
+    # separate context-compression layer (tool_output.compress_tool_result),
+    # which stores the full result for later retrieval, whatever gets cut
+    # off at this point is simply gone. So the cap is generous, and when
+    # it's actually hit, that fact is reported explicitly (with an
+    # actionable suggestion) rather than the output just quietly ending.
+    if len(output) > _RAW_OUTPUT_CAP:
+        return (
+            output[:_RAW_OUTPUT_CAP]
+            + f"\n\n... [TRUNCATED: output exceeded {_RAW_OUTPUT_CAP} characters -- this is not "
+            "the complete result. Narrow the search instead of trusting what's shown here: use "
+            "grep -l to list matching filenames only, -m to cap matches per file, -c to just count, "
+            "or a more specific pattern/path.]"
+        )
+    return output
+
+
+def _prepare_stage_args(command: str, args: list, cwd: str) -> list:
+    args = _expand_globs(command, args, cwd)
+    if command == "grep":
+        args = _add_grep_default_excludes(args)
+    return args
+
+
+def _run_single(command: str, args: list, cwd: str):
     try:
         result = subprocess.run(
             [command] + list(args),
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=_READONLY_TIMEOUT_SECONDS,
             shell=False,
             cwd=cwd if cwd else None,
         )
         output = result.stdout
         if result.stderr:
             output += "\n[stderr]\n" + result.stderr
-        return {"command": command, "args": args, "output": output[:10000], "exit_code": result.returncode}
+        return {"command": command, "args": args, "output": _cap_output(output), "exit_code": result.returncode}
     except FileNotFoundError:
         return {"error": "Command '" + command + "' not found on this system."}
     except subprocess.TimeoutExpired:
-        return {"error": "Command timed out after 15 seconds."}
+        return {"error": f"Command timed out after {_READONLY_TIMEOUT_SECONDS} seconds."}
     except Exception as e:
         return {"error": f"bash execution failed: {e}"}
+
+
+# Real OS-level piping between allowlisted commands, with no shell ever
+# involved: each stage is spawned with subprocess.Popen and the next
+# stage's stdin is wired directly to the previous stage's stdout file
+# descriptor. This is NOT shell=True with a string for the shell to parse
+# -- there is still no shell reading these arguments, so none of the
+# injection surface that ban is about ever reappears; it's just Python
+# connecting two file descriptors together, the same primitive a shell
+# itself uses under the hood. Because the pipe is a real OS pipe, normal
+# Unix semantics apply for free: a downstream stage that exits early (e.g.
+# "head -1") causes the upstream stage to get EPIPE/SIGPIPE on its next
+# write and stop, exactly like a real shell pipeline -- nothing extra
+# needed to short-circuit it.
+def _run_pipeline(stages: list, cwd: str):
+    procs = []
+    for command, args in stages:
+        try:
+            proc = subprocess.Popen(
+                [command] + list(args),
+                stdin=procs[-1].stdout if procs else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                cwd=cwd if cwd else None,
+            )
+        except FileNotFoundError:
+            for p in procs:
+                p.kill()
+            return {"error": "Command '" + command + "' not found on this system."}
+        except Exception as e:
+            for p in procs:
+                p.kill()
+            return {"error": f"bash execution failed: {e}"}
+        if procs:
+            procs[-1].stdout.close()  # this fd's only other reader is `proc` now; let SIGPIPE propagate correctly
+        procs.append(proc)
+
+    # Every stage but the last has its stderr drained on its own thread --
+    # otherwise a chatty upstream stage could fill its stderr pipe and
+    # deadlock while the main thread is only reading the last stage's
+    # output via communicate().
+    stderrs = [None] * len(procs)
+
+    def _drain_stderr(i, proc):
+        try:
+            stderrs[i] = proc.stderr.read()
+        except Exception:
+            stderrs[i] = ""
+
+    threads = [threading.Thread(target=_drain_stderr, args=(i, p), daemon=True) for i, p in enumerate(procs[:-1])]
+    for t in threads:
+        t.start()
+
+    last = procs[-1]
+    try:
+        final_output, final_stderr = last.communicate(timeout=_READONLY_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        for p in procs:
+            p.kill()
+        for p in procs:
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                pass
+        return {"error": f"Pipeline timed out after {_READONLY_TIMEOUT_SECONDS} seconds."}
+    stderrs[-1] = final_stderr
+
+    for t in threads:
+        t.join(timeout=_READONLY_TIMEOUT_SECONDS)
+    for p in procs:
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            p.kill()
+
+    output = final_output or ""
+    if stderrs[-1]:
+        output += "\n[stderr]\n" + stderrs[-1]
+    output = _cap_output(output)
+
+    pipeline_info = []
+    for (command, args), proc, stderr in zip(stages, procs, stderrs):
+        entry = {"command": command, "args": args, "exit_code": proc.returncode}
+        if proc is not last and stderr and stderr.strip():
+            entry["stderr"] = stderr[:1000]
+        pipeline_info.append(entry)
+
+    return {"pipeline": pipeline_info, "output": output, "exit_code": last.returncode}
+
+
+def execute_readonly_bash(command: str, args: list, cwd: str = "", pipe_to: list = None):
+    err = _validate_readonly_stage(command, args)
+    if err:
+        return err
+    stages = [(command, list(args))]
+
+    if pipe_to:
+        if not isinstance(pipe_to, list):
+            return {"error": "'pipe_to' must be a list of stages, each like {'command': 'wc', 'args': ['-l']}."}
+        if len(pipe_to) > MAX_PIPELINE_STAGES - 1:
+            return {"error": f"Too many piped stages -- at most {MAX_PIPELINE_STAGES} commands total in one pipeline (including the first). Make separate calls instead."}
+        for i, stage in enumerate(pipe_to):
+            if not isinstance(stage, dict):
+                return {"error": f"pipe_to[{i}] must be an object with 'command' and 'args', e.g. {{'command': 'wc', 'args': ['-l']}}."}
+            stage_command = stage.get("command", "")
+            stage_args = stage.get("args", [])
+            stage_err = _validate_readonly_stage(stage_command, stage_args)
+            if stage_err:
+                stage_err["error"] = f"pipe_to[{i}] ('{stage_command}'): " + stage_err["error"]
+                return stage_err
+            stages.append((stage_command, list(stage_args)))
+
+    prepared = [(cmd, _prepare_stage_args(cmd, a, cwd)) for cmd, a in stages]
+
+    if len(prepared) == 1:
+        cmd, a = prepared[0]
+        return _run_single(cmd, a, cwd)
+    return _run_pipeline(prepared, cwd)
 
 
 def _rm_is_recursive(args: list) -> bool:
@@ -95,7 +331,7 @@ def _rm_targets_broad(args: list) -> bool:
 
 
 # Write-capable shell access, confined to a single workspace. Like the
-# read-only bash tool, this never invokes a real shell (shell=False),
+# read-only bash_read_only tool, this never invokes a real shell (shell=False),
 # so shell metacharacters in an argument are inert literal text, not
 # injection surface. Confinement here is structurally weaker than the
 # file tools' resolve_workspace_path though: cwd is fixed to the
@@ -320,8 +556,8 @@ BASH_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "bash",
-            "description": "Run a read-only shell command. Only these commands are allowed: ls, cat, grep, find, head, tail, wc, pwd, sed, stat, diff, sort, uniq, file, tree, du, date. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. sed's -i flag and find's -delete/-exec flags are blocked; this tool can never write or modify anything, on any file, regardless of workspace. Works anywhere on the filesystem this process can read, not limited to any workspace.",
+            "name": "bash_read_only",
+            "description": "Run a read-only shell command -- for searching/reading only; it can never write, modify, install, or execute anything. For write-capable operations (npm/pip install, git commit, mkdir, mv, rm, etc.) use the separate bash_exec tool instead, not this one. Only these commands are allowed: ls, cat, grep, find, head, tail, wc, pwd, sed, stat, diff, sort, uniq, file, tree, du, date. Literal shell chaining, pipes, or redirection typed inside an argument string (|, >, <, &&, ;, $(...)) do NOT work -- there's no shell here to interpret them, they'd just be inert text. To actually pipe this command's output into another allowlisted command, use the separate pipe_to parameter instead (e.g. grep piped into wc -l, or into sort, or into a second grep -v to exclude noise) -- this really does connect real OS pipes between real processes, it's just done without ever invoking a shell, so the same safety guarantees apply to every stage. Glob patterns like '*.py' or 'src/**/*.ts' in an argument ARE expanded against real files before the command runs, even without a real shell -- so 'grep -rn foo *.py' and 'sed -n 1,5p src/**/*.ts' work as expected; a glob that matches nothing is passed through unchanged (this only matters for find, whose own -name/-path patterns are always literal since find matches them internally). A recursive grep (-r/-R/--recursive) automatically skips .git, node_modules, __pycache__, venv/.venv, dist, build, .next, target, and binary files by default, unless you pass your own --exclude-dir/--include/--binary-files/-a/-I -- in which case your flags are used as-is instead. sed's -i flag and find's -delete/-exec flags are blocked; this tool can never write or modify anything, on any file, regardless of workspace. Works anywhere on the filesystem this process can read, not limited to any workspace. Commands (and the whole pipeline, if piped) time out after 60 seconds.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -330,6 +566,18 @@ BASH_TOOL_SCHEMAS = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Arguments to the command, each as a separate array element (e.g. [\"-n\", \"pattern\", \"file.txt\"] for grep -n pattern file.txt).",
+                    },
+                    "pipe_to": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "command": {"type": "string", "description": "The bare command name for this stage, e.g. 'wc' or 'sort'. Same allowlist as the first command."},
+                                "args": {"type": "array", "items": {"type": "string"}, "description": "Arguments for this stage, e.g. [\"-l\"] for wc -l."},
+                            },
+                            "required": ["command", "args"],
+                        },
+                        "description": "Optional: additional stages to pipe this command's stdout into, in order, e.g. [{\"command\": \"wc\", \"args\": [\"-l\"]}] to count matches, or [{\"command\": \"sort\", \"args\": []}, {\"command\": \"uniq\", \"args\": [\"-c\"]}] to tally them. Each stage goes through the exact same allowlist and safety checks as the first command. Up to 4 stages here (5 total including the first).",
                     },
                 },
                 "required": ["command", "args"],
@@ -340,7 +588,7 @@ BASH_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash_exec",
-            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Runs inside an isolated sandbox container: network access works (git clone/push over HTTPS, npm/pip installs), but nothing outside the mounted workspace is visible or writable -- no host SSH keys, no credential files, no other directories. If a command fails specifically because it can't find or write to something outside the workspace, that's this containment working as intended, not a bug to work around. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
+            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Not for searching or reading -- use bash_read_only for grep/sed/find/cat/etc. instead. Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Runs inside an isolated sandbox container: network access works (git clone/push over HTTPS, npm/pip installs), but nothing outside the mounted workspace is visible or writable -- no host SSH keys, no credential files, no other directories. If a command fails specifically because it can't find or write to something outside the workspace, that's this containment working as intended, not a bug to work around. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
             "parameters": {
                 "type": "object",
                 "properties": {

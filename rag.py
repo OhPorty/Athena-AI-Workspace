@@ -209,14 +209,22 @@ class SimpleCodeRAG:
         conn.close()
 
     def index_codebase(self, root_dir: str = "."):
+        # Canonicalized once here (root and per-file) so the same file
+        # indexed via different callers -- "." from startup/backup_tools.py
+        # vs. an absolute-ish workspace string from file_tools.py -- always
+        # resolves to the identical filepath string. Chunk ids are derived
+        # from filepath (see below), so without this the same file gets
+        # indexed twice under two different spellings, permanently.
         exclude_dirs = {".git", "venv", "node_modules", "file_backups", "__pycache__"}
+        root_dir = os.path.realpath(root_dir)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
         visited_filepaths = set()
         reindexed_count = 0
 
-        for filepath in glob.glob(os.path.join(root_dir, "**/*.*"), recursive=True):
+        for raw_filepath in glob.glob(os.path.join(root_dir, "**/*.*"), recursive=True):
+            filepath = os.path.realpath(raw_filepath)
             parts = filepath.split(os.sep)
             if any(d in parts for d in exclude_dirs):
                 continue
@@ -313,7 +321,7 @@ class SimpleCodeRAG:
         if reindexed_count:
             logger.info(f"index_codebase done: {reindexed_count} file(s) (re)embedded.")
 
-    def search(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 3, workspace: str = None) -> List[Dict[str, Any]]:
         if not query or not query.strip():
             return []
 
@@ -324,6 +332,17 @@ class SimpleCodeRAG:
         cursor.execute("SELECT filepath, content, embedding FROM chunks WHERE embedding IS NOT NULL")
         rows = cursor.fetchall()
         conn.close()
+
+        if workspace:
+            # The index accumulates chunks from every codebase Athena has
+            # ever touched (her own root at startup, plus any workspace a
+            # user has edited a file in -- index_codebase() never partitions
+            # or clears by caller). Without this filter, a session whose
+            # workspace is some unrelated external project would still get
+            # ranked results back from Athena's own source or a different
+            # project entirely -- silently wrong, not just unhelpful.
+            workspace_root = os.path.realpath(workspace)
+            rows = [r for r in rows if os.path.realpath(r[0]).startswith(workspace_root + os.sep) or os.path.realpath(r[0]) == workspace_root]
 
         if not rows:
             return []
@@ -365,5 +384,5 @@ def index_codebase(root_dir: str = "."):
     _get_default_instance().index_codebase(root_dir)
 
 
-def search(query: str, limit: int = 3) -> List[Dict[str, Any]]:
-    return _get_default_instance().search(query, limit=limit)
+def search(query: str, limit: int = 3, workspace: str = None) -> List[Dict[str, Any]]:
+    return _get_default_instance().search(query, limit=limit, workspace=workspace)

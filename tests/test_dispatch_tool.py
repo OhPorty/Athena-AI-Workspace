@@ -48,11 +48,11 @@ def test_routes_read_file_to_file_tools(monkeypatch):
     assert result == {"path": "a.py", "offset": 5}
 
 
-def test_routes_bash_to_bash_tools(monkeypatch):
+def test_routes_bash_read_only_to_bash_tools(monkeypatch):
     import bash_tools
-    monkeypatch.setattr(bash_tools, "execute_readonly_bash", lambda cmd, args, cwd: {"cmd": cmd, "cwd": cwd})
+    monkeypatch.setattr(bash_tools, "execute_readonly_bash", lambda cmd, args, cwd, pipe_to=None: {"cmd": cmd, "cwd": cwd})
     ctx = make_ctx(workspace="/ws")
-    result = main.dispatch_tool("bash", {"command": "ls", "args": []}, ctx)
+    result = main.dispatch_tool("bash_read_only", {"command": "ls", "args": []}, ctx)
     assert result == {"cmd": "ls", "cwd": "/ws"}
 
 

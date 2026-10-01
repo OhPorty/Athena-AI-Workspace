@@ -1,0 +1,97 @@
+/* Motion primitives for Athena's "alive" states. The earlier pass reached
+   for literal floating blob shapes as the alive-ness signal and it read as
+   decorative/amateur rather than professional -- this version keeps the
+   personality but earns it through restraint: a single presence indicator
+   that visibly changes behavior across idle/thinking/streaming states, and
+   real enter/leave transitions everywhere a state used to just snap. */
+
+@keyframes breathe {
+    0%, 100% { transform: scale(1); opacity: 0.85; }
+    50%      { transform: scale(1.12); opacity: 1; }
+}
+
+@keyframes pulse-ring {
+    0%   { transform: scale(0.85); opacity: 0.55; }
+    100% { transform: scale(2.2); opacity: 0; }
+}
+
+@keyframes spin-soft {
+    to { transform: rotate(360deg); }
+}
+
+/* Sweeps a soft highlight across text placeholders / streaming content so
+   in-flight work reads as "alive" rather than just static text appearing. */
+@keyframes shimmer {
+    0%   { background-position: -120% 0; }
+    100% { background-position: 220% 0; }
+}
+
+@keyframes rise-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* --- Presence orb: Athena's single "she's here" indicator ---
+   idle: slow breathing glow. thinking: tighter, faster pulse. streaming:
+   an expanding ring animation layered on top signals active output. */
+.presence-orb {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 90%, white), var(--accent) 70%);
+}
+.presence-orb::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: inherit;
+    animation: breathe var(--duration-breathe) var(--ease-snap) infinite;
+}
+.presence-orb.is-active::before {
+    animation-duration: 1.1s;
+}
+.presence-orb .presence-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    opacity: 0;
+}
+.presence-orb.is-active .presence-ring {
+    animation: pulse-ring var(--duration-pulse) var(--ease-snap) infinite;
+}
+
+.shimmer-text {
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, currentColor 55%, transparent) 0%,
+        color-mix(in srgb, currentColor 90%, transparent) 45%,
+        color-mix(in srgb, currentColor 55%, transparent) 90%
+    );
+    background-size: 240% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 1.8s linear infinite;
+}
+
+.spin-soft {
+    animation: spin-soft 1s linear infinite;
+}
+
+.rise-in {
+    animation: rise-in var(--duration-base) var(--ease-snap) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .presence-orb::before,
+    .presence-orb .presence-ring,
+    .shimmer-text,
+    .spin-soft,
+    .rise-in {
+        animation: none;
+    }
+}

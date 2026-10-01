@@ -1,6 +1,6 @@
 # Athena
 
-Athena is a self-hosted AI agent workspace — a chat and coding assistant with persistent memory and a delegation system for sub-agents. It's built as a single FastAPI backend with a no-build-step Alpine.js + Tailwind frontend, designed to run against any OpenAI-compatible inference backend — including local options like Ollama, llama.cpp, and vLLM — as well as several external API providers.
+Athena is a self-hosted AI agent workspace — a chat and coding assistant with persistent memory and a delegation system for sub-agents. It's built as a single FastAPI backend with an Alpine.js + Tailwind frontend, designed to run against any OpenAI-compatible inference backend — including local options like Ollama, llama.cpp, and vLLM — as well as several external API providers. The frontend is built with Vite (see `frontend/`) and its output is committed straight into `static/`, so *running* Athena still needs no Node.js at all — only *editing* the frontend does.
 
 ## Core Features
 
@@ -15,7 +15,7 @@ Athena is a self-hosted AI agent workspace — a chat and coding assistant with 
 
 - Python 3.11+
 - An OpenAI-compatible inference backend running locally, if you want local models — e.g. [Ollama](https://ollama.com), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://github.com/vllm-project/vllm). Athena also works against external API providers without any local backend at all.
-- Node.js (only if you need to rebuild frontend vendor assets — the app itself ships with no build step)
+- Node.js (only if you're modifying the frontend — see `frontend/`; the app itself ships with a pre-built `static/`, so running it needs no Node.js)
 
 ## Installation
 

@@ -1,0 +1,15 @@
+/* Tailwind's generated styles only -- deliberately just the @tailwind
+   directives, nothing else. tokens.css/base.css/design-system/*.css are
+   imported separately, and *after* this file, directly in main.js (as
+   plain JS-level imports, not CSS @import here) so they land later in the
+   final concatenated stylesheet. That ordering matters for real: some
+   markup combines a custom class with a same-property Tailwind utility
+   (e.g. class="surface-raised rounded-xl" -- both set border-radius), and
+   the pre-Vite app's cascade order (Tailwind CDN script, then a separate
+   style.css <link>, in that order) made the custom class win every same-
+   specificity tie. JS-level imports in main.js reproduce that exact order
+   without fighting CSS's "@import must be first in the file" rule, which
+   a single @import-after-@tailwind file can't satisfy. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

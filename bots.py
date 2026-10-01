@@ -153,16 +153,21 @@ def delete_bot(bot_id: int):
 class _FakeReqForDispatch:
     """Minimal stand-in for ChatIn, carrying only the fields
     _stream_completion / _stream_openai_compatible actually read
-    (provider, model, endpoint_url, api_key). Bot dispatch has no
+    (provider, model, endpoint_url, api_key, think). Bot dispatch has no
     session/workspace/tool-allowlist concerns a real ChatIn carries,
     so building one of those would mean populating a dozen irrelevant
     fields just to satisfy the type -- this carries exactly what's
-    needed and nothing else."""
-    def __init__(self, provider, model, endpoint_url, api_key):
+    needed and nothing else. think defaults to "none": a dispatched
+    sub-agent turn should be fast and cheap by default, not spend
+    tokens on extended reasoning the way Athena's own main-agent turns
+    now do (ChatIn.think defaults to "high") -- override explicitly if
+    a specific dispatched turn genuinely needs it."""
+    def __init__(self, provider, model, endpoint_url, api_key, think="none"):
         self.provider = provider
         self.model = model
         self.endpoint_url = endpoint_url
         self.api_key = api_key
+        self.think = think
 
 
 
@@ -192,6 +197,7 @@ def _call_bot_endpoint(bot, chat_messages):
         model=bot["model"],
         endpoint_url=endpoint_url,
         api_key=bot.get("api_key") or "",
+        think="none",
     )
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
     _settings_snapshot = settings.load_settings()
@@ -331,7 +337,7 @@ def _call_bot_endpoint(bot, chat_messages):
 
 
 _BOT_TOOL_DESCRIPTIONS = {
-    "bash": "read-only shell commands (ls, cat, grep, find, etc.) to look at files and search",
+    "bash_read_only": "read-only shell commands (ls, cat, grep, find, etc.) to look at files and search",
     "search_codebase": "semantic search over the indexed codebase for orientation",
     "find_definition": "jump to where a symbol is actually defined",
     "find_references": "find every real usage of a symbol across the workspace",
@@ -382,7 +388,7 @@ Plan your approach before calling a tool. If something doesn't match what you ex
 Investigate only what the job below actually requires. Don't expand scope on your own just because something seems related.
 
 ## Reading Large Files
-Never read a large file from the start to the end just because it was mentioned in your job. Orient first -- use search_codebase or a targeted bash grep to find the specific section, function, or line range that actually answers your job, then use read_file with offset to read only that section. If read_file reports has_more: true, that does not mean you should keep paginating through the whole file -- only continue if the specific section you actually need is further in. You have a limited number of rounds and a limited context budget for this one job; exhaustively reading a large file page by page will leave you unable to report your findings at all. A partial, targeted read that answers the actual question is far more useful than an incomplete attempt at reading everything.
+Never read a large file from the start to the end just because it was mentioned in your job. Orient first -- use search_codebase or a targeted bash_read_only grep to find the specific section, function, or line range that actually answers your job, then use read_file with offset to read only that section. If read_file reports has_more: true, that does not mean you should keep paginating through the whole file -- only continue if the specific section you actually need is further in. You have a limited number of rounds and a limited context budget for this one job; exhaustively reading a large file page by page will leave you unable to report your findings at all. A partial, targeted read that answers the actual question is far more useful than an incomplete attempt at reading everything.
 
 ## Scoped Tool Use
 Use only the tools relevant to this job:
@@ -952,7 +958,7 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {
             "name": {"type": "string"},
             "description": {"type": "string", "description": "A short sentence describing this bot's job scope -- e.g. 'Investigates codebase structure and reports findings.' NOT a full system prompt; the real prompt is built from this plus allowed_tools automatically."},
-            "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Read-only tool names this bot can use, e.g. ['bash', 'search_codebase']."},
+            "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Read-only tool names this bot can use, e.g. ['bash_read_only', 'search_codebase']."},
         }, "required": ["name", "description", "allowed_tools"]},
     }},
     {"type": "function", "function": {
@@ -1056,7 +1062,7 @@ def _bot_delegation_tool_schemas_for_mode(async_enabled):
 # enforcement point, not the prompt text or the DB column.
 
 BOT_ALLOWED_TOOL_NAMES = {
-    "bash", "list_files", "read_file", "search_codebase",
+    "bash_read_only", "list_files", "read_file", "search_codebase",
     "find_definition", "find_references", "type_info",
     "web_search", "web_fetch",
     "list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt",
@@ -1069,7 +1075,7 @@ _BOT_CTX_SIZE = 32768
 _BOT_MAX_ROUNDS = 200  # absolute outer safety net; per-tool-type limits below are what actually catches an exploration binge in practice
 
 # Grouped, independently-budgeted counters -- the flat MAX_ROUNDS ceiling
-# let a bot burn dozens of bash/list_files calls without ever reaching
+# let a bot burn dozens of bash_read_only/list_files calls without ever reaching
 # append_scratch_note, since nothing distinguished "still investigating"
 # from "stuck re-exploring." Each group gets its own warn/hard-stop
 # count instead, same structural pattern as Athena2's own exploration
@@ -1077,7 +1083,7 @@ _BOT_MAX_ROUNDS = 200  # absolute outer safety net; per-tool-type limits below a
 # group, so it's always reachable regardless of what else got throttled.
 
 _BOT_TOOL_TYPE_GROUPS = {
-    "explore": {"bash", "list_files", "read_file", "search_codebase", "find_definition", "find_references", "type_info"},
+    "explore": {"bash_read_only", "list_files", "read_file", "search_codebase", "find_definition", "find_references", "type_info"},
     "web": {"web_search", "web_fetch"},
     "social": {"list_bots", "list_rooms", "message_bot", "read_room_messages", "draft_bot_prompt"},
     "recall": {"lcm_recall_search", "lcm_recall_expand", "lcm_recall_range"},

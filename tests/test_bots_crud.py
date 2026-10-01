@@ -24,12 +24,12 @@ def test_create_bot_and_list_bots():
 
 def test_update_bot_modifies_fields():
     created = bots.create_bot(make_bot_in())
-    bots.update_bot(created["id"], make_bot_in(name="Renamed Bot", allowed_tools=["bash"]))
+    bots.update_bot(created["id"], make_bot_in(name="Renamed Bot", allowed_tools=["bash_read_only"]))
 
     listed = bots.list_bots()
     bot = next(b for b in listed if b["id"] == created["id"])
     assert bot["name"] == "Renamed Bot"
-    assert bot["allowed_tools"] == ["bash"]
+    assert bot["allowed_tools"] == ["bash_read_only"]
 
 
 def test_delete_bot_removes_it():

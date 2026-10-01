@@ -182,7 +182,7 @@ CASUAL_AGENT_SECTIONS = [
 ]
 # Note: there is deliberately no dead-tool STRICT RULE here about grep -n
 # vs. read_file for line-location questions -- casual mode's tool list
-# never includes bash or read_file (see _get_mode_tools; only workspace/
+# never includes bash_read_only or read_file (see _get_mode_tools; only workspace/
 # athena_delegation modes get bash_tools.BASH_TOOL_SCHEMAS/file_tools.FILE_TOOL_SCHEMAS), so an
 # instruction to use them here was always unreachable. That guidance
 # already lives, correctly scoped, in CODING_HARNESS_SECTIONS'
@@ -209,7 +209,7 @@ CODING_HARNESS_SECTIONS = [
      "with the short ordered list of what you're actually going to do. A trivial one-line fix "
      "doesn't need one. This is enforced, not just advised: if you make several tool calls in "
      "a row without ever calling write_plan, every other tool disappears until you call it -- "
-     "so don't be surprised if bash/read_file/etc. suddenly aren't in your tool list anymore; "
+     "so don't be surprised if bash_read_only/read_file/etc. suddenly aren't in your tool list anymore; "
      "that's this gate, not an error. It never reduces how much you can actually do -- once "
      "you've written a plan, full tool access returns and stays available for the rest of the "
      "turn. A plan can be wrong once you see real file contents -- call update_plan_step to "
@@ -237,7 +237,7 @@ CODING_HARNESS_SECTIONS = [
      "Use grep/sed to locate something by line -- never read_file for that, since it "
      "returns no line numbers. Before reading or grepping any file yourself for a "
      "codebase question, call search_codebase first -- this is a default, not an optional "
-     "step for unfamiliar territory. Skipping straight to read_file/bash on a guess wastes "
+     "step for unfamiliar territory. Skipping straight to read_file/bash_read_only on a guess wastes "
      "context searching by hand for something search_codebase would have pointed to in one "
      "call. Treat its results as a pointer, not ground truth -- read the real file before "
      "editing, but let search_codebase tell you which file and roughly where first. Use "
@@ -312,6 +312,14 @@ def _search_query_similarity(a, b):
     return len(words_a & words_b) / min(len(words_a), len(words_b))
 
 
+# Tools whose repeated-but-reworded queries get checked against
+# _search_query_similarity -- a separate recent-queries list per tool
+# (below), since a web query and a codebase query sharing similar words are
+# unrelated searches over different indices; cross-tool blocking would be a
+# correctness bug, not a fix.
+_SIMILARITY_CHECKED_TOOL_NAMES = {"web_search", "search_codebase"}
+
+
 def _resolve_mode_and_workspace(req):
     """Explicit, named mode resolution -- not inferred piecemeal from
     workspace truthiness scattered across several call sites. Athena's
@@ -365,7 +373,7 @@ def _get_dynamic_context_message(req):
 # tool_selection section) but enforced structurally: a model can drift
 # off a prompt instruction under pressure, it can't call a tool that
 # isn't in its tool list.
-_SEARCH_GATED_TOOL_NAMES = {"bash", "read_file"}
+_SEARCH_GATED_TOOL_NAMES = {"bash_read_only", "read_file"}
 
 # The full set of self-investigation tools, cut off once a turn has
 # leaned on them past the threshold below AND no delegation has
@@ -378,11 +386,25 @@ _SEARCH_GATED_TOOL_NAMES = {"bash", "read_file"}
 # of her own follow-up digging on top of real delegation findings --
 # e.g. confirming something a bot's scratch note pointed to.
 _EXPLORATION_TOOL_NAMES = {
-    "bash", "read_file", "list_files", "search_codebase",
+    "bash_read_only", "read_file", "list_files", "search_codebase",
     "find_definition", "find_references", "type_info",
 }
 _DELEGATION_TOOL_NAMES = {"run_delegation_step", "plan_delegation"}
 _SELF_INVESTIGATION_TOOL_THRESHOLD = 6
+
+# workspace mode has no delegation fallback to hand off to the way
+# athena_delegation does, so it can't reuse _SELF_INVESTIGATION_TOOL_THRESHOLD's
+# blanket exploration lockout above -- that would leave the model with
+# nothing but write tools and nowhere to actually get further investigation
+# done. Instead this is narrow and surgical: once a workspace turn has made
+# this many search_codebase calls specifically, only search_codebase itself
+# is cut off -- read_file/bash_read_only/list_files/etc. stay available, since those
+# are exactly the tools a model tends to leave unused while it keeps
+# rewording the same RAG query instead of just reading the file it already
+# found. Counted against a dedicated search_codebase-only counter, not the
+# generic exploration count above, so unrelated read_file/bash_read_only usage can't
+# trip this and block a tool that was never the problem.
+_WORKSPACE_SEARCH_CODEBASE_THRESHOLD = _SELF_INVESTIGATION_TOOL_THRESHOLD
 
 # Below this many total tool calls in one turn (any tool, any mode), a
 # turn is small enough not to need an explicit plan. At or past it,
@@ -399,28 +421,64 @@ _SELF_INVESTIGATION_TOOL_THRESHOLD = 6
 # total tool-call volume is unaffected; it only forces one checkpoint.
 _PLAN_REQUIRED_THRESHOLD = 3
 
+# Writing a plan once isn't enough on its own: a real incident (a weather
+# lookup, but the same shape applies to anything) showed a model write a
+# 3-step plan, then make 15+ more raw web_fetch calls to progressively more
+# sources without ever calling update_plan_step again -- including well
+# after a genuinely valid, complete answer had already come back. Nothing
+# ever prompted it to check its own plan against what it had actually
+# found, so it just kept hedging with more sources instead of noticing it
+# was done. This is not a volume cap either: the model can still make as
+# many tool calls as it needs, it just has to periodically report status
+# against its own plan to keep making OTHER calls -- the same reason a
+# good agent working off a todo list doesn't spiral, since checking an item
+# off is the natural moment it re-evaluates "do I actually need to keep
+# going." Counted as calls since write_plan/update_plan_step was last
+# called (reset on either), not a running total, so this can recur any
+# number of times across a long turn, unlike the one-shot gates above.
+_PLAN_CHECKIN_THRESHOLD = 4
 
-def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count):
-    """The four structural tool-availability gates, checked against a
+
+def _plan_is_complete(plan_state):
+    """True once every recorded step is done or failed -- i.e. there's
+    nothing left pending/in_progress. Used to cut a turn's tools down to
+    just write_plan at that point: either explicitly declare more work
+    needed (a real, visible decision) or give the actual answer now,
+    instead of drifting into more open-ended exploration with no plan item
+    left to justify it."""
+    return bool(plan_state) and all(s.get("status") in ("done", "failed") for s in plan_state)
+
+
+def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False):
+    """The seven structural tool-availability gates, checked against a
     snapshot of state as of the START of the current round (not the
     live-updating turn totals) -- so a tool unlocked by a call earlier
-    THIS round (e.g. search_codebase and bash requested in the same
+    THIS round (e.g. search_codebase and bash_read_only requested in the same
     parallel tool-call batch) still can't be used until the round after,
     matching the sequencing the old schema-hiding approach enforced.
     Returns an error dict if `name` is currently gated, else None. A
     standalone function (not inlined in chat_stream's _execute_tool_call)
     so it's independently testable without spinning up a real turn."""
     if mode in ("workspace", "athena_delegation") and name in _SEARCH_GATED_TOOL_NAMES and "search_codebase" not in pre_round_called:
-        return {"error": f"BLOCKED: '{name}' is not available yet this turn -- call search_codebase first before using bash or read_file directly, so you're working from search results rather than blind exploration."}
+        return {"error": f"BLOCKED: '{name}' is not available yet this turn -- call search_codebase first before using bash_read_only or read_file directly, so you're working from search results rather than blind exploration."}
     if (mode == "athena_delegation" and name in _EXPLORATION_TOOL_NAMES
             and pre_round_exploration_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
             and not (pre_round_called & _DELEGATION_TOOL_NAMES)):
         return {"error": (
             "BLOCKED: you've made enough self-investigation tool calls this turn that direct exploration "
-            "(bash, read_file, list_files, search_codebase, find_definition, find_references, type_info) is "
+            "(bash_read_only, read_file, list_files, search_codebase, find_definition, find_references, type_info) is "
             "no longer available for the rest of this turn -- only delegation (run_delegation_step/"
             "plan_delegation), any write tools, and your existing findings so far remain. Use plan_delegation "
             "or run_delegation_step to get any further investigation done instead of continuing to look yourself."
+        )}
+    if (mode == "workspace" and name == "search_codebase"
+            and pre_round_search_codebase_count >= _WORKSPACE_SEARCH_CODEBASE_THRESHOLD):
+        return {"error": (
+            "BLOCKED: you've made enough search_codebase calls this turn that it's no longer available for the "
+            "rest of this turn -- it returns ranked snippets, not full files, and rewording the same question "
+            "does not surface new information. read_file and bash_read_only are already unlocked -- use them now to read "
+            "the actual file(s) your searches already pointed to. If you genuinely need to explore a different "
+            "area, use list_files or grep via bash_read_only instead of search_codebase."
         )}
     if mode == "athena_delegation" and name == "run_delegation_step" and "plan_delegation" in pre_round_called:
         return {"error": (
@@ -436,20 +494,37 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
             "rest of this turn -- once you call write_plan with the ordered steps you're actually going to "
             "take, full tool access returns and stays available. Call write_plan now."
         )}
+    if pre_round_plan_complete and name != "write_plan":
+        return {"error": (
+            "BLOCKED: every step in your plan is now marked done or failed, so this tool is no longer "
+            "available. Either give your actual answer now based on what you've already found -- if you have "
+            "a real result, more tool calls will not improve on it -- or call write_plan again if there is "
+            "genuinely more work needed, which will unlock tools again."
+        )}
+    if (not pre_round_plan_complete and pre_round_plan_exists
+            and pre_round_calls_since_plan_touch >= _PLAN_CHECKIN_THRESHOLD
+            and name not in ("write_plan", "update_plan_step")):
+        return {"error": (
+            f"BLOCKED: you've made {pre_round_calls_since_plan_touch} tool calls since you last touched your "
+            "plan. Only update_plan_step (or write_plan, if the plan itself needs to change) is available "
+            "until you check in. Call update_plan_step now for whichever step your recent calls actually "
+            "addressed -- if it's already done, say so and stop looking for more sources to confirm it."
+        )}
     return None
 
 
-def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0):
-    """Casual chat no longer carries bash/backup_file -- a mode only
+def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0, search_codebase_call_count=0, plan_exists=False, calls_since_plan_touch=0, plan_complete=False):
+    """Casual chat no longer carries bash_read_only/backup_file -- a mode only
     gets tools it actually needs, matching the same principle behind
     bots never getting write tools at the registration level rather
     than being told not to use them.
 
-    called_tool_names/exploration_call_count/total_tool_call_count let a
-    caller recompute this per round within one turn (see chat_stream's
-    generation loop) so tool availability can shift as the model's own
-    actions this turn accumulate, instead of being fixed once at request
-    start."""
+    called_tool_names/exploration_call_count/total_tool_call_count/
+    search_codebase_call_count/plan_exists/calls_since_plan_touch/
+    plan_complete let a caller recompute this per round within one turn
+    (see chat_stream's generation loop) so tool availability can shift as
+    the model's own actions this turn accumulate, instead of being fixed
+    once at request start."""
     tools = lcm_client.get_lcm_tools() + PLAN_TOOL_SCHEMAS
     if req.search_url:
         tools = tools + web_tools.WEB_TOOL_SCHEMAS
@@ -466,6 +541,8 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
         if (mode == "athena_delegation" and exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
                 and not (called & _DELEGATION_TOOL_NAMES)):
             tools = [t for t in tools if t.get("function", {}).get("name") not in _EXPLORATION_TOOL_NAMES]
+        if mode == "workspace" and search_codebase_call_count >= _WORKSPACE_SEARCH_CODEBASE_THRESHOLD:
+            tools = [t for t in tools if t.get("function", {}).get("name") != "search_codebase"]
         if mode == "athena_delegation" and "plan_delegation" in called:
             # Hard commitment: once a plan has been submitted, any
             # correction (a rejected step, an incomplete result) must go
@@ -477,8 +554,28 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
             tools = [t for t in tools if t.get("function", {}).get("name") != "run_delegation_step"]
     if total_tool_call_count >= _PLAN_REQUIRED_THRESHOLD and "write_plan" not in called:
         tools = [t for t in tools if t.get("function", {}).get("name") == "write_plan"]
+    elif plan_complete:
+        # Every step is done/failed -- the only way forward is to
+        # explicitly declare more work via a fresh write_plan, or just
+        # answer now that there's nothing left to justify another call.
+        tools = [t for t in tools if t.get("function", {}).get("name") == "write_plan"]
+    elif plan_exists and calls_since_plan_touch >= _PLAN_CHECKIN_THRESHOLD:
+        # Forced check-in: report progress against the existing plan
+        # before making any other kind of call.
+        tools = [t for t in tools if t.get("function", {}).get("name") in ("write_plan", "update_plan_step")]
     if req.allowed_tools is not None:
-        _allowed = set(req.allowed_tools)
+        # write_plan/update_plan_step are mode-independent governance
+        # infrastructure (see PLAN_TOOL_SCHEMAS), not an opt-in capability --
+        # a restricted caller (currently only task_scheduler.py) was never
+        # meant to be able to omit them. Without this, a task whose
+        # enabled_tools doesn't happen to list "write_plan" hits the
+        # plan-required gate above with an empty tools list once it crosses
+        # _PLAN_REQUIRED_THRESHOLD (the gate narrows to write_plan-only,
+        # then this filter strips write_plan right back out) -- the model
+        # still has "call write_plan" in its system prompt but nothing
+        # structured to call, so it falls back to emitting a fake
+        # <tool_call> text block instead of a real one.
+        _allowed = set(req.allowed_tools) | {"write_plan", "update_plan_step"}
         tools = [t for t in tools if t.get("function", {}).get("name") in _allowed]
     return tools
 
@@ -531,15 +628,44 @@ class ChatIn(BaseModel):
     allowed_skills: Optional[List[str]] = None  # same, for which skills load_skill can actually load
     provider: str = ""  # "" = Ollama-native (default); "openai"/"openrouter"/"custom"/"anthropic"/"google" route through an adapter in _stream_completion
     api_key: str = ""  # only used when provider is set
-    think: str = ""  # ""=don't ask (today's behavior); "none"/"low"/"medium"/"high"/"max" -- Ollama-native only for now, see _stream_completion
+    think: str = "high"  # Athena's own (main-agent) default; ""=don't ask at all, "none"=explicitly off, or "low"/"medium"/"high"/"max" -- Ollama-native only for now, see _stream_completion. Callers that build a ChatIn without specifying this (task_scheduler.py, delegation_jobs.py) inherit this default for free.
 
 
-def _search_codebase(query: str, limit: int = 3):
+# rag.search() has no similarity floor of its own -- it always returns
+# exactly `limit` results no matter how weak the match, with a bare float
+# score. A live calibration probe (scripts/calibrate_rag_confidence.py)
+# found this embedding model's cosine similarities cluster in a fairly
+# narrow range regardless of true relevance: a genuinely-correct query can
+# score lower than an unrelated one before the underlying index is clean,
+# and even post-cleanup the "good" and "bad" bands sit close together. So
+# results are never silently dropped by score -- only labeled -- and these
+# two cutoffs are deliberately conservative first-pass values from that
+# probe, not a precise classifier; re-run the probe after any reindex to
+# sanity-check them.
+_RAG_HIGH_CONFIDENCE_FLOOR = 0.75
+_RAG_LOW_CONFIDENCE_CEILING = 0.60
+
+
+def _score_confidence_label(score):
+    if score >= _RAG_HIGH_CONFIDENCE_FLOOR:
+        return "high"
+    if score >= _RAG_LOW_CONFIDENCE_CEILING:
+        return "uncertain"
+    return "low"
+
+
+def _search_codebase(query: str, limit: int = 3, workspace: str = None):
     """Tool-callable RAG search over the indexed codebase, returning
     structured results the model can inspect and, if needed, refine
     with a follow-up query -- rather than a fixed block of context
     passively injected every single turn regardless of whether it's
-    actually needed or matches what the model is currently after."""
+    actually needed or matches what the model is currently after.
+
+    workspace scopes results to the caller's own workspace -- the index
+    accumulates chunks from every codebase Athena has ever touched (her
+    own root, plus any workspace edited through her file tools), so an
+    unscoped search here would happily return confident-looking matches
+    from a completely unrelated project."""
     if not query:
         return {"error": "query is required"}
     try:
@@ -547,7 +673,7 @@ def _search_codebase(query: str, limit: int = 3):
     except (TypeError, ValueError):
         limit = 3
     try:
-        results = rag.search(query, limit=limit)
+        results = rag.search(query, limit=limit, workspace=workspace)
     except RuntimeError as e:
         # The embedding model failed to load (or is still loading for the
         # first time and hasn't finished) -- surface a clear, structured
@@ -555,13 +681,19 @@ def _search_codebase(query: str, limit: int = 3):
         return {"error": f"search_codebase is temporarily unavailable: {e}"}
     if not results:
         return {"query": query, "results": [], "note": "No matches found -- try different or broader search terms."}
-    return {
-        "query": query,
-        "results": [
-            {"filepath": r["filepath"], "content": r["content"][:3000], "score": r["score"]}
-            for r in results
-        ],
-    }
+    labeled = [
+        {"filepath": r["filepath"], "content": r["content"][:3000], "score": r["score"], "confidence": _score_confidence_label(r["score"])}
+        for r in results
+    ]
+    response = {"query": query, "results": labeled}
+    if all(r["score"] < _RAG_HIGH_CONFIDENCE_FLOOR for r in results):
+        response["note"] = (
+            "None of these results cleared this embedding model's high-confidence range -- scores in this band "
+            "do not reliably separate genuine matches from coincidental ones (a correct answer and an unrelated "
+            "one can score similarly here). Read the most plausible file(s) directly with read_file or bash_read_only to "
+            "confirm relevance rather than re-running search_codebase with reworded terms."
+        )
+    return response
 
 
 # The bot-delegation tool cluster used to be gated only inside chat_stream's
@@ -634,8 +766,8 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
         return web_tools.web_fetch(args.get("url", ""), args.get("offset", 0))
     if name == "load_skill":
         return skills.load_skill(args.get("name", ""))
-    if name == "bash":
-        return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
+    if name == "bash_read_only":
+        return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), ctx.workspace, args.get("pipe_to"))
     if name == "bash_exec":
         return bash_tools.execute_write_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
     if name == "bash_exec_start":
@@ -702,7 +834,7 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
             return bots._plan_delegation_tool(args.get("steps", []))
 
     if name == "search_codebase":
-        return _search_codebase(args.get("query", ""), args.get("limit", 3))
+        return _search_codebase(args.get("query", ""), args.get("limit", 3), workspace=ctx.workspace)
 
     if name == "write_plan":
         if ctx.plan_state is None:
@@ -942,7 +1074,7 @@ PLAN_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write_plan",
-            "description": "Record (or completely replace) the ordered list of steps for what you're about to do this turn. Call this once you can see a task is going to take more than a couple of tool calls, before diving into the work -- not after. This does not limit how many tool calls you can make afterward; it only requires deciding on a structure first. Calling this again replaces the previous plan entirely (use update_plan_step instead if you just want to mark progress on the existing plan).",
+            "description": "Record (or completely replace) the ordered list of steps for what you're about to do this turn. Call this once you can see a task is going to take more than a couple of tool calls, before diving into the work -- not after. This does not limit how many tool calls you can make afterward; it only requires deciding on a structure first. Once a plan exists, you'll periodically be required to call update_plan_step before you can make further calls -- treat a successful result as a real signal to check your plan and mark the relevant step done, not as a reason to check another source for the same fact. Once every step is done or failed, only write_plan itself remains available: either declare genuinely new work with a fresh plan, or just give your actual answer. Calling this again replaces the previous plan entirely (use update_plan_step instead if you just want to mark progress on the existing plan).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -960,7 +1092,7 @@ PLAN_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan_step",
-            "description": "Mark progress on one step of the plan already recorded via write_plan. Returns the full plan re-rendered with the update applied. Fails with a clear error if write_plan hasn't been called yet this turn, or if the index is out of range.",
+            "description": "Mark progress on one step of the plan already recorded via write_plan. Returns the full plan re-rendered with the update applied. Fails with a clear error if write_plan hasn't been called yet this turn, or if the index is out of range. Call this as soon as a step is actually answered by a result you just got -- not after several more calls double-checking it against other sources. A step you can mark done is a step you should stop spending further tool calls on.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -979,7 +1111,7 @@ RAG_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_codebase",
-            "description": "Semantic search over the indexed codebase (built ahead of time, separately from this conversation) -- embeds your query and ranks chunks of real code by meaning, not by literal word overlap, so a query phrased differently from the code's own vocabulary can still find it. Each Python function/class is its own chunk (a large class is split per-method); other file types are chunked by section. Use this for orientation questions (where does X live, what does this area of the codebase roughly do) before falling back to list_files or grep to explore blind. Results are a starting point, not a source of truth: a chunk can still be stale relative to changes made earlier this session, and an oversized function may be split across more than one result -- once you're actually about to make an edit, read the real file directly first. If results aren't useful, try a different, more specific query rather than giving up on the tool entirely.",
+            "description": "Semantic search over the indexed codebase (built ahead of time, separately from this conversation) -- embeds your query and ranks chunks of real code by meaning, not by literal word overlap, so a query phrased differently from the code's own vocabulary can still find it. Each Python function/class is its own chunk (a large class is split per-method); other file types are chunked by section. Use this for orientation questions (where does X live, what does this area of the codebase roughly do) before falling back to list_files or grep to explore blind. Results are a starting point, not a source of truth: a chunk can still be stale relative to changes made earlier this session, and an oversized function may be split across more than one result -- once you're actually about to make an edit, read the real file directly first. If results aren't useful, try a different, more specific query once -- but once you've identified plausible file(s), switch to read_file or bash_read_only to read them directly rather than re-querying search_codebase again on the same topic: it returns ranked snippets, not full files, so rewording the question will not reveal more than reading the actual file would. Two or three searches should be enough to identify where to look.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1616,7 +1748,7 @@ def chat_stream(req: ChatIn):
     context = lcm_client.get_lcm_context(req.session_id)
 
     # Perpetual agent mode -- one tool set, always available. LCM's recall
-    # tools and the read-only bash tool are always on; file write/edit
+    # tools and the read-only bash_read_only tool are always on; file write/edit
     # tools are only included here when req.workspace is non-empty, so
     # the model can never edit files on a session with no workspace
     # bound to it, regardless of how it reads an ambiguous prompt.
@@ -1624,13 +1756,19 @@ def chat_stream(req: ChatIn):
     req.workspace = effective_workspace
     system_prompt = _get_mode_system_prompt(mode, req)
     # The maximum tool set this turn could ever reach (as if
-    # search_codebase were already called) -- used both for ctx_size
-    # estimation below AND as the actual tools payload sent every round
-    # (see generate()'s round loop). Keeping this one stable list for the
-    # whole turn, instead of recomputing a narrower one as gates close,
-    # is what keeps the tool schema an unchanging prefix across rounds --
-    # gate enforcement itself now happens in _execute_tool_call at the
-    # moment a call is attempted, not by hiding tools from the schema.
+    # search_codebase were already called) -- used for ctx_size estimation
+    # below, and as round 0's starting tools payload. generate()'s round
+    # loop reassigns this (via `nonlocal tools`) from the live gate state
+    # after every round, so a tool a gate has actually closed off is really
+    # absent from the next round's schema, not just refused at execution
+    # time with a text message the model has to notice and comply with --
+    # a model that ignores/skims a "BLOCKED, do X instead" result can still
+    # retry the same blocked tool forever otherwise, since nothing stops it
+    # from being selected again. When no gate state has changed since the
+    # last round, _get_mode_tools returns byte-identical output, so this
+    # costs nothing extra in the common case -- the one time it genuinely
+    # changes is exactly the one time the model's options should visibly
+    # shrink.
     tools = _get_mode_tools(mode, req, called_tool_names={"search_codebase"})
     logger.debug(f"tools for this turn: {[t.get('function', {}).get('name') for t in tools]}")
 
@@ -1661,7 +1799,7 @@ def chat_stream(req: ChatIn):
     # {"text": str, "status": str, "note": str}.
     _current_plan = []
 
-    def _execute_tool_call(tool_call, pre_round_called, pre_round_exploration_count, pre_round_total_count):
+    def _execute_tool_call(tool_call, pre_round_called, pre_round_exploration_count, pre_round_total_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False):
         """Thin per-turn wrapper around the shared dispatch_tool: build a
         ToolContext from this request/turn's own state, then dispatch.
         allowed_names=None (the default) since _get_mode_tools already
@@ -1682,7 +1820,10 @@ def chat_stream(req: ChatIn):
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
-        gate_error = _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count)
+        gate_error = _check_tool_gate(
+            mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count,
+            pre_round_search_codebase_count, pre_round_plan_exists, pre_round_calls_since_plan_touch, pre_round_plan_complete,
+        )
         if gate_error is not None:
             return gate_error
         ctx = ToolContext(
@@ -1697,6 +1838,7 @@ def chat_stream(req: ChatIn):
         return dispatch_tool(name, args, ctx)
 
     def generate():
+        nonlocal tools  # reassigned each round below as gate state changes; must bind to chat_stream's own `tools`, not shadow it locally
         cancel_flag = threading.Event()
         generation_streaming.cancel_flags[req.session_id] = cancel_flag
         # Doom-loop detection: fingerprint each tool call (name + exact
@@ -1710,7 +1852,7 @@ def chat_stream(req: ChatIn):
         # used by other production coding-agent harnesses for exactly
         # this failure mode.
         _tool_call_fingerprints = []
-        _recent_search_queries = []
+        _recent_queries_by_tool = {name: [] for name in _SIMILARITY_CHECKED_TOOL_NAMES}
         def _tool_call_fingerprint(tc):
             fn = tc.get("function", {})
             args = fn.get("arguments", {})
@@ -1770,18 +1912,23 @@ def chat_stream(req: ChatIn):
         consecutive_ungrounded_claims = 0
         consecutive_empty_final_answers = 0
         made_any_tool_calls_this_turn = False
-        # Tool availability is recomputed every round from these two,
-        # not fixed once at request start -- see _get_mode_tools. This is
-        # what makes read_file/bash gated behind search_codebase, and
-        # blind self-investigation gated behind delegation, structural
-        # instead of one more prompt instruction to drift off under
-        # pressure.
+        # Tool availability is recomputed every round from the counters
+        # below (see the `tools = _get_mode_tools(...)` reassignment further
+        # down, and _get_mode_tools itself), not fixed once at request
+        # start. This is what makes read_file/bash_read_only gated behind
+        # search_codebase, blind self-investigation gated behind delegation,
+        # the workspace search_codebase cutoff, and the write-a-plan
+        # requirement all structural -- a genuinely absent tool, not one
+        # more prompt instruction to drift off under pressure.
         _called_tool_names = set()
         _exploration_call_count = 0
         _investigation_gate_notified = False
+        _search_codebase_call_count = 0
+        _search_gate_notified = False
         _total_tool_call_count = 0
         _plan_gate_notified = False
         _delegation_commitment_notified = False
+        _calls_since_plan_touch = 0
 
         for _round in range(MAX_ROUNDS):
             round_reply = ""
@@ -1977,8 +2124,11 @@ def chat_stream(req: ChatIn):
             consecutive_ungrounded_claims = 0
 
             _gate_was_open = _exploration_call_count < _SELF_INVESTIGATION_TOOL_THRESHOLD
+            _search_gate_was_open = _search_codebase_call_count < _WORKSPACE_SEARCH_CODEBASE_THRESHOLD
             _plan_gate_was_open = _total_tool_call_count < _PLAN_REQUIRED_THRESHOLD
             _delegation_commitment_was_open = "plan_delegation" not in _called_tool_names
+            _plan_was_complete = _plan_is_complete(_current_plan)
+            _checkin_gate_was_open = (not _plan_was_complete) and _calls_since_plan_touch < _PLAN_CHECKIN_THRESHOLD
             # Snapshot of gate state as of the START of this round, before
             # this round's own calls get folded into the running totals
             # below -- passed into _execute_tool_call so a tool unlocked by
@@ -1986,12 +2136,22 @@ def chat_stream(req: ChatIn):
             # after, matching what schema-hiding used to enforce.
             _pre_round_called = set(_called_tool_names)
             _pre_round_exploration_count = _exploration_call_count
+            _pre_round_search_codebase_count = _search_codebase_call_count
             _pre_round_total_count = _total_tool_call_count
+            _pre_round_plan_exists = bool(_current_plan)
+            _pre_round_calls_since_plan_touch = _calls_since_plan_touch
+            _pre_round_plan_complete = _plan_was_complete
             for tc in round_tool_calls:
                 _tc_name = tc.get("function", {}).get("name", "")
                 _called_tool_names.add(_tc_name)
                 if _tc_name in _EXPLORATION_TOOL_NAMES:
                     _exploration_call_count += 1
+                if _tc_name == "search_codebase":
+                    _search_codebase_call_count += 1
+                if _tc_name in ("write_plan", "update_plan_step"):
+                    _calls_since_plan_touch = 0
+                else:
+                    _calls_since_plan_touch += 1
                 _total_tool_call_count += 1
 
             # Model wants to call tool(s) -- execute each, tell the
@@ -2005,7 +2165,7 @@ def chat_stream(req: ChatIn):
                 fingerprint = _tool_call_fingerprint(tc)
                 repeat_count = _tool_call_fingerprints.count(fingerprint)
                 similar_query = None
-                if repeat_count < 2 and tool_name == "web_search":
+                if repeat_count < 2 and tool_name in _SIMILARITY_CHECKED_TOOL_NAMES:
                     fn_args = tc.get("function", {}).get("arguments", {})
                     if isinstance(fn_args, str):
                         try:
@@ -2014,7 +2174,7 @@ def chat_stream(req: ChatIn):
                             fn_args = {}
                     query = fn_args.get("query", "") if isinstance(fn_args, dict) else ""
                     if query:
-                        similar_query = next((q for q in _recent_search_queries if _search_query_similarity(query, q) >= 0.7), None)
+                        similar_query = next((q for q in _recent_queries_by_tool[tool_name] if _search_query_similarity(query, q) >= 0.7), None)
                 if repeat_count >= 2:
                     result = {
                         "error": f"BLOCKED: this exact {tool_name} call (same tool, same arguments) has already "
@@ -2032,11 +2192,14 @@ def chat_stream(req: ChatIn):
                         f"already returned, or search for something genuinely different if you actually need it."
                     }
                 else:
-                    result = _execute_tool_call(tc, _pre_round_called, _pre_round_exploration_count, _pre_round_total_count)
+                    result = _execute_tool_call(
+                        tc, _pre_round_called, _pre_round_exploration_count, _pre_round_total_count, _pre_round_search_codebase_count,
+                        _pre_round_plan_exists, _pre_round_calls_since_plan_touch, _pre_round_plan_complete,
+                    )
                     _tool_call_fingerprints.append(fingerprint)
                     if len(_tool_call_fingerprints) > 20:
                         _tool_call_fingerprints.pop(0)
-                    if tool_name == "web_search":
+                    if tool_name in _SIMILARITY_CHECKED_TOOL_NAMES:
                         fn_args = tc.get("function", {}).get("arguments", {})
                         if isinstance(fn_args, str):
                             try:
@@ -2045,9 +2208,9 @@ def chat_stream(req: ChatIn):
                                 fn_args = {}
                         query = fn_args.get("query", "") if isinstance(fn_args, dict) else ""
                         if query:
-                            _recent_search_queries.append(query)
-                            if len(_recent_search_queries) > 10:
-                                _recent_search_queries.pop(0)
+                            _recent_queries_by_tool[tool_name].append(query)
+                            if len(_recent_queries_by_tool[tool_name]) > 10:
+                                _recent_queries_by_tool[tool_name].pop(0)
                 _result_error = result.get("error") if isinstance(result, dict) else None
                 log_trace_event(
                     req.session_id, "tool_blocked" if isinstance(_result_error, str) and _result_error.startswith("BLOCKED:") else "tool_result",
@@ -2067,17 +2230,53 @@ def chat_stream(req: ChatIn):
                 _result_for_context = result if tool_name in tool_output.UNCOMPRESSED_TOOL_NAMES else tool_output.compress_tool_result(result)
                 _messages.append({"role": "tool", "content": json.dumps(_result_for_context)})
 
+            # Recomputed here (after this round's calls actually ran, not
+            # right after counting their names above) because plan_exists/
+            # plan_complete depend on _current_plan, which write_plan/
+            # update_plan_step dispatch just mutated during the loop above --
+            # using pre-execution plan state here would miss this round's
+            # own plan updates. When no gate has changed this is
+            # byte-identical to what it was (no caching cost); the instant
+            # one closes, the closed-off tool is genuinely removed from what
+            # the model can choose from, not just described as forbidden in
+            # a text message it has to read and comply with. That's exactly
+            # why this doesn't doom-loop the way a text-only "BLOCKED, call
+            # write_plan now" can: an unavailable tool can't be retried by a
+            # model that skims past the warning, because it's no longer an
+            # option to pick, the same way a permission a model doesn't have
+            # is never something it can "decide" to use anyway.
+            tools = _get_mode_tools(
+                mode, req,
+                called_tool_names=_called_tool_names,
+                exploration_call_count=_exploration_call_count,
+                total_tool_call_count=_total_tool_call_count,
+                search_codebase_call_count=_search_codebase_call_count,
+                plan_exists=bool(_current_plan),
+                calls_since_plan_touch=_calls_since_plan_touch,
+                plan_complete=_plan_is_complete(_current_plan),
+            )
+
             if (_gate_was_open and _exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
                     and mode == "athena_delegation" and not _investigation_gate_notified
                     and not (_called_tool_names & _DELEGATION_TOOL_NAMES)):
                 _investigation_gate_notified = True
                 _messages.append({"role": "user", "content": (
                     "You've made enough self-investigation tool calls this turn that direct exploration "
-                    "(bash, read_file, list_files, search_codebase, find_definition, find_references, "
+                    "(bash_read_only, read_file, list_files, search_codebase, find_definition, find_references, "
                     "type_info) is no longer available for the rest of this turn -- only delegation "
                     "(run_delegation_step/plan_delegation), any write tools, and your existing findings "
                     "so far remain. Use plan_delegation or run_delegation_step to get any further "
                     "investigation done instead of continuing to look yourself."
+                )})
+
+            if (_search_gate_was_open and _search_codebase_call_count >= _WORKSPACE_SEARCH_CODEBASE_THRESHOLD
+                    and mode == "workspace" and not _search_gate_notified):
+                _search_gate_notified = True
+                _messages.append({"role": "user", "content": (
+                    "You've made enough search_codebase calls this turn that it's no longer available for the "
+                    "rest of this turn -- read_file and bash_read_only remain available (already unlocked). Use them to "
+                    "read the actual file(s) your searches already surfaced, instead of continuing to reword "
+                    "the same search."
                 )})
 
             if (_plan_gate_was_open and _total_tool_call_count >= _PLAN_REQUIRED_THRESHOLD
@@ -2098,6 +2297,27 @@ def chat_stream(req: ChatIn):
                     "the rest of this turn -- that commitment is permanent once made. If a step was rejected "
                     "or came back incomplete, do not work around it with a one-off run_delegation_step call: "
                     "fix the step (or steps) and call plan_delegation again with the corrected list."
+                )})
+
+            _plan_now_complete = _plan_is_complete(_current_plan)
+            if not _plan_was_complete and _plan_now_complete:
+                _messages.append({"role": "user", "content": (
+                    "Every step in your plan is now marked done or failed -- no other tool is available until "
+                    "you either give your actual answer now (if you have a real result, more tool calls will "
+                    "not improve on it) or call write_plan again with genuinely new steps if more work is "
+                    "actually needed."
+                )})
+            # Not a one-shot notice like the gates above: _calls_since_plan_touch
+            # resets on every write_plan/update_plan_step call, so this can
+            # legitimately re-arm and fire again later in a long turn --
+            # that recurrence is the whole point, not a bug to dedupe away.
+            elif (_checkin_gate_was_open and not _plan_now_complete
+                    and _current_plan and _calls_since_plan_touch >= _PLAN_CHECKIN_THRESHOLD):
+                _messages.append({"role": "user", "content": (
+                    f"You've made {_calls_since_plan_touch} tool calls since you last touched your plan. Only "
+                    "update_plan_step or write_plan are available until you check in -- call update_plan_step "
+                    "now for whichever step your recent calls actually addressed. If it's already answered, "
+                    "mark it done and stop looking for more sources to confirm it."
                 )})
         else:
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."

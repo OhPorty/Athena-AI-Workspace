@@ -328,6 +328,9 @@ def _run_athena_room_turn_gen(room_id):
         model=model,
         endpoint_url=defaults.get("endpoint_url", ""),
         api_key=defaults.get("api_key", ""),
+        # think left at _FakeReqForDispatch's own default ("none") -- a room
+        # turn is a dispatched, headless generation like a bot's, not a live
+        # main-agent /api/chat turn, so it doesn't inherit ChatIn's "high" default.
     )
     endpoint_url = defaults.get("endpoint_url") or ""
     provider = defaults.get("provider") or ""

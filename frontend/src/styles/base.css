@@ -1,3 +1,8 @@
+/* Everything from the pre-Vite static/css/style.css that isn't a pure
+   design-token (:root/.dark variable) block -- those live in tokens.css
+   instead. Relocated verbatim; the only intentional change is the two
+   .athena-icon-mask/.logo-mask url() paths below (see comment there). */
+
 [x-cloak] { display: none !important; }
 
 .ctx-ring { transform: rotate(-90deg); }
@@ -224,53 +229,6 @@
     }
 }
 
-/* Accent color system -- CSS variables so the accent can be regenerated
-   from one picked color at runtime, without touching every Tailwind
-   class. Values below are Tailwind's actual violet-* palette, chosen
-   so this conversion is a pure behind-the-scenes swap with zero visual
-   change until a new accent is actually picked. */
-:root {
-    --accent: #7c3aed;              /* violet-600 */
-    --accent-hover: #6d28d9;        /* violet-700 */
-    --accent-icon: #8b5cf6;         /* violet-500 */
-    --accent-soft: #f5f3ff;         /* violet-50 */
-    --accent-text: #7c3aed;         /* violet-600 */
-    --accent-text-strong: #6d28d9;  /* violet-700 */
-    --accent-border: #c4b5fd;       /* violet-300 */
-    --accent-border-focus: #a78bfa; /* violet-400 */
-    --wordmark-color: #5eead4;      /* mint teal, matches current hardcoded value */
-    --athena-logo-hue: 0deg;        /* no rotation = original logo teal */
-}
-.dark {
-    --accent-soft: rgba(139, 92, 246, 0.1);  /* violet-500/10 */
-    --accent-text: #a78bfa;         /* violet-400 */
-    --accent-text-strong: #c4b5fd;  /* violet-300 */
-    --accent-border: #6d28d9;       /* violet-700 */
-    --accent-border-focus: #7c3aed; /* violet-600 */
-    --wordmark-color: #5eead4;      /* same as light -- current design has no dark variant */
-    --athena-logo-hue: 0deg;
-}
-
-/* Elevation system -- a small, fixed set of depth levels applied
-   consistently everywhere (cards, message bubbles, modals, popups),
-   so different pages can use different layouts while still feeling
-   like the same app: they all draw from this same shared scale
-   rather than each inventing its own shadow/border/radius values.
-   Three levels only, deliberately -- enough for real hierarchy
-   without becoming arbitrary or noisy. */
-:root {
-    --radius-card: 14px;
-    --elevation-raised: 0 1px 2px rgba(0,0,0,0.04), 0 2px 5px rgba(0,0,0,0.06);
-    --elevation-floating: 0 1px 3px rgba(0,0,0,0.056), 0 3px 7px rgba(0,0,0,0.079);
-    --surface-raised-bg: rgba(255,255,255,0.75);
-    --surface-raised-border: rgba(0,0,0,0.07);
-}
-.dark {
-    --elevation-raised: 0 1px 2px rgba(0,0,0,0.2), 0 3px 12px rgba(0,0,0,0.25);
-    --elevation-floating: 0 6px 16px rgba(0,0,0,0.3), 0 20px 48px rgba(0,0,0,0.4);
-    --surface-raised-bg: rgba(255,255,255,0.025);
-    --surface-raised-border: rgba(255,255,255,0.08);
-}
 .surface-raised {
     background: var(--surface-raised-bg);
     border: 1px solid var(--surface-raised-border);
@@ -309,22 +267,19 @@
     background: rgba(255,255,255,0.9);
     border: 1px solid var(--surface-raised-border);
     box-shadow: var(--elevation-raised);
+    /* Asymmetric corners for the redesign's "soft, not literally blobbed"
+       bubble treatment -- set here rather than via Tailwind utility classes
+       in markup, since .surface-raised (combined with .bubble-assistant on
+       the same element) sets the border-radius *shorthand*, which -- being
+       later in the compiled cascade than Tailwind's own utilities -- would
+       silently override individual corner utilities back to a uniform
+       radius. Setting it directly on this rule (which itself comes after
+       .surface-raised in this same file) is what actually wins. */
+    border-radius: 0.375rem 1rem 1rem 0.75rem;
 }
 .dark .bubble-assistant {
     background: color-mix(in srgb, var(--accent) 5%, rgba(255,255,255,0.07));
     border: 1px solid var(--surface-raised-border);
-}
-/* Separate, stronger elevation specifically for true modal panels --
-   these sit above a dimmed backdrop already, so they can and should
-   read as much more elevated than a small in-page chat bubble. Kept
-   deliberately distinct from --elevation-floating rather than reusing
-   it, since one shadow strength tuned for a small bubble reads as
-   almost invisible on a large modal panel. */
-:root {
-    --elevation-modal: 0 25px 50px -12px rgba(0,0,0,0.25), 0 10px 20px -8px rgba(0,0,0,0.15);
-}
-.dark {
-    --elevation-modal: 0 25px 50px -12px rgba(0,0,0,0.5), 0 10px 20px -8px rgba(0,0,0,0.35);
 }
 .surface-modal {
     box-shadow: var(--elevation-modal);
@@ -338,29 +293,21 @@
 }
 
 /* App canvas -- the single largest visual surface in the whole
-   interface, previously flat white/near-black with zero depth.
-   A subtle, ambient radial glow tied to the accent color gives the
-   whole app a designed, cohesive feel instead of a flat background,
-   without being loud or distracting -- it's meant to be felt more
-   than consciously noticed. */
+   interface. A subtle, ambient radial glow tied to the accent color
+   gives the whole app a designed, cohesive feel instead of a flat
+   background. Base neutral warmed 2-3% for the redesign's one deliberate,
+   very faint classical reference (Pentelic marble's warm weathered
+   patina, not stark cool-white/black) -- see design-system/motion.css
+   for the ambient blob layer added on top of this in the redesign. */
 .app-canvas {
-    /* Pure #ffffff read as harsh/bright; a warm off-white read as
-       "aged paper"; #fafafa (a near-white cool neutral) turned out to
-       be nearly identical to the sidebar/nav chrome's own bg-neutral-50
-       (also #fafafa), leaving every layer of the UI the same shade
-       with no visible separation at all -- shadows alone don't read in
-       a static view. This is a real, visible light-gray base instead,
-       specifically so the sidebar (now darker) and cards (now lighter,
-       see .surface-raised below) both have genuine room to separate
-       from it. */
-    background-color: #f5f5f6;
+    background-color: #f7f5f1;
     background-image:
         radial-gradient(ellipse 900px 700px at 10% -15%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
         radial-gradient(ellipse 700px 600px at 100% 105%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 60%);
     background-attachment: fixed;
 }
 .dark .app-canvas {
-    background-color: #111113;
+    background-color: #121110;
     background-image:
         radial-gradient(ellipse 900px 700px at 10% -15%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
         radial-gradient(ellipse 700px 600px at 100% 105%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 60%);
@@ -378,26 +325,17 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.25);
 }
 
-/* Floating island -- a rounded-square tile that sits slightly
-   contrasted against the app-canvas background: darker than the
-   canvas in light mode, lighter than it in dark mode, so it reads
-   as a distinct, elevated surface rather than blending into the
-   page. Used for the empty-state chat welcome, and reusable
-   anywhere else content should feel like its own floating panel. */
-.floating-island {
-    background: rgba(0,0,0,0.028);
-    border-radius: 28px;
-    padding: 3rem 3.5rem;
-    box-shadow: var(--elevation-raised);
-}
-.dark .floating-island {
-    background: rgba(255,255,255,0.035);
-}
 
-/* Rightward-casting variant for vertical side panels (the icon
-   rail, the session-list panel), matching surface-bar's approach
-   but oriented for panels that sit to the left of content instead
-   of above it. */
+/* Rightward-casting variant for vertical side panels sitting to the
+   left of content instead of above it. NOTE: only actually visible
+   when the caster is a positioned element with a higher stacking
+   order than its neighbor -- a box-shadow painted by a position:static
+   element gets silently painted over by the next sibling's own
+   background, regardless of z-index (z-index is a no-op on static
+   elements). The icon rail is md:static at desktop width, so this
+   class is kept for the one context where it does apply (the mobile
+   fixed-position slide-out nav) but is NOT used for the desktop rail
+   -- see .surface-inset-right below for that. */
 .surface-bar-right {
     box-shadow: 3px 0 10px rgba(0,0,0,0.14);
 }
@@ -405,17 +343,42 @@
     box-shadow: 3px 0 12px rgba(0,0,0,0.4);
 }
 
-/* Inset variant, applied directly to the session-list panel's own
-   left edge, simulating a shadow cast onto it from the icon rail
-   beside it -- entirely self-contained within this one element, so
-   it doesn't depend on z-index/stacking order between siblings at
-   all, unlike surface-bar-right which needs the caster to actually
-   paint above the adjacent element. */
+/* Inset variants -- applied directly to a panel's own edge, simulating
+   a shadow cast onto it from whatever sits beside it, entirely
+   self-contained within the element itself. Unlike surface-bar-right,
+   this doesn't depend on z-index/stacking order (or even on the
+   element being positioned at all) between siblings, since it paints
+   inside the element's own border box rather than relying on painting
+   over a neighbor -- correct choice for the icon rail, which switches
+   between position:fixed (mobile) and position:static (desktop). */
 .surface-inset-left {
     box-shadow: inset 4px 0 8px -4px rgba(0,0,0,0.18);
 }
 .dark .surface-inset-left {
     box-shadow: inset 4px 0 10px -4px rgba(0,0,0,0.5);
+}
+.surface-inset-right {
+    box-shadow: inset -4px 0 8px -4px rgba(0,0,0,0.18);
+}
+.dark .surface-inset-right {
+    box-shadow: inset -4px 0 10px -4px rgba(0,0,0,0.5);
+}
+
+/* Chrome-panel background for the icon rail and file-browser panel --
+   a flat neutral-50/800 background sits at nearly the exact same
+   lightness as .app-canvas's own warm near-white/near-black (confirmed
+   by pixel sampling: ~247 vs ~236 luminance, a gap too small to read as
+   a real surface change at normal viewing scale even with a shadow on
+   top). Mixing in a small amount of the live accent color gives these
+   panels a genuinely distinct, designed tone tied to whatever theme
+   color the user picked, while staying well short of the fuller
+   --accent-soft tint used for prominent surfaces like the Athena hero
+   card -- these are passive utility chrome, not a featured element. */
+.rail-chrome-surface {
+    background: color-mix(in srgb, var(--accent) 5%, #fafafa);
+}
+.dark .rail-chrome-surface {
+    background: color-mix(in srgb, var(--accent) 9%, #27272a);
 }
 
 @keyframes pinned-jump-flash {
@@ -431,14 +394,21 @@
    SVG purely as a shape/alpha mask -- unlike filter: hue-rotate(),
    which shifts whatever colors already exist in the source image
    through a rotation matrix and can leave visible traces of the
-   original color rather than cleanly becoming the target hue. */
+   original color rather than cleanly becoming the target hue.
+
+   Paths changed from /static/svg/... to /svg/... versus the pre-Vite
+   version: these SVGs now live in frontend/public/svg/, and Vite
+   rewrites root-absolute references to public/ assets to include
+   whatever `base` is active (nothing in dev, /static/ in the production
+   build) -- hardcoding /static/ here would 404 in dev, since Vite's dev
+   server serves public/ at the bare root. */
 .athena-icon-mask {
     display: inline-block;
-    mask-image: url('/static/svg/athena-icon.svg');
+    mask-image: url('/svg/athena-icon.svg');
     mask-size: contain;
     mask-repeat: no-repeat;
     mask-position: center;
-    -webkit-mask-image: url('/static/svg/athena-icon.svg');
+    -webkit-mask-image: url('/svg/athena-icon.svg');
     -webkit-mask-size: contain;
     -webkit-mask-repeat: no-repeat;
     -webkit-mask-position: center;
@@ -446,11 +416,11 @@
 }
 .logo-mask {
     display: inline-block;
-    mask-image: url('/static/svg/spear.svg');
+    mask-image: url('/svg/spear.svg');
     mask-size: contain;
     mask-repeat: no-repeat;
     mask-position: center;
-    -webkit-mask-image: url('/static/svg/spear.svg');
+    -webkit-mask-image: url('/svg/spear.svg');
     -webkit-mask-size: contain;
     -webkit-mask-repeat: no-repeat;
     -webkit-mask-position: center;
@@ -466,13 +436,3 @@
     filter: grayscale(1);
 }
 
-/* The empty-state welcome card is a genuine focal point (centered,
-   alone on the page) rather than one of many routine list cards, so it
-   gets a noticeably stronger shadow than --elevation-raised -- dialed
-   back from an initial, heavier version to something between the two. */
-.welcome-card {
-    box-shadow: 0 8px 20px rgba(0,0,0,0.10), 0 3px 6px rgba(0,0,0,0.06);
-}
-.dark .welcome-card {
-    box-shadow: 0 8px 20px rgba(0,0,0,0.28), 0 3px 6px rgba(0,0,0,0.18);
-}

@@ -5,7 +5,7 @@ function generateUUID() {
     });
 }
 
-function athenaApp() {
+export function athenaApp() {
     return {
         // --- navigation ---
         currentPage: "chat",
@@ -64,6 +64,17 @@ function athenaApp() {
         sessions: [],
         sessionMenuOpen: null,
         expandedForkSessions: {},
+        // Lives on the root component rather than a nested x-data on
+        // #chat-page-root: a ref (like chatBox) registered inside a nested
+        // x-data is only reachable via $refs from evaluation contexts at or
+        // below that scope -- Alpine's $refs walks upward from the current
+        // $el, never into descendants. init()'s x-init runs on <body>, an
+        // ancestor of #chat-page-root, so a nested scope there would make
+        // $refs.chatBox silently resolve to undefined on the initial
+        // history load (the scroll-to-bottom call would just no-op),
+        // exactly the "opens at the top" bug this comment is guarding
+        // against regressing.
+        paletteOpen: false,
         messages: [],
         inputText: "",
         sending: false,
@@ -141,7 +152,6 @@ function athenaApp() {
         themeSeedColor: "#7c3aed",
         colorPickerOpen: false,
         mcpServers: [],
-        skillsTab: "skills",
         skills: [],
         skillFormOpen: false,
         skillDraft: {name: "", description: "", body: "", folder: null},
@@ -693,11 +703,20 @@ function athenaApp() {
                 return all;
             };
 
-            const topLevel = this.sessions.filter(s => !s.parentSessionId);
-            for (const s of topLevel) {
+            // Build fresh shallow copies rather than writing `.forks` onto
+            // the live reactive session objects -- this function runs on
+            // every render pass (it's called directly in the palette's
+            // x-for expression), and collectDescendants() returns a new
+            // array each call. Assigning that onto the real `this.sessions`
+            // items looks like a genuine data change to Alpine's reactivity
+            // every single time, which re-triggers the same x-for that just
+            // called this function -- a self-sustaining render loop that
+            // pegs the CPU and makes clicks on the palette (e.g. Unpin)
+            // land on DOM nodes mid-churn from the constant re-render.
+            const topLevel = this.sessions.filter(s => !s.parentSessionId).map(s => {
                 const descendants = collectDescendants(s.id);
-                s.forks = descendants.length ? descendants.sort(byRecent) : undefined;
-            }
+                return {...s, forks: descendants.length ? descendants.sort(byRecent) : undefined};
+            });
 
             const filtered = query
                 ? topLevel.filter(s => (s.label || "").toLowerCase().includes(query))
@@ -726,7 +745,8 @@ function athenaApp() {
         async loadBots() {
             try {
                 const resp = await fetch("/api/bots");
-                this.bots = await resp.json();
+                const data = await resp.json();
+                this.bots = Array.isArray(data) ? data : [];
             } catch (e) {
                 console.error("Failed to load bots:", e);
             }
@@ -1058,6 +1078,7 @@ function athenaApp() {
             } finally {
                 this.botConversationLoading = false;
             }
+            this.forceScrollBotMsgToBottom();
             this.checkAthenaAgentBackgroundGeneration();
         },
         async checkAthenaAgentBackgroundGeneration() {
@@ -1119,6 +1140,7 @@ function athenaApp() {
             } catch (e) {
                 this.roomMessages = [];
             }
+            this.forceScrollBotMsgToBottom();
         },
         async sendBotComposerMessage() {
             const text = this.botComposerText.trim();
@@ -1126,6 +1148,7 @@ function athenaApp() {
             this.botComposerText = "";
             if (this.activeAthenaAgent) {
                 this.roomMessages.push({sender_type: "user", content: text});
+                this.forceScrollBotMsgToBottom();
                 this.botConversationLoading = true;
                 try {
                     const resp = await fetch("/api/chat", {
@@ -1138,6 +1161,7 @@ function athenaApp() {
                     let full = "";
                     const msgIndex = this.roomMessages.length;
                     this.roomMessages.push({sender_type: "athena", content: "", thinking: "", thinkingOpen: true, toolCalls: []});
+                    this.scrollBotMsgToBottom();
                     while (true) {
                         const {done, value} = await reader.read();
                         if (done) break;
@@ -1147,14 +1171,17 @@ function athenaApp() {
                                 const obj = JSON.parse(line.slice(6));
                                 if (obj.thinking) {
                                     this.roomMessages[msgIndex].thinking += obj.thinking;
+                                    this.scrollBotMsgToBottom();
                                 }
                                 if (obj.delta) {
                                     this.roomMessages[msgIndex].thinkingOpen = false;
                                     full += obj.delta;
                                     this.roomMessages[msgIndex].content = full;
+                                    this.scrollBotMsgToBottom();
                                 }
                                 if (obj.type === "tool_start") {
                                     this.roomMessages[msgIndex].toolCalls.push({tool: obj.tool, status: "running", output: null, open: true});
+                                    this.scrollBotMsgToBottom();
                                 }
                                 if (obj.type === "tool_output") {
                                     const tc = this.roomMessages[msgIndex].toolCalls.find(t => t.tool === obj.tool && t.status === "running");
@@ -1163,6 +1190,7 @@ function athenaApp() {
                                         tc.output = obj.output;
                                         tc.open = false;
                                     }
+                                    this.scrollBotMsgToBottom();
                                 }
                             } catch (e) {}
                         }
@@ -1174,6 +1202,7 @@ function athenaApp() {
                 }
             } else if (this.activeRoomId) {
                 this.roomMessages.push({sender_type: "user", content: text});
+                this.forceScrollBotMsgToBottom();
                 this.botConversationLoading = true;
                 try {
                     const resp = await fetch(`/api/rooms/${this.activeRoomId}/send`, {
@@ -1547,6 +1576,8 @@ function athenaApp() {
                     return;
                 }
                 this.addMemoryModalOpen = false;
+                this.newMemoryText = "";
+                if (this.$refs.memoryComposer) this.$refs.memoryComposer.style.height = "auto";
                 await this.loadMemories();
             } catch (e) {
                 alert("Failed to add memory: " + e.message);
@@ -1874,7 +1905,6 @@ function athenaApp() {
             }
         },
         async deleteSkill(folder) {
-            if (!confirm("Delete this skill?")) return;
             try {
                 await fetch("/api/skills/" + encodeURIComponent(folder), {method: "DELETE"});
                 await this.loadSkills();
@@ -2238,7 +2268,6 @@ function athenaApp() {
         },
 
         deleteEndpoint(id) {
-            if (!confirm("Remove this endpoint?")) return;
             this.endpoints = this.endpoints.filter(e => e.id !== id);
             this.saveEndpoints();
         },
@@ -2409,6 +2438,25 @@ function athenaApp() {
                 // this fights a deliberate scroll-up during generation,
                 // snapping the view back down before the user can read
                 // anything.
+                const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+                if (distanceFromBottom < 150) {
+                    el.scrollTop = el.scrollHeight;
+                }
+            });
+        },
+        // Same pair, targeting the Bots page's message list (agent/group/
+        // subagent conversations all share this one ref) instead of the
+        // main chat's chatBox.
+        forceScrollBotMsgToBottom() {
+            this.$nextTick(() => {
+                const el = this.$refs.botMsgList;
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+        },
+        scrollBotMsgToBottom() {
+            this.$nextTick(() => {
+                const el = this.$refs.botMsgList;
+                if (!el) return;
                 const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
                 if (distanceFromBottom < 150) {
                     el.scrollTop = el.scrollHeight;
@@ -2997,7 +3045,6 @@ function athenaApp() {
             return this.notes.find(n => n.id === this.activeNoteId) || null;
         },
         deleteNote(id) {
-            if (!confirm("Delete this note?")) return;
             this.notes = this.notes.filter(n => n.id !== id);
             if (this.activeNoteId === id) this.activeNoteId = null;
             this.saveNotesToStorage();
@@ -3017,7 +3064,6 @@ function athenaApp() {
             a.click();
         },
         async clearAllData() {
-            if (!confirm("This deletes all local sessions and notes. Continue?")) return;
             localStorage.removeItem("athena_sessions");
             localStorage.removeItem("athena_notes");
             localStorage.removeItem("athena_session");
