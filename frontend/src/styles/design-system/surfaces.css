@@ -81,8 +81,14 @@
     grid-template-rows: minmax(0, 1fr);
 }
 .disclosure-rows > .disclosure-inner {
-    overflow: hidden;
     min-height: 0;
+}
+/* Only clip while collapsed -- clipping unconditionally beats any
+   overflow-y-auto a usage puts directly on .disclosure-inner (two chained
+   classes here outrank one Tailwind utility class), silently turning an
+   intended scrollbar into truncated, unreachable content. */
+.disclosure-rows:not(.is-open) > .disclosure-inner {
+    overflow: hidden;
 }
 /* The grid track itself collapses to 0 via minmax(0, 0fr) above, but the
    inner element's own padding utilities (px-3 pb-2, etc., set in markup)

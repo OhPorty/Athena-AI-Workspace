@@ -16,7 +16,18 @@ export function athenaApp() {
         botMenuOpen: null,
         botModalOpen: false,
         botModalEditingId: null,
-        botDraft: {name: "", model: "", selectedEndpointId: "", description: ""},
+        botDraft: {name: "", model: "", selectedEndpointId: "", description: "", allowedTools: ["bash_read_only", "list_files", "read_file", "search_codebase"]},
+        botToolChoices: [
+            {id: "read_file", label: "Read files", hint: "open a file in the workspace"},
+            {id: "list_files", label: "List files", hint: "see what is in a folder"},
+            {id: "bash_read_only", label: "Search with commands", hint: "ls, grep, find, cat (read-only)"},
+            {id: "search_codebase", label: "Search the code", hint: "find code by meaning"},
+            {id: "find_definition", label: "Find definitions", hint: "jump to where a symbol is defined"},
+            {id: "find_references", label: "Find usages", hint: "every place a symbol is used"},
+            {id: "type_info", label: "Type info", hint: "a symbol's inferred type"},
+            {id: "web_search", label: "Search the web", hint: "needs web search set up"},
+            {id: "web_fetch", label: "Fetch web pages", hint: "read a specific URL"},
+        ],
         vllmWarningOpen: false,
         vllmWarnedBotDraft: false,
         botEndpointPopupOpen: false,
@@ -78,6 +89,8 @@ export function athenaApp() {
         messages: [],
         inputText: "",
         sending: false,
+        sendingSessionId: null,
+        get generating() { return this.sending || this.backgroundGenerating; },
         modelAliases: {},
         renamingModelValue: null,
         renameInputText: "",
@@ -101,6 +114,10 @@ export function athenaApp() {
         defaultModel: null,
         searchUrl: "",
         delegationConcurrency: 1,
+        workspaceMode: "auto",
+        modelProfileOverrides: {},
+        modelProfileData: {},
+        openProfileKey: null,
         botPtcEnabled: false,
         asyncDelegationEnabled: false,
         layaGatingEnabled: false,
@@ -118,6 +135,8 @@ export function athenaApp() {
         newEndpointApiKey: "",
         maxCtx: 0,
         maxCtxText: "0",
+        modelCtxCap: 0,
+        ctxCapCache: {},
         modelPopupOpen: false,
         thinkingLevel: localStorage.getItem("athena_thinking_level") || "medium",
         thinkingMenuOpen: false,
@@ -142,6 +161,10 @@ export function athenaApp() {
         filePreviewOpen: false,
         filePreviewPath: "",
         filePreviewContent: "",
+        filePreviewBinary: false,
+        filePreviewKind: "",
+        filePreviewEditing: false,
+        fileEdit: {text: "", original: "", eol: "lf", version: null, saving: false, error: "", conflict: false, notice: ""},
         pendingImages: [],
         pendingAttachments: [],
         attachMenuOpen: false,
@@ -234,7 +257,10 @@ export function athenaApp() {
                 this.model = this.defaultModel.value;
                 this.modelLabel = this.defaultModel.label;
                 this.modelEndpointUrl = this.defaultModel.endpointUrl || "";
+                const saved = this.allAvailableModels().find(m => m.value === this.defaultModel.value && (m.endpointUrl || "") === this.modelEndpointUrl);
+                if (saved) { this.modelProvider = saved.provider || ""; this.modelApiKey = saved.apiKey || ""; }
             }
+            this.setMaxCtx(parseInt(localStorage.getItem("athena_max_ctx") || "0", 10) || 0);
 
             this.loadMemoryModel();
             this.loadAuthStatus();
@@ -254,6 +280,9 @@ export function athenaApp() {
             await this.loadSessions();
 
             this.updateHash();
+            this.$watch("model", () => this.loadCtxCap());
+            this.$watch("modelEndpointUrl", () => this.loadCtxCap());
+            this.loadCtxCap();
             this.$watch("currentPage", () => this.updateHash());
             this.$watch("sessionId", () => this.updateHash());
 
@@ -753,7 +782,7 @@ export function athenaApp() {
         },
         openNewBotModal() {
             this.botModalEditingId = null;
-            this.botDraft = {name: "", model: "", selectedEndpointId: "", description: ""};
+            this.botDraft = {name: "", model: "", selectedEndpointId: "", description: "", allowedTools: ["bash_read_only", "list_files", "read_file", "search_codebase"]};
             this.botModalOpen = true;
         },
         openEditBotModal(bot) {
@@ -763,9 +792,15 @@ export function athenaApp() {
                 name: bot.name, model: bot.model,
                 selectedEndpointId: matchingEp ? matchingEp.id : "",
                 description: bot.description || "",
+                allowedTools: (bot.allowed_tools && bot.allowed_tools.length) ? [...bot.allowed_tools] : ["bash_read_only", "list_files", "read_file", "search_codebase"],
             };
             this.botMenuOpen = null;
             this.botModalOpen = true;
+        },
+        toggleBotTool(id) {
+            const tools = this.botDraft.allowedTools;
+            const i = tools.indexOf(id);
+            if (i === -1) tools.push(id); else tools.splice(i, 1);
         },
         localBotEndpoints() {
             return this.endpoints.filter(ep => !ep.apiKey);
@@ -842,7 +877,7 @@ export function athenaApp() {
                 provider: ep ? (ep.provider || "") : "",
                 unload_strategy: "ollama_keep_alive",
                 description: this.botDraft.description.trim() || null,
-                allowed_tools: [],
+                allowed_tools: this.botDraft.allowedTools,
             });
             try {
                 const url = this.botModalEditingId ? `/api/bots/${this.botModalEditingId}` : "/api/bots";
@@ -1402,6 +1437,49 @@ export function athenaApp() {
             fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({delegation_concurrency: n})}).catch(e => console.error("Failed to save delegation concurrency:", e));
         },
 
+        saveWorkspaceMode() {
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({workspace_mode: this.workspaceMode})}).catch(e => console.error("Failed to save workspace mode:", e));
+        },
+
+        previewShots(tc) {
+            const urls = tc && tc.output && tc.output.screenshot_urls;
+            return urls && typeof urls === "object" ? Object.entries(urls).map(([name, url]) => ({name, url})) : [];
+        },
+
+        profileKey(ep, m) { return ep.id + "|" + m; },
+        async toggleModelProfile(ep, m) {
+            const key = this.profileKey(ep, m);
+            if (this.openProfileKey === key) { this.openProfileKey = null; return; }
+            this.openProfileKey = key;
+            await this.loadModelProfile(ep, m);
+        },
+        async loadModelProfile(ep, m) {
+            const key = this.profileKey(ep, m);
+            this.modelProfileData[key] = {loading: true};
+            try {
+                const resp = await fetch("/api/model-profile", {
+                    method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({model: m, url: ep.url || "", provider: ep.type === "local" ? "" : (ep.provider || ""), api_key: ep.apiKey || ""}),
+                });
+                this.modelProfileData[key] = await resp.json();
+            } catch (e) {
+                this.modelProfileData[key] = {error: "Couldn't reach the server to check this model."};
+            }
+        },
+        async setModelProfileField(ep, m, field, value) {
+            const entry = {...(this.modelProfileOverrides[m] || {})};
+            if (value === "" || value === "auto") delete entry[field];
+            else entry[field] = field === "vision" ? value === "yes" : value;
+            if (Object.keys(entry).length) this.modelProfileOverrides[m] = entry;
+            else delete this.modelProfileOverrides[m];
+            await fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({model_profiles: this.modelProfileOverrides})}).catch(e => console.error("Failed to save model profile:", e));
+            await this.loadModelProfile(ep, m);
+        },
+        profileVisionChoice(m) {
+            const v = (this.modelProfileOverrides[m] || {}).vision;
+            return v === true ? "yes" : v === false ? "no" : "auto";
+        },
+
         saveBotPtcEnabled() {
             fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({bot_ptc_enabled: this.botPtcEnabled})}).catch(e => console.error("Failed to save PTC setting:", e));
         },
@@ -1700,6 +1778,8 @@ export function athenaApp() {
                 if (data.model_aliases !== undefined) this.modelAliases = data.model_aliases;
                 if (data.search_url !== undefined) this.searchUrl = data.search_url;
                 if (data.delegation_concurrency !== undefined && data.delegation_concurrency !== null) this.delegationConcurrency = data.delegation_concurrency;
+                if (data.workspace_mode) this.workspaceMode = data.workspace_mode;
+                if (data.model_profiles) this.modelProfileOverrides = data.model_profiles;
                 if (data.bot_ptc_enabled !== undefined && data.bot_ptc_enabled !== null) this.botPtcEnabled = data.bot_ptc_enabled;
                 if (data.delegation_async_enabled !== undefined && data.delegation_async_enabled !== null) this.asyncDelegationEnabled = data.delegation_async_enabled;
                 if (data.laya_gating_enabled !== undefined && data.laya_gating_enabled !== null) this.layaGatingEnabled = data.laya_gating_enabled;
@@ -2336,10 +2416,48 @@ export function athenaApp() {
             this.saveEndpoints();
         },
 
+        // 0 means auto. Anything else is clamped to what the model can actually run.
+        setMaxCtx(value) {
+            let v = Math.max(0, Math.round(Number(value) || 0));
+            if (this.modelCtxCap && v > this.modelCtxCap) v = this.modelCtxCap;
+            this.maxCtx = v;
+            this.maxCtxText = String(v);
+            localStorage.setItem("athena_max_ctx", String(v));
+        },
         syncCtxFromText() {
-            const val = parseInt((this.maxCtxText || "0").replace(/[^0-9]/g, ""), 10) || 0;
-            this.maxCtx = Math.min(val, 131072);
-            this.maxCtxText = String(val);
+            this.setMaxCtx(parseInt((this.maxCtxText || "0").replace(/[^0-9]/g, ""), 10) || 0);
+        },
+        // The chosen size is kept as the user's preference; a smaller model just runs at its own limit.
+        effectiveCtx() {
+            return this.modelCtxCap && this.maxCtx > this.modelCtxCap ? this.modelCtxCap : this.maxCtx;
+        },
+        ctxSliderMax() {
+            return this.modelCtxCap || Math.max(131072, this.maxCtx);
+        },
+        async loadCtxCap() {
+            const key = [this.model, this.modelEndpointUrl].join("|");
+            if (!this.model) { this.modelCtxCap = 0; return; }
+            if (key in this.ctxCapCache) {
+                this.modelCtxCap = this.ctxCapCache[key];
+                this.maxCtxText = String(this.effectiveCtx());
+                return;
+            }
+            this.modelCtxCap = 0;
+            try {
+                const resp = await fetch("/api/model-profile", {
+                    method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({model: this.model, url: this.modelEndpointUrl || "", provider: this.modelProvider || "", api_key: this.modelApiKey || ""}),
+                });
+                const data = await resp.json();
+                const cap = Number(data.max_context) || 0;
+                this.ctxCapCache[key] = cap;
+                if ([this.model, this.modelEndpointUrl].join("|") === key) {
+                    this.modelCtxCap = cap;
+                    this.maxCtxText = String(this.effectiveCtx());
+                }
+            } catch (e) {
+                console.error("Couldn't look up the model's context limit:", e);
+            }
         },
 
         renderMarkdown(text) {
@@ -2466,16 +2584,18 @@ export function athenaApp() {
 
         async send() {
             const text = this.inputText.trim();
-            if ((!text && !this.pendingImages.length && !this.pendingAttachments.length) || this.sending) return;
+            if ((!text && !this.pendingImages.length && !this.pendingAttachments.length) || this.generating) return;
             this.inputText = "";
             this.$nextTick(() => {
                 if (this.$refs.textareaEl) this.$refs.textareaEl.style.height = "auto";
             });
             const imagesToSend = this.pendingImages.map(img => img.base64);
-            const attachmentsToSend = this.pendingAttachments.map(att => ({name: att.name, content: att.content}));
+            const attachmentsToSend = this.pendingAttachments.map(att =>
+                att.base64 ? {name: att.name, base64: att.base64} : {name: att.name, content: att.content});
             this.pendingImages = [];
             this.pendingAttachments = [];
             this.sending = true;
+            this.sendingSessionId = this.sessionId;
 
             this.messages.push({role: "user", content: text, hasImage: imagesToSend.length > 0, created_at: Date.now()});
             let activeSession = this.sessions.find(s => s.id === this.sessionId);
@@ -2505,7 +2625,7 @@ export function athenaApp() {
                         session_id: this.sessionId,
                         message: text,
                         model: this.model,
-                        max_ctx: this.maxCtx,
+                        max_ctx: this.effectiveCtx(),
                         workspace: this.workspace,
                         endpoint_url: this.modelEndpointUrl,
                         search_url: this.searchUrl,
@@ -2592,6 +2712,7 @@ export function athenaApp() {
                 }
             } finally {
                 this.sending = false;
+                this.sendingSessionId = null;
                 this.currentAbortController = null;
             }
         },
@@ -2599,7 +2720,7 @@ export function athenaApp() {
             fetch("/api/chat/cancel", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({session_id: this.sessionId}),
+                body: JSON.stringify({session_id: this.sendingSessionId || this.sessionId}),
             }).catch(() => {});
             if (this.currentAbortController) {
                 this.currentAbortController.abort();
@@ -2681,10 +2802,91 @@ export function athenaApp() {
                 }
                 this.filePreviewPath = data.path;
                 this.filePreviewContent = data.content;
+                this.filePreviewBinary = !!data.binary;
+                this.filePreviewKind = data.kind || "";
+                this.filePreviewEditing = false;
+                this.fileEdit = {text: "", original: "", eol: "lf", version: null, saving: false, error: "", conflict: false, notice: ""};
                 this.filePreviewOpen = true;
             } catch (e) {
                 alert("Preview failed: " + e.message);
             }
+        },
+
+        fileDownloadUrl(inline) {
+            return `/api/workspace/download?workspace=${encodeURIComponent(this.workspace)}&path=${encodeURIComponent(this.filePreviewPath)}${inline ? "&inline=true" : ""}`;
+        },
+        filePreviewIsAudio() {
+            return /\.(wav|mp3|ogg|oga|m4a|flac|opus)$/i.test(this.filePreviewPath || "");
+        },
+        filePreviewIsImage() {
+            return ["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(this.filePreviewKind);
+        },
+
+        // The preview above is a capped, lossy read (20k chars, bad bytes replaced), so editing
+        // loads the whole file separately and saves it back with a version check.
+        fileEditDirty() { return this.filePreviewEditing && this.fileEdit.text !== this.fileEdit.original; },
+        async startFileEdit() {
+            this.fileEdit.error = ""; this.fileEdit.conflict = false; this.fileEdit.notice = "";
+            try {
+                const resp = await fetch(`/api/workspace/file?workspace=${encodeURIComponent(this.workspace)}&path=${encodeURIComponent(this.filePreviewPath)}`);
+                const data = await resp.json();
+                if (data.error) { this.fileEdit.error = data.error; return; }
+                this.fileEdit = {text: data.content, original: data.content, eol: data.eol, version: data.version, saving: false, error: "", conflict: false, notice: ""};
+                this.filePreviewEditing = true;
+                this.$nextTick(() => this.$refs.fileEditor && this.$refs.fileEditor.focus());
+            } catch (e) {
+                this.fileEdit.error = "Couldn't open the file for editing: " + e.message;
+            }
+        },
+        async saveFileEdit(force = false) {
+            if (this.fileEdit.saving || !this.filePreviewEditing) return;
+            this.fileEdit.saving = true; this.fileEdit.error = ""; this.fileEdit.conflict = false; this.fileEdit.notice = "";
+            try {
+                const resp = await fetch("/api/workspace/file", {
+                    method: "PUT", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({workspace: this.workspace, path: this.filePreviewPath, content: this.fileEdit.text, eol: this.fileEdit.eol, base_version: force ? null : this.fileEdit.version}),
+                });
+                const data = await resp.json();
+                if (data.error) { this.fileEdit.error = data.error; this.fileEdit.conflict = !!data.conflict; return; }
+                this.fileEdit.version = data.version;
+                this.fileEdit.original = this.fileEdit.text;
+                this.filePreviewContent = this.fileEdit.text;
+                this.fileEdit.notice = data.unchanged ? "No changes to save." : "Saved. The previous version was backed up.";
+                this.loadFileBrowser(this.fileBrowserPath);
+            } catch (e) {
+                this.fileEdit.error = "Save failed: " + e.message;
+            } finally {
+                this.fileEdit.saving = false;
+            }
+        },
+        cancelFileEdit() {
+            if (this.fileEditDirty() && !confirm("Discard your unsaved changes?")) return;
+            this.filePreviewEditing = false;
+            this.fileEdit.error = ""; this.fileEdit.conflict = false; this.fileEdit.notice = "";
+        },
+        closeFilePreview() {
+            if (this.fileEditDirty() && !confirm("Discard your unsaved changes?")) return;
+            document.querySelectorAll("audio").forEach(el => el.pause());
+            this.filePreviewOpen = false;
+            this.filePreviewEditing = false;
+        },
+        fileIndentUnit(text) {
+            const m = text.match(/^( +|\t)\S/m);
+            if (!m) return "    ";
+            return m[1] === "\t" ? "\t" : " ".repeat(Math.min(m[1].length, 8));
+        },
+        insertIndent(event) {
+            const ta = event.target, unit = this.fileIndentUnit(this.fileEdit.text);
+            const s = ta.selectionStart, e = ta.selectionEnd, value = ta.value;
+            if (event.shiftKey || value.slice(s, e).includes("\n")) {
+                const lineStart = value.lastIndexOf("\n", s - 1) + 1;
+                const changed = value.slice(lineStart, e).split("\n").map(l =>
+                    event.shiftKey ? (l.startsWith(unit) ? l.slice(unit.length) : l.replace(/^ {1,8}|^\t/, "")) : unit + l).join("\n");
+                ta.setRangeText(changed, lineStart, e, "select");
+            } else {
+                ta.setRangeText(unit, s, e, "end");
+            }
+            ta.dispatchEvent(new Event("input"));
         },
         formatFileSize(bytes) {
             if (bytes === null || bytes === undefined) return "";
@@ -2709,10 +2911,18 @@ export function athenaApp() {
             const files = Array.from(event.target.files || []);
             files.forEach(file => {
                 const reader = new FileReader();
-                reader.onload = () => {
-                    this.pendingAttachments.push({name: file.name, content: reader.result});
-                };
-                reader.readAsText(file);
+                if (file.name.toLowerCase().endsWith(".pdf")) {
+                    reader.onload = () => {
+                        const base64 = reader.result.split(",")[1];
+                        this.pendingAttachments.push({name: file.name, base64: base64});
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    reader.onload = () => {
+                        this.pendingAttachments.push({name: file.name, content: reader.result});
+                    };
+                    reader.readAsText(file);
+                }
             });
             event.target.value = "";
         },

@@ -15,8 +15,8 @@
          Inter/JetBrains Mono (Alex Brush dropped -- it was loaded but never
          actually referenced by any CSS rule). -->
     <script src="/static/vendor/qrcode.min.js"></script>
-  <script type="module" crossorigin src="/static/assets/index-CHE3QutL.js"></script>
-  <link rel="stylesheet" crossorigin href="/static/assets/index-DOXL7yFw.css">
+  <script type="module" crossorigin src="/static/assets/index-DrM7SOns.js"></script>
+  <link rel="stylesheet" crossorigin href="/static/assets/index-D5hdbmkn.css">
 </head>
 <body x-data="athenaApp()" x-init="init()" :class="theme === 'dark' ? 'dark' : ''" class="h-dvh w-screen overflow-hidden font-[Inter] antialiased">
 <div class="flex h-full w-full app-canvas text-neutral-900 dark:text-neutral-100 relative overflow-hidden">
@@ -139,7 +139,7 @@
 
             <main class="flex-1 flex flex-col min-h-0 min-w-0">
                 <div class="h-14 md:h-11 shrink-0 flex items-center gap-2 pl-14 md:pl-4 pr-3">
-                    <span class="presence-orb h-2 w-2 shrink-0" :class="sending ? 'is-active' : ''"><span class="presence-ring"></span></span>
+                    <span class="presence-orb h-2 w-2 shrink-0" :class="generating ? 'is-active' : ''"><span class="presence-ring"></span></span>
                     <button @click="paletteOpen = true" title="Switch chats (Cmd/Ctrl+K)" :class="systemStatsOpen ? 'hidden md:flex' : 'flex'" class="icon-btn items-center gap-1.5 min-w-0 max-w-[45vw] md:max-w-xs text-sm font-medium px-2.5 py-1.5 rounded-full hover:bg-neutral-900/[0.04] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-200">
                         <span class="truncate" x-text="(sessions.find(x => x.id === sessionId) || {}).label || 'New chat'"></span>
                         <span class="hidden md:inline text-[10px] text-neutral-400 border border-neutral-200 dark:border-neutral-700 rounded px-1 py-px shrink-0">⌘K</span>
@@ -249,12 +249,30 @@
                                                         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="disclosure-caret text-neutral-400 shrink-0" :class="tc.open ? 'is-open' : ''"><polyline points="9 18 15 12 9 6"/></svg>
                                                     </div>
                                                     <div class="disclosure-rows" :class="tc.open ? 'is-open' : ''">
-                                                        <div class="disclosure-inner px-3 pb-2 text-xs text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
+                                                        <div class="disclosure-inner px-3 pb-2 text-xs max-h-40 overflow-y-auto">
+                                                            <a x-show="tc.output && typeof tc.output.url === 'string' && tc.output.url.startsWith('/api/generated-files/')" :href="tc.output && tc.output.url" download class="inline-flex items-center gap-1.5 font-medium text-[var(--accent)] hover:underline">
+                                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                                                <span x-text="'Download ' + (tc.output && tc.output.filename)"></span>
+                                                            </a>
+                                                            <div x-show="!(tc.output && typeof tc.output.url === 'string' && tc.output.url.startsWith('/api/generated-files/'))" class="text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </template>
                                             </div>
                                             </div>
+                                        </div>
+                                    </template>
+                                    <template x-for="(tc, shotIdx) in (msg.role === 'assistant' && msg.toolCalls ? msg.toolCalls.filter(t => previewShots(t).length) : [])" :key="'shots' + shotIdx">
+                                        <div class="w-full flex flex-wrap items-end gap-4">
+                                            <template x-for="shot in previewShots(tc)" :key="shot.url">
+                                                <a :href="shot.url" target="_blank" rel="noopener" class="block" title="Open the full-page screenshot">
+                                                    <img :src="shot.url" :alt="'Preview of the page (' + shot.name + ')'" loading="lazy"
+                                                         class="h-56 max-w-full object-cover object-top rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white shadow-sm"
+                                                         :class="shot.name === 'mobile' ? 'w-[6.5rem]' : 'w-[22rem]'">
+                                                    <span class="block mt-1 text-[11px] text-neutral-400 dark:text-neutral-500 capitalize" x-text="shot.name + ' preview'"></span>
+                                                </a>
+                                            </template>
                                         </div>
                                     </template>
                                     <div x-show="msg.role === 'user' && msg.hasImage" class="flex items-center gap-1 text-[11px] text-neutral-400 dark:text-neutral-500">
@@ -348,7 +366,7 @@
                             </button>
                             <button @click="modelPopupTarget = 'main'; modelPopupOpen = true" class="icon-btn flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300 transition">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
-                                <span x-text="maxCtx === 0 ? 'ctx: auto' : 'ctx: ' + maxCtx"></span>
+                                <span x-text="effectiveCtx() === 0 ? 'ctx: auto' : 'ctx: ' + effectiveCtx()"></span>
                             </button>
                             <button @click="openWorkspacePopup()" class="icon-btn flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition" :class="workspace ? 'border-[var(--accent-border)] dark:border-[var(--accent-border)] text-[var(--accent-text)] dark:text-[var(--accent-text)]' : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 text-neutral-600 dark:text-neutral-300'">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
@@ -406,7 +424,7 @@
                                         </div>
                                     </div>
                                     <input type="file" x-ref="imageInput" accept="image/*" class="hidden" @change="handleImageSelected($event)">
-                                    <input type="file" x-ref="fileInput" accept=".txt,.md,.py,.js,.ts,.json,.csv,.log,.yaml,.yml,.html,.css,.sh,.c,.cpp,.java,.go,.rs" class="hidden" @change="handleFileSelected($event)">
+                                    <input type="file" x-ref="fileInput" accept=".txt,.md,.py,.js,.ts,.json,.csv,.log,.yaml,.yml,.html,.css,.sh,.c,.cpp,.java,.go,.rs,.pdf" class="hidden" @change="handleFileSelected($event)">
                                 </div>
                                 <button @click="toggleRecording()" class="icon-btn p-2.5 rounded-xl relative" :class="isRecording ? 'text-red-500 bg-red-50 dark:bg-red-500/10' : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800'">
                                     <span x-show="isRecording" class="absolute inset-0"><span class="presence-orb is-active h-full w-full" style="background:none;"><span class="presence-ring" style="border-color: color-mix(in srgb, #ef4444 70%, transparent);"></span></span></span>
@@ -429,9 +447,9 @@
                                     </div>
                                 </div>
                                 <textarea x-ref="textareaEl" x-model="inputText" rows="1" @keydown.enter="handleComposerEnter($event)" @input="autoGrow($event)" placeholder="Message Athena..." class="flex-1 bg-transparent resize-none outline-none text-[15px] py-2 max-h-48 placeholder:text-neutral-400 dark:placeholder:text-neutral-500"></textarea>
-                                <button @click="athenaMotion.pressSquash($el); sending ? stopGeneration() : send()" class="icon-btn relative p-2.5 rounded-xl bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] overflow-hidden" :class="sending ? 'rounded-full' : ''">
-                                    <svg x-show="!sending" x-transition:enter="transition duration-150 [transition-timing-function:var(--ease-snap)]" x-transition:enter-start="opacity-0 scale-50 rotate-45" x-transition:enter-end="opacity-100 scale-100 rotate-0" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                                    <svg x-show="sending" x-transition:enter="transition duration-150 [transition-timing-function:var(--ease-snap)]" x-transition:enter-start="opacity-0 scale-50" x-transition:enter-end="opacity-100 scale-100" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>
+                                <button @click="athenaMotion.pressSquash($el); generating ? stopGeneration() : send()" class="icon-btn relative p-2.5 rounded-xl bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] overflow-hidden" :class="generating ? 'rounded-full' : ''">
+                                    <svg x-show="!generating" x-transition:enter="transition duration-150 [transition-timing-function:var(--ease-snap)]" x-transition:enter-start="opacity-0 scale-50 rotate-45" x-transition:enter-end="opacity-100 scale-100 rotate-0" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                                    <svg x-show="generating" x-transition:enter="transition duration-150 [transition-timing-function:var(--ease-snap)]" x-transition:enter-start="opacity-0 scale-50" x-transition:enter-end="opacity-100 scale-100" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>
                                 </button>
                             </div>
                         </div>
@@ -886,7 +904,13 @@
                                                         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="disclosure-caret text-neutral-400 shrink-0" :class="tc.open ? 'is-open' : ''"><polyline points="9 18 15 12 9 6"/></svg>
                                                     </div>
                                                     <div class="disclosure-rows" :class="tc.open ? 'is-open' : ''">
-                                                        <div class="disclosure-inner px-3 pb-2 text-xs text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
+                                                        <div class="disclosure-inner px-3 pb-2 text-xs max-h-40 overflow-y-auto">
+                                                            <a x-show="tc.output && typeof tc.output.url === 'string' && tc.output.url.startsWith('/api/generated-files/')" :href="tc.output && tc.output.url" download class="inline-flex items-center gap-1.5 font-medium text-[var(--accent)] hover:underline">
+                                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                                                <span x-text="'Download ' + (tc.output && tc.output.filename)"></span>
+                                                            </a>
+                                                            <div x-show="!(tc.output && typeof tc.output.url === 'string' && tc.output.url.startsWith('/api/generated-files/'))" class="text-neutral-400 dark:text-neutral-500 font-mono whitespace-pre-wrap" x-text="tc.output ? JSON.stringify(tc.output, null, 2) : '(no output yet)'"></div>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </template>
@@ -985,6 +1009,17 @@
                 <div>
                     <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">Description / role (used as its system prompt)</label>
                     <textarea x-model="botDraft.description" rows="3" class="w-full text-sm text-neutral-800 dark:text-neutral-100 bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-[var(--accent-border-focus)] dark:focus:border-[var(--accent-border-focus)] resize-none" placeholder="What this bot is good for and how it should behave."></textarea>
+                </div>
+                <div>
+                    <label class="text-xs text-neutral-500 dark:text-neutral-400 mb-1 block">What it can look at <span class="text-neutral-400">(read-only: bots never change anything)</span></label>
+                    <div class="grid grid-cols-2 gap-x-3 gap-y-1">
+                        <template x-for="tool in botToolChoices" :key="tool.id">
+                            <label class="flex items-center gap-1.5 text-xs text-neutral-700 dark:text-neutral-200 cursor-pointer" :title="tool.hint">
+                                <input type="checkbox" :checked="botDraft.allowedTools.includes(tool.id)" @change="toggleBotTool(tool.id)" class="accent-[var(--accent)]">
+                                <span x-text="tool.label"></span>
+                            </label>
+                        </template>
+                    </div>
                 </div>
             </div>
             <div class="flex gap-2 mt-4">
@@ -1280,10 +1315,43 @@
                                         </div>
                                         <div class="space-y-0.5 max-h-64 overflow-y-auto" x-show="ep.detectedModels && ep.detectedModels.length">
                                             <template x-for="m in filteredEndpointModels(ep)" :key="m">
-                                                <label class="flex items-center gap-2.5 text-sm py-1.5 px-2 -mx-2 rounded-lg cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700/50 transition">
-                                                    <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] dark:checked:bg-[var(--accent)] dark:checked:border-[var(--accent)] cursor-pointer shrink-0">
-                                                    <span class="font-mono text-xs truncate" x-text="modelAliases[m] || m"></span>
-                                                </label>
+                                                <div>
+                                                    <div class="flex items-center gap-1">
+                                                        <label class="flex-1 min-w-0 flex items-center gap-2.5 text-sm py-1.5 px-2 -mx-2 rounded-lg cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-700/50 transition">
+                                                            <input type="checkbox" :checked="ep.enabledModels.includes(m)" @change="toggleModelEnabled(ep.id, m)" class="appearance-none w-4 h-4 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 checked:bg-[var(--accent)] checked:border-[var(--accent)] dark:checked:bg-[var(--accent)] dark:checked:border-[var(--accent)] cursor-pointer shrink-0">
+                                                            <span class="font-mono text-xs truncate" x-text="modelAliases[m] || m"></span>
+                                                        </label>
+                                                        <span x-show="modelProfileOverrides[m] && modelProfileOverrides[m].tier" class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-500 dark:text-neutral-400 shrink-0" x-text="modelProfileOverrides[m] && modelProfileOverrides[m].tier"></span>
+                                                        <button @click="toggleModelProfile(ep, m)" class="icon-btn text-xs px-2 py-1 rounded-lg text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 shrink-0" :aria-expanded="openProfileKey === profileKey(ep, m)" x-text="openProfileKey === profileKey(ep, m) ? 'Hide profile' : 'Profile'"></button>
+                                                    </div>
+                                                    <div x-show="openProfileKey === profileKey(ep, m)" x-cloak class="ml-5 mb-2 mt-1 p-3 rounded-lg bg-neutral-100 dark:bg-neutral-800 text-xs space-y-2.5">
+                                                        <div x-show="(modelProfileData[profileKey(ep, m)] || {}).loading" class="text-neutral-400 dark:text-neutral-500">Checking what the endpoint reports...</div>
+                                                        <div x-show="(modelProfileData[profileKey(ep, m)] || {}).error" class="text-red-500" x-text="(modelProfileData[profileKey(ep, m)] || {}).error"></div>
+                                                        <template x-if="modelProfileData[profileKey(ep, m)] && modelProfileData[profileKey(ep, m)].tier">
+                                                            <div class="space-y-2.5">
+                                                                <div class="text-neutral-500 dark:text-neutral-400" x-text="modelProfileData[profileKey(ep, m)].summary || 'The endpoint reported nothing about this model.'"></div>
+                                                                <div class="flex items-center justify-between gap-3">
+                                                                    <span>Harness tier <span class="text-neutral-400 dark:text-neutral-500" x-text="'(running as ' + modelProfileData[profileKey(ep, m)].tier + (modelProfileData[profileKey(ep, m)].tier_source === 'auto' ? ', detected)' : ', set by you)')"></span></span>
+                                                                    <select @change="setModelProfileField(ep, m, 'tier', $event.target.value)" class="text-xs bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded-lg px-2 py-1">
+                                                                        <option value="" :selected="!(modelProfileOverrides[m] || {}).tier">Auto</option>
+                                                                        <option value="small" :selected="(modelProfileOverrides[m] || {}).tier === 'small'">Small</option>
+                                                                        <option value="standard" :selected="(modelProfileOverrides[m] || {}).tier === 'standard'">Standard</option>
+                                                                        <option value="large" :selected="(modelProfileOverrides[m] || {}).tier === 'large'">Large</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div class="flex items-center justify-between gap-3">
+                                                                    <span>Can see images <span class="text-neutral-400 dark:text-neutral-500" x-text="'(currently ' + (modelProfileData[profileKey(ep, m)].vision ? 'yes' : 'no') + ')'"></span></span>
+                                                                    <select @change="setModelProfileField(ep, m, 'vision', $event.target.value)" class="text-xs bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 rounded-lg px-2 py-1">
+                                                                        <option value="auto" :selected="profileVisionChoice(m) === 'auto'">Auto</option>
+                                                                        <option value="yes" :selected="profileVisionChoice(m) === 'yes'">Yes</option>
+                                                                        <option value="no" :selected="profileVisionChoice(m) === 'no'">No</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div class="text-neutral-400 dark:text-neutral-500">Smaller tiers get earlier plan check-ins; larger ones get more room. Models that can see images are shown screenshots of what they build.</div>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </div>
                                             </template>
                                             <div x-show="ep.modelFilter && filteredEndpointModels(ep).length === 0" class="text-xs text-neutral-400 dark:text-neutral-500 py-1">No models match "<span x-text="ep.modelFilter"></span>".</div>
                                         </div>
@@ -1446,6 +1514,15 @@
                         <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1.5" x-show="!searchUrl">Web search tools are unavailable until this is set.</div>
                     </div>
                     <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                        <span class="text-sm shrink-0">Workspace mode</span>
+                        <select x-model="workspaceMode" @change="saveWorkspaceMode()" class="text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
+                            <option value="auto">Auto</option>
+                            <option value="build">Build</option>
+                            <option value="maintain">Maintain</option>
+                        </select>
+                    </div>
+                    <div class="text-xs text-neutral-400 dark:text-neutral-500">Build gives the model a lean toolset for making something new (starters, a page preview, no search-first rule). Maintain is for working in an existing codebase. Auto picks Build for small workspaces (40 files or fewer) and Maintain for larger ones.</div>
+                    <div class="flex items-center justify-between gap-2 py-2 mt-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
                         <span class="text-sm shrink-0">Delegation concurrency</span>
                         <input type="number" min="1" max="16" step="1" x-model.number="delegationConcurrency" @change="saveDelegationConcurrency()" class="w-20 text-sm bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5 text-right">
                     </div>
@@ -1553,12 +1630,18 @@
         </template>
         <template x-if="modelPopupTarget !== 'athena'">
             <div class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800">
-                <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-2">Context window (0 = dynamic, auto-sized per message)</label>
+                <label class="text-xs text-neutral-500 dark:text-neutral-400 block mb-2">Context window (0 = auto, sized per message up to about 65k)</label>
                 <div class="flex items-center gap-2">
-                    <input type="range" min="0" max="131072" step="1024" x-model.number="maxCtx" class="flex-1 accent-[var(--accent)]">
-                    <input type="text" x-model="maxCtxText" @input="syncCtxFromText()" class="w-20 text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
+                    <input type="range" min="0" :max="ctxSliderMax()" step="1024" :value="effectiveCtx()" @input="setMaxCtx($event.target.value)" aria-label="Context window" class="flex-1 accent-[var(--accent)]">
+                    <input type="text" inputmode="numeric" x-model="maxCtxText" @change="syncCtxFromText()" @keydown.enter="syncCtxFromText()" aria-label="Context window tokens" class="w-20 text-xs bg-neutral-100 dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-1.5">
                 </div>
-                <div class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-2">Slider caps at 131072 — type a larger number if needed.</div>
+                <div class="flex items-center justify-between text-[11px] text-neutral-400 dark:text-neutral-500 mt-2">
+                    <span x-text="modelCtxCap ? 'This model supports up to ' + modelCtxCap.toLocaleString() + ' tokens.' : 'This model\'s limit is unknown; type any size.'"></span>
+                    <span class="flex gap-3">
+                        <button type="button" @click="setMaxCtx(0)" class="hover:text-[var(--accent-text)]">Auto</button>
+                        <button type="button" x-show="modelCtxCap" @click="setMaxCtx(modelCtxCap)" class="hover:text-[var(--accent-text)]">Max</button>
+                    </span>
+                </div>
             </div>
         </template>
     </div>
@@ -1700,24 +1783,47 @@
     </div>
 </div>
 
-    <!-- FILE PREVIEW MODAL -->
-    <div x-show="filePreviewOpen" x-cloak @click.self="filePreviewOpen = false"
+    <!-- FILE PREVIEW / EDIT MODAL -->
+    <div x-show="filePreviewOpen" x-cloak @click.self="closeFilePreview()"
          x-transition:enter="transition duration-150 [transition-timing-function:var(--ease-snap)]" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
          x-transition:leave="transition duration-100" x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0"
          class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal w-[36rem] max-w-[90vw] max-h-[80vh] flex flex-col p-4"
+        <div class="bg-white dark:bg-neutral-800 rounded-2xl surface-modal max-w-[92vw] max-h-[85vh] flex flex-col p-4 transition-[width] duration-200"
+             :class="filePreviewEditing ? 'w-[60rem]' : 'w-[36rem]'"
              x-transition:enter="transition duration-150 [transition-timing-function:var(--ease-snap)]" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100"
              x-transition:leave="transition duration-100" x-transition:leave-start="opacity-100 scale-100" x-transition:leave-end="opacity-0 scale-95">
             <div class="flex items-center justify-between mb-2 gap-2">
-                <span class="text-xs font-mono truncate text-neutral-600 dark:text-neutral-300" x-text="filePreviewPath"></span>
-                <button @click="filePreviewOpen = false" class="p-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-400 shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                </button>
+                <div class="flex items-center gap-2 min-w-0">
+                    <span class="text-xs font-mono truncate text-neutral-600 dark:text-neutral-300" x-text="filePreviewPath"></span>
+                    <span x-show="fileEditDirty()" class="text-[11px] text-amber-500 shrink-0">Unsaved changes</span>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                    <a x-show="!filePreviewEditing" :href="fileDownloadUrl(false)" :download="(filePreviewPath || '').split('/').pop()" class="icon-btn text-xs px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-700">Download</a>
+                    <button x-show="!filePreviewEditing && !filePreviewBinary" @click="startFileEdit()" class="icon-btn text-xs px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-700">Edit</button>
+                    <button x-show="filePreviewEditing" @click="saveFileEdit()" :disabled="fileEdit.saving || !fileEditDirty()" class="icon-btn text-xs px-3 py-1 rounded-lg bg-[var(--accent)] text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed" x-text="fileEdit.saving ? 'Saving...' : 'Save'"></button>
+                    <button x-show="filePreviewEditing" @click="cancelFileEdit()" class="icon-btn text-xs px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-700">Cancel</button>
+                    <button @click="closeFilePreview()" class="p-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-400" aria-label="Close">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
             </div>
-            <div class="file-preview-pre-wrap relative flex-1 min-h-0 overflow-auto rounded-lg">
-                <pre class="text-xs bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 p-3 whitespace-pre-wrap" x-text="filePreviewContent"></pre>
-                <button @click="copyMessage(filePreviewContent, $event)" class="copy-btn">Copy</button>
+            <div x-show="fileEdit.error" x-cloak class="text-xs text-red-500 mb-2">
+                <span x-text="fileEdit.error"></span>
+                <span x-show="fileEdit.conflict" class="ml-2 inline-flex gap-3">
+                    <button @click="startFileEdit()" class="underline">Reload from disk</button>
+                    <button @click="saveFileEdit(true)" class="underline">Overwrite anyway</button>
+                </span>
             </div>
+            <div x-show="!filePreviewEditing" class="file-preview-pre-wrap relative flex-1 min-h-0 overflow-auto rounded-lg">
+                <audio x-show="filePreviewIsAudio()" controls preload="metadata" :src="filePreviewIsAudio() ? fileDownloadUrl(true) : ''" class="w-full mb-2"></audio>
+                <img x-show="filePreviewIsImage()" :src="filePreviewIsImage() ? fileDownloadUrl(true) : ''" alt="" class="max-w-full max-h-[50vh] mx-auto mb-2 rounded border border-neutral-200 dark:border-neutral-700 bg-[repeating-conic-gradient(#e5e5e5_0%_25%,#fff_0%_50%)] bg-[length:16px_16px]">
+                <pre x-show="!filePreviewIsAudio()" class="text-xs bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 p-3 whitespace-pre-wrap" x-text="filePreviewContent"></pre>
+                <button x-show="!filePreviewIsAudio()" @click="copyMessage(filePreviewContent, $event)" class="copy-btn">Copy</button>
+            </div>
+            <textarea x-show="filePreviewEditing" x-cloak x-ref="fileEditor" x-model="fileEdit.text" spellcheck="false" wrap="off" aria-label="File contents"
+                      @keydown.tab.prevent="insertIndent($event)" @keydown.ctrl.s.prevent="saveFileEdit()" @keydown.meta.s.prevent="saveFileEdit()"
+                      class="flex-1 min-h-[55vh] w-full resize-none font-mono text-xs leading-relaxed whitespace-pre overflow-auto bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-100 p-3 rounded-lg border border-neutral-200 dark:border-neutral-700 outline-none focus:border-[var(--accent-border-focus)]"></textarea>
+            <div x-show="fileEdit.notice" x-cloak class="text-xs text-green-600 dark:text-green-500 mt-2" x-text="fileEdit.notice"></div>
         </div>
     </div>
     <!-- DELETE CHAT CONFIRM MODAL -->
@@ -1927,7 +2033,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
                         Context size
                     </span>
-                    <span class="text-xs text-neutral-400 dark:text-neutral-500" x-text="maxCtx === 0 ? 'auto' : maxCtx"></span>
+                    <span class="text-xs text-neutral-400 dark:text-neutral-500" x-text="effectiveCtx() === 0 ? 'auto' : effectiveCtx()"></span>
                 </button>
                 <button @click="mobileSettingsSheetOpen = false; openWorkspacePopup()" class="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left">
                     <span class="flex items-center gap-2 text-sm font-medium text-neutral-700 dark:text-neutral-200">
