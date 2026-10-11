@@ -1,7 +1,15 @@
+import hashlib
 import os
+import shutil
+import tempfile
+import threading
 
 from fastapi import APIRouter
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
+import backup_tools
+import binary_files
 import rag
 from logging_setup import logger
 
@@ -45,7 +53,8 @@ FILE_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to workspace root."},
-                    "content": {"type": "string", "description": "Full file content to write."},
+                    "content": {"type": "string", "description": "File content to write."},
+                    "append": {"type": "boolean", "description": "Add to the end of the file instead of replacing it. Use this to write a large file in several calls."},
                 },
                 "required": ["path", "content"],
             },
@@ -126,14 +135,22 @@ def read_file(workspace: str, rel_path: str, offset: int = 0):
         target = resolve_workspace_path(workspace, rel_path)
         if not os.path.isfile(target):
             return {"error": f"Not a file: {rel_path}"}
-        with open(target, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        kind = None
+        described = binary_files.describe(target)
+        if described:
+            kind, content = described
+        else:
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
         offset = max(0, offset or 0)
         total_chars = len(content)
         chunk = content[offset:offset + _READ_FILE_CHUNK_SIZE]
         next_offset = offset + len(chunk)
         has_more = next_offset < total_chars
         result = {"path": rel_path, "content": chunk, "total_chars": total_chars, "has_more": has_more}
+        if kind:
+            result["binary"] = True
+            result["kind"] = kind
         if has_more:
             result["next_offset"] = next_offset
         return result
@@ -143,17 +160,39 @@ def read_file(workspace: str, rel_path: str, offset: int = 0):
         return {"error": f"read_file failed: {e}"}
 
 
-def write_file(workspace: str, rel_path: str, file_content: str):
+def write_file(workspace: str, rel_path: str, file_content: str, append: bool = False):
     try:
         target = resolve_workspace_path(workspace, rel_path)
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
+        with open(target, "a" if append else "w", encoding="utf-8") as f:
             f.write(file_content)
-        return {"path": rel_path, "written": True, "bytes": len(file_content)}
+        result = {"path": rel_path, "written": True, "bytes": len(file_content)}
+        if append:
+            result["appended"] = True
+            result["file_bytes"] = os.path.getsize(target)
+        return result
     except ValueError as e:
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"write_file failed: {e}"}
+
+
+def _old_text_not_found(content, old_text):
+    """Point at the nearest real text, so the model fixes its old_text instead of re-reading the file."""
+    import difflib
+    file_lines, want = content.split("\n"), old_text.strip("\n").split("\n")
+    n = max(1, min(len(want), 40))
+    first = next((w.strip() for w in want if w.strip()), "")
+    starts = sorted(range(max(1, len(file_lines) - n + 1)),
+                    key=lambda i: -difflib.SequenceMatcher(None, first, file_lines[i].strip()).quick_ratio())[:8]
+    best = max(((difflib.SequenceMatcher(None, old_text.strip(), "\n".join(file_lines[i:i + n]).strip()).ratio(), i) for i in starts), default=(0, 0))
+    ratio, i = best
+    error = "old_text not found in file"
+    if ratio < 0.5:
+        return {"error": error}
+    text = "\n".join(file_lines[i:i + n])
+    return {"error": f"{error}. The closest text is at lines {i + 1}-{i + n} ({ratio:.0%} similar); copy old_text from it exactly.",
+            "closest_match": {"lines": f"{i + 1}-{i + n}", "text": text[:1500]}}
 
 
 def edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
@@ -165,7 +204,7 @@ def edit_file(workspace: str, rel_path: str, old_text: str, new_text: str):
             content = f.read()
         count = content.count(old_text)
         if count == 0:
-            return {"error": "old_text not found in file"}
+            return _old_text_not_found(content, old_text)
         if count > 1:
             return {"error": f"old_text appears {count} times -- must be unique, add more context"}
         content = content.replace(old_text, new_text)
@@ -271,6 +310,106 @@ def replace_lines(workspace: str, rel_path: str, start_line, end_line, new_conte
         return {"error": f"replace_lines failed: {e}"}
 
 
+_EDIT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _version(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_for_edit(workspace: str, rel_path: str):
+    """The WHOLE file for the editor, unlike read_file's capped, lossy chunk (which would
+    truncate a big file or mangle non-UTF-8 bytes if saved back). Anything that can't be edited
+    safely as text says so instead. Line endings are normalized to \\n for the editor and
+    remembered, so save_edit can put them back exactly as they were."""
+    try:
+        target = resolve_workspace_path(workspace, rel_path)
+    except ValueError as e:
+        return {"error": str(e)}
+    if not os.path.isfile(target):
+        return {"error": f"Not a file: {rel_path}"}
+    size = os.path.getsize(target)
+    if size > _EDIT_MAX_BYTES:
+        return {"error": f"{rel_path} is {size // 1024} KB; files over {_EDIT_MAX_BYTES // 1024} KB can't be edited here.", "uneditable": True}
+    with open(target, "rb") as f:
+        data = f.read()
+    try:
+        if b"\x00" in data:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "binary")
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"error": f"{rel_path} isn't plain UTF-8 text, so it can't be edited here.", "uneditable": True}
+    eol = "crlf" if "\r\n" in text else "lf"
+    return {"path": rel_path, "content": text.replace("\r\n", "\n"), "eol": eol, "version": _version(data), "bytes": len(data)}
+
+
+def save_edit(workspace: str, rel_path: str, content: str, eol: str = "lf", base_version=None):
+    """Overwrite an existing file with the editor's text. Refuses if the file changed on disk since
+    it was opened (base_version) -- the model may be editing it too -- unless base_version is None
+    (the caller chose to overwrite). The version being replaced is snapshotted first so a manual
+    edit can always be undone, and the write is atomic so a crash can't leave half a file."""
+    try:
+        target = resolve_workspace_path(workspace, rel_path)
+    except ValueError as e:
+        return {"error": str(e)}
+    if not os.path.isfile(target):
+        return {"error": f"Not a file: {rel_path}"}
+    with open(target, "rb") as f:
+        current = f.read()
+    if base_version is not None and base_version != _version(current):
+        return {"error": f"{rel_path} changed on disk since you opened it.", "conflict": True}
+    text = content.replace("\r\n", "\n")
+    if eol == "crlf":
+        text = text.replace("\n", "\r\n")
+    data = text.encode("utf-8")
+    if len(data) > _EDIT_MAX_BYTES:
+        return {"error": f"That's over the {_EDIT_MAX_BYTES // 1024} KB editing limit."}
+    if data == current:
+        return {"path": rel_path, "saved": True, "unchanged": True, "version": _version(data), "bytes": len(data)}
+    backup_tools.backup_file(target)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".athena-edit-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return {"error": f"Couldn't save {rel_path}: {e}"}
+
+    def reindex():
+        try:
+            rag.index_codebase(workspace)
+        except Exception as e:
+            logger.warning(f"re-index after manual edit of {rel_path} failed: {e}")
+
+    threading.Thread(target=reindex, daemon=True).start()
+    return {"path": rel_path, "saved": True, "version": _version(data), "bytes": len(data)}
+
+
+class WorkspaceFileIn(BaseModel):
+    workspace: str
+    path: str
+    content: str
+    eol: str = "lf"
+    base_version: str | None = None
+
+
+@router.get("/api/workspace/file")
+def get_workspace_file(workspace: str, path: str = ""):
+    if not workspace:
+        return {"error": "No workspace set."}
+    return read_for_edit(workspace, path)
+
+
+@router.put("/api/workspace/file")
+def put_workspace_file(req: WorkspaceFileIn):
+    if not req.workspace:
+        return {"error": "No workspace set."}
+    return save_edit(req.workspace, req.path, req.content, req.eol, req.base_version)
+
+
 @router.get("/api/workspace/files")
 def list_workspace_files(workspace: str, path: str = ""):
     """List files and directories (with sizes) at a path relative to the
@@ -308,6 +447,28 @@ def read_workspace_file(workspace: str, path: str = "", offset: int = 0):
     if not workspace:
         return {"error": "No workspace set."}
     return read_file(workspace, path, offset)
+
+
+_INLINE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".wav", ".mp3", ".ogg", ".oga", ".m4a", ".flac", ".opus"}
+
+
+@router.get("/api/workspace/download")
+def download_workspace_file(workspace: str, path: str = "", inline: bool = False):
+    """Hand a workspace file to the browser as-is: how a generated .docx, .xlsx, .zip or image
+    gets from the workspace to the user. Confined by resolve_workspace_path like every file tool."""
+    if not workspace or not path:
+        return JSONResponse({"error": "A workspace and a file path are required."}, status_code=400)
+    try:
+        target = resolve_workspace_path(workspace, path)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if not os.path.isfile(target):
+        return JSONResponse({"error": f"Not a file: {path}"}, status_code=404)
+    # Only raster images and audio may display in the page. Anything that can carry script (html, svg)
+    # is always a download, so a file a model wrote can never run on Athena's own origin.
+    shown = os.path.splitext(target)[1].lower() in _INLINE_EXTENSIONS
+    kind = "inline" if inline and shown else "attachment"
+    return FileResponse(target, filename=os.path.basename(target), content_disposition_type=kind)
 
 
 @router.delete("/api/workspace/delete")

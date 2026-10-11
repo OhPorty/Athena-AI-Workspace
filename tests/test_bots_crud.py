@@ -45,7 +45,10 @@ def test_multiple_bots_ordered_by_creation():
     assert [b["id"] for b in listed] == [first["id"], second["id"]]
 
 
-def test_bot_with_no_allowed_tools_round_trips_empty_list():
+def test_a_bot_saved_with_no_tools_gets_the_standard_investigation_set():
+    """The Bots page used to save every bot with an empty list, leaving bots that could not read a file."""
     created = bots.create_bot(make_bot_in(allowed_tools=[]))
     bot = next(b for b in bots.list_bots() if b["id"] == created["id"])
-    assert bot["allowed_tools"] == []
+    assert bot["allowed_tools"] == bots.DEFAULT_BOT_TOOLS
+    bots.update_bot(created["id"], make_bot_in(allowed_tools=[]))
+    assert next(b for b in bots.list_bots() if b["id"] == created["id"])["allowed_tools"] == bots.DEFAULT_BOT_TOOLS

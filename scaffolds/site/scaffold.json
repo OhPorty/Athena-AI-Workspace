@@ -1,0 +1,211 @@
+{
+  "description": "full landing-page layout (header with mobile menu, hero, services, gallery, about, contact, footer); only if you need that structure",
+  "entry": "index.html",
+  "notes": "The layout and behavior are the starter; the design and content are yours. The look comes from the token block at the top of styles.css (colors, corner radius, fonts, borders) and two attributes on <body> (data-hero: blobs|grid|stripes|none, data-cards: grid|list). It starts neutral on purpose: set those tokens, the fonts and the shapes to suit what you are building, and restyle anything else the subject calls for. Replace ALL the placeholder copy in index.html with real writing for this subject, swap the gradient .tile blocks for real <img> tags with alt text, and add, remove or reorder sections freely (copy a <section class=\"section\"> block).",
+  "theme_files": {
+    "css": "styles.css"
+  },
+  "base_css": {
+    "--step--1": "clamp(0.84rem, 0.82rem + 0.1vw, 0.9rem)",
+    "--step-0": "clamp(1rem, 0.96rem + 0.2vw, 1.1rem)",
+    "--step-1": "clamp(1.25rem, 1.15rem + 0.5vw, 1.5rem)",
+    "--step-2": "clamp(1.6rem, 1.4rem + 1vw, 2.2rem)",
+    "--step-3": "clamp(2.2rem, 1.7rem + 2.4vw, 3.8rem)",
+    "--space": "clamp(3.5rem, 2.5rem + 5vw, 7rem)",
+    "--font": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "--border": "1px",
+    "--pill": "999px",
+    "--card-shadow": "none",
+    "--shadow": "0 1px 2px rgb(28 27 25 / 6%), 0 8px 24px rgb(28 27 25 / 8%)"
+  },
+  "themes": {
+    "ember": {
+      "description": "warm terracotta on cream, rounded corners, friendly and approachable (food, craft, studios)",
+      "css": {
+        "--bg": "#fbfaf8",
+        "--surface": "#ffffff",
+        "--tint": "#f3efe9",
+        "--ink": "#1c1b19",
+        "--muted": "#5c5851",
+        "--line": "#e4ded5",
+        "--accent": "#b93a0b",
+        "--accent-ink": "#ffffff",
+        "--dark": "#17130f",
+        "--dark-ink": "#f5efe7",
+        "--dark-muted": "#c9bfb2",
+        "--field-bg": "#231e19",
+        "--field-line": "#5a5148",
+        "--radius": "14px",
+        "--tile-1": "#f6b38e",
+        "--tile-2": "#b93a0b",
+        "--tile-3": "#2b2620",
+        "--tile-4": "#8c7b66"
+      },
+      "extra_css": "@media (prefers-color-scheme: dark) {\n  :root { --bg: #14110e; --surface: #1d1914; --tint: #1a1612; --ink: #f4eee6; --muted: #bdb3a6; --line: #34302a; --accent: #ff8a5c; --accent-ink: #1c0f08; --dark: #0e0c0a; }\n}",
+      "text": {
+        "HERO": "blobs",
+        "CARDS": "grid"
+      },
+      "summary": "warm terracotta, rounded"
+    },
+    "editorial": {
+      "description": "serif headlines on warm paper, forest green, sharp corners, ruled list layout, no illustration (writers, consultants, studios that want to feel established)",
+      "css": {
+        "--bg": "#f7f3ea",
+        "--surface": "#fffdf8",
+        "--tint": "#efe8d8",
+        "--ink": "#1d2a24",
+        "--muted": "#4f5b54",
+        "--line": "#d8cfbb",
+        "--accent": "#1f5c45",
+        "--accent-ink": "#ffffff",
+        "--dark": "#14231c",
+        "--dark-ink": "#f3efe3",
+        "--dark-muted": "#c4cdbf",
+        "--field-bg": "#1f3328",
+        "--field-line": "#6f8f7c",
+        "--radius": "3px",
+        "--pill": "4px",
+        "--shadow": "0 1px 0 rgb(0 0 0 / 10%)",
+        "--font-display": "\"Iowan Old Style\", \"Palatino Linotype\", Palatino, Charter, Georgia, \"Times New Roman\", serif",
+        "--on-dark-btn-bg": "#f3efe3",
+        "--on-dark-btn-ink": "#14231c",
+        "--tile-1": "#c9d8c5",
+        "--tile-2": "#1f5c45",
+        "--tile-3": "#e8d9b0",
+        "--tile-4": "#14231c"
+      },
+      "text": {
+        "HERO": "none",
+        "CARDS": "list"
+      },
+      "summary": "serif on paper, forest green, ruled"
+    },
+    "midnight": {
+      "description": "dark interface with electric cyan accent, tight corners, grid-paper hero (software, gaming, tech, nightlife)",
+      "css": {
+        "--bg": "#0e1218",
+        "--surface": "#151b24",
+        "--tint": "#121821",
+        "--ink": "#eaf0f8",
+        "--muted": "#a4b0c2",
+        "--line": "#2a3340",
+        "--accent": "#5cc8ff",
+        "--accent-ink": "#04141f",
+        "--dark": "#070a0e",
+        "--dark-ink": "#eaf0f8",
+        "--dark-muted": "#a4b0c2",
+        "--field-bg": "#0e1218",
+        "--field-line": "#4a586c",
+        "--radius": "10px",
+        "--pill": "10px",
+        "--shadow": "0 8px 30px rgb(0 0 0 / 45%)",
+        "--tile-1": "#1d4e89",
+        "--tile-2": "#5cc8ff",
+        "--tile-3": "#101827",
+        "--tile-4": "#36506e"
+      },
+      "text": {
+        "HERO": "grid",
+        "CARDS": "grid"
+      },
+      "summary": "dark, electric cyan, grid"
+    },
+    "fresh": {
+      "description": "mint and teal on white, very round and soft, diagonal-stripe hero (wellness, kids, local services, anything friendly)",
+      "css": {
+        "--bg": "#f4fbf9",
+        "--surface": "#ffffff",
+        "--tint": "#e3f4f0",
+        "--ink": "#0f2a2a",
+        "--muted": "#3f5c5a",
+        "--line": "#cfe5e0",
+        "--accent": "#0f766e",
+        "--accent-ink": "#ffffff",
+        "--dark": "#0b2f2d",
+        "--dark-ink": "#e8fbf7",
+        "--dark-muted": "#a9d6cf",
+        "--field-bg": "#134240",
+        "--field-line": "#5b9a93",
+        "--radius": "22px",
+        "--shadow": "0 10px 30px rgb(15 118 110 / 14%)",
+        "--font": "ui-rounded, \"SF Pro Rounded\", \"Nunito\", system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+        "--on-dark-btn-bg": "#5eead4",
+        "--on-dark-btn-ink": "#042f2e",
+        "--tile-1": "#99f6e4",
+        "--tile-2": "#0f766e",
+        "--tile-3": "#134e4a",
+        "--tile-4": "#5eead4"
+      },
+      "text": {
+        "HERO": "stripes",
+        "CARDS": "grid"
+      },
+      "summary": "mint and teal, very round"
+    },
+    "bold": {
+      "description": "loud yellow and black, thick borders, hard shadows, square corners (events, music, streetwear, anything that should shout)",
+      "css": {
+        "--bg": "#ffd60a",
+        "--surface": "#ffffff",
+        "--tint": "#fff1a8",
+        "--ink": "#111111",
+        "--muted": "#3d3a1f",
+        "--line": "#111111",
+        "--accent": "#111111",
+        "--accent-ink": "#ffd60a",
+        "--dark": "#111111",
+        "--dark-ink": "#fff6c2",
+        "--dark-muted": "#e6dc9a",
+        "--field-bg": "#1d1d1d",
+        "--field-line": "#8a8447",
+        "--radius": "0px",
+        "--pill": "0px",
+        "--border": "3px",
+        "--card-shadow": "6px 6px 0 #111111",
+        "--shadow": "4px 4px 0 #111111",
+        "--font-display": "\"Arial Black\", \"Helvetica Neue\", Arial, sans-serif",
+        "--on-dark-btn-bg": "#ffd60a",
+        "--on-dark-btn-ink": "#111111",
+        "--tile-1": "#ff4d6d",
+        "--tile-2": "#111111",
+        "--tile-3": "#2563eb",
+        "--tile-4": "#ffffff"
+      },
+      "text": {
+        "HERO": "grid",
+        "CARDS": "grid"
+      },
+      "summary": "yellow and black, hard edges"
+    },
+    "plain": {
+      "description": "neutral white and grey with one blue accent - a blank canvas to restyle",
+      "css": {
+        "--bg": "#ffffff",
+        "--surface": "#ffffff",
+        "--tint": "#f4f4f5",
+        "--ink": "#18181b",
+        "--muted": "#52525b",
+        "--line": "#d4d4d8",
+        "--accent": "#2563eb",
+        "--accent-ink": "#ffffff",
+        "--dark": "#18181b",
+        "--dark-ink": "#fafafa",
+        "--dark-muted": "#d4d4d8",
+        "--field-bg": "#27272a",
+        "--field-line": "#71717a",
+        "--radius": "8px",
+        "--tile-1": "#e4e4e7",
+        "--tile-2": "#2563eb",
+        "--tile-3": "#52525b",
+        "--tile-4": "#18181b"
+      },
+      "text": {
+        "HERO": "blobs",
+        "CARDS": "grid"
+      },
+      "summary": "neutral grey and blue"
+    }
+  },
+  "default_theme": "plain"
+}

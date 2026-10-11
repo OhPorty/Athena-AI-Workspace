@@ -1,0 +1,5 @@
+{
+  "description": "numpy synth toolkit plus an example song that renders a WAV: music, jingles, ambience, sound effects; you write the composition",
+  "entry": "song.py",
+  "notes": "Run it with bash_exec: python3 song.py (numpy is installed), then read_file song.wav: the audio report tells you whether it has pitched notes, a beat and sensible levels, since you cannot listen. song.py is only an example lofi loop: write the piece the user asked for by changing its tempo, chords, patterns and instruments, and use the tools in synth.py (epiano, pad, bass, pluck, lead, kick, snare, hat, vinyl, lowpass, chord, note, clock, Track). Every sound in synth.py is a -1..1 float array and every time is in seconds, so layers mix without level mistakes; keep your own sounds in -1..1 too."
+}

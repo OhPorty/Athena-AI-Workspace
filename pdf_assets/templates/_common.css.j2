@@ -1,0 +1,44 @@
+{% for ff in font_faces %}
+@font-face { font-family: "{{ ff.family }}"; font-weight: {{ ff.weight }}; font-style: {{ ff.style }}; src: url("{{ ff.url }}") format("woff2"); font-display: block; }
+{% endfor %}
+:root {
+  --s: 1;
+  --sp: 1;
+  --ink: #1f2430;
+  --muted: #5d6572;
+  --accent: {{ p.text }};
+  --accent-bright: {{ p.accent }};
+  --accent-light: {{ p.light }};
+  --dark: {{ p.dark }};
+  --tint: {{ p.tint }};
+  --rule: {{ p.rule }};
+  --f-body: "{{ f.body }}", "Helvetica Neue", Arial, sans-serif;
+  --f-display: "{{ f.display }}", "Helvetica Neue", Arial, sans-serif;
+  --f-label: "{{ f.label }}", "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: calc(10pt * var(--s)); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { font-family: var(--f-body); color: var(--ink); line-height: 1.42; font-kerning: normal; overflow-wrap: break-word; }
+a { color: inherit; text-decoration: none; }
+ul, ol { list-style: none; }
+
+.sec { margin-top: calc(1.4rem * (0.55 + 0.45 * var(--sp))); }
+.sec:first-child { margin-top: 0; }
+.sec-title {
+  font-family: var(--f-label); font-size: .7rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase;
+  color: var(--accent); padding-bottom: .4rem; margin-bottom: calc(.8rem * var(--sp)); border-bottom: 1.5px solid var(--accent); break-after: avoid;
+}
+.entry { margin-top: calc(1rem * var(--sp)); }
+.sec-title + .entry { margin-top: 0; }
+.entry.keep { break-inside: avoid; }
+.eh { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; break-after: avoid; }
+.et { font-weight: 600; font-size: 1.04rem; line-height: 1.25; }
+.ed { font-size: .8rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.es { font-size: .9rem; font-weight: 500; color: var(--accent); margin-top: .12rem; break-after: avoid; }
+.es .loc { color: var(--muted); font-weight: 400; }
+.es .sep { color: var(--rule); margin: 0 .35rem; }
+.bul { margin-top: calc(.4rem * var(--sp)); }
+.bul li { position: relative; padding-left: .95rem; font-size: .93rem; line-height: 1.4; margin-top: calc(.22rem * var(--sp)); break-inside: avoid; }
+.bul li::before { content: ""; position: absolute; left: .1rem; top: .56em; width: .27rem; height: .27rem; border-radius: 50%; background: var(--accent-bright); }
+.summary { font-size: .97rem; line-height: 1.5; color: #2c3340; }
+.icon { flex: none; width: .95rem; height: .95rem; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

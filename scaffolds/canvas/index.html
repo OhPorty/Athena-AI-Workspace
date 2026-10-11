@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Untitled game</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <h1>Untitled game</h1>
+    <div class="stage">
+      <canvas id="game" width="640" height="360" aria-label="Game area"></canvas>
+    </div>
+    <p id="status" class="status" role="status" aria-live="polite">Press Start to play</p>
+    <div class="controls">
+      <button id="start" class="btn" type="button">Start</button>
+      <button id="pause" class="btn btn-ghost" type="button">Pause</button>
+    </div>
+  </main>
+  <script src="game.js"></script>
+</body>
+</html>

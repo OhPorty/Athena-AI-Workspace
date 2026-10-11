@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}}</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <h1>{{TITLE}}</h1>
+    <div class="stage">
+      <canvas id="game" width="640" height="360" aria-label="Game area: catch the falling {{COLLECT}}, avoid the {{HAZARD}}"></canvas>
+    </div>
+    <p id="status" class="status" role="status" aria-live="polite">Press Start to play</p>
+    <div class="controls">
+      <button id="start" class="btn" type="button">Start</button>
+      <button id="pause" class="btn btn-ghost" type="button">Pause</button>
+    </div>
+    <p class="help">Move with the arrow keys or A / D, or drag on the game area. Catch {{COLLECT}}, dodge {{HAZARD}}. Space starts, P pauses.</p>
+  </main>
+  <script src="game.js"></script>
+</body>
+</html>

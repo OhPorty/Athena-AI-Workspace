@@ -11,7 +11,9 @@ _LARGE_TOOL_OUTPUT_MAX_STORED = 50
 # tail preview cuts exactly the itemized findings out of the middle. Exempt
 # these from compress_tool_result entirely rather than relying on Athena2
 # remembering to call get_full_tool_output every time.
-UNCOMPRESSED_TOOL_NAMES = {"read_scratch_file", "read_tool_call_history"}
+# A step's or plan's result now carries the findings themselves (already bounded by the delegation code), so
+# it is exempt too: paging them cost a whole extra round trip just to read what was returned on purpose.
+UNCOMPRESSED_TOOL_NAMES = {"read_scratch_file", "read_tool_call_history", "run_delegation_step", "plan_delegation"}
 
 
 def compress_tool_result(result):

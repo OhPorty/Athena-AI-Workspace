@@ -1,5 +1,8 @@
 import glob
+import json
 import os
+import re
+import shlex
 import time
 import subprocess
 import threading
@@ -108,6 +111,16 @@ def _expand_globs(command: str, args: list, cwd: str) -> list:
 MAX_PIPELINE_STAGES = 5
 
 
+# No shell ever sees an argument, so a regex like 'a\\|b' or the text "=>" is harmless. What is worth
+# rejecting is an argument that is trying to BE shell syntax: a bare operator, an operator set off by
+# spaces, a leading redirect, a /dev/null or fd redirect, or a substitution.
+_SHELL_SYNTAX = re.compile(r"(^|\s)(\|\||&&|\||;|>>?|<|&)(\s|$)|^[|&;<>]|\d?>&?\s*(/dev/null|\d)|\$\(|`")
+
+
+def _looks_like_shell_syntax(arg: str) -> bool:
+    return bool(_SHELL_SYNTAX.search(arg))
+
+
 def _validate_readonly_stage(command: str, args: list):
     """The complete set of per-command safety checks a single bash stage
     needs -- bare-name shape, allowlist membership, dangerous-flag
@@ -130,11 +143,10 @@ def _validate_readonly_stage(command: str, args: list):
     if not isinstance(args, list):
         return {"error": "'args' must be a list of strings."}
     dangerous = BASH_DANGEROUS_FLAGS.get(command, set())
-    shell_operators = ("|", ">", "<", "&", ";", "$(", "`", "&&", "||")
     for arg in args:
         if not isinstance(arg, str):
             return {"error": "All arguments must be strings."}
-        if any(op in arg for op in shell_operators):
+        if _looks_like_shell_syntax(arg):
             return {
                 "error": "Argument '" + arg + "' contains a shell operator (pipe, redirect, chaining, or substitution). "
                 "There is no shell here at all -- this tool runs the program directly, so operators like |, >, 2>/dev/null, "
@@ -344,9 +356,86 @@ def _rm_targets_broad(args: list) -> bool:
 # not a guarantee that no path outside the workspace can ever be named.
 BASH_EXEC_ALLOWED_COMMANDS = {
     "npm", "npx", "yarn", "pip", "pip3", "python3", "node", "pytest",
-    "git", "make", "mkdir", "touch", "mv", "cp", "rm",
+    "git", "make", "mkdir", "touch", "mv", "cp", "rm", "zip", "unzip",
 }
 BASH_EXEC_TIMEOUT_SECONDS = 300
+
+
+def _stage_from_text(text):
+    parts = shlex.split(text)
+    return {"command": parts[0], "args": parts[1:]} if parts else None
+
+
+def normalize_read_only_call(command, args, pipe_to):
+    """Read-only commands may be piped, but the call shape (a `pipe_to` list of {command, args}
+    stages) is easy to get wrong. Accept the natural forms too -- 'head -20', ['head -20', 'wc -l'],
+    and a whole 'grep -n x f | head -20' in `command` -- and rebuild the structured shape.
+    Anything unparseable is passed through unchanged for the normal validation to reject."""
+    try:
+        stages = []
+        if isinstance(pipe_to, str):
+            stages = [_stage_from_text(t) for t in pipe_to.split("|") if t.strip()]
+        elif isinstance(pipe_to, list):
+            stages = [_stage_from_text(x) if isinstance(x, str) else x for x in pipe_to]
+        elif pipe_to:
+            return command, args, pipe_to
+        if not args and isinstance(command, str) and " " in command.strip() and not command.strip().startswith("["):
+            tokens = shlex.split(command)
+            groups, current = [], []
+            for tok in tokens:
+                if tok == "|":
+                    groups.append(current)
+                    current = []
+                else:
+                    current.append(tok)
+            groups.append(current)
+            if all(groups):
+                command, args = groups[0][0], groups[0][1:]
+                stages = [{"command": g[0], "args": g[1:]} for g in groups[1:]] + stages
+            return command, args, (stages or None)
+        if stages:
+            return command, args, stages
+    except ValueError:
+        return command, args, pipe_to
+    command, args = normalize_command_line(command, args)
+    return command, args, pipe_to
+
+
+def normalize_command_line(command, args):
+    """Models often put the whole command line in `command` ('ls -la', 'find . -name x') or send it
+    as a JSON array. No shell is involved either way, so split it into program + args instead of
+    bouncing the call -- each rejection is a wasted round trip. Only applies when args is empty."""
+    if not isinstance(command, str):
+        return command, args
+    if args:
+        # 'cat -n' with the file in args: the flags landed in `command`. Move them over.
+        text = command.strip()
+        if " " in text and not text.startswith(("[", '"')):
+            try:
+                parts = shlex.split(text)
+            except ValueError:
+                return command, args
+            if parts:
+                return parts[0], parts[1:] + list(args)
+        return command, args
+    text = command.strip()
+    parts = None
+    if text.startswith("["):
+        try:
+            loaded = json.loads(text)
+            if isinstance(loaded, list) and loaded and all(isinstance(x, str) for x in loaded):
+                parts = loaded
+        except ValueError:
+            pass
+    elif " " in text:
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            pass
+    if parts:
+        return parts[0], parts[1:]
+    return command, args
+_INLINE_CODE_FLAGS = {"python3": {"-c"}, "node": {"-e", "-p", "--eval", "--print"}}
 
 
 def _validate_bash_exec_call(command: str, args: list):
@@ -367,11 +456,15 @@ def _validate_bash_exec_call(command: str, args: list):
         }
     if command not in BASH_EXEC_ALLOWED_COMMANDS:
         return {"error": "Command '" + command + "' is not allowed. Allowed commands: " + ", ".join(sorted(BASH_EXEC_ALLOWED_COMMANDS))}
-    shell_operators = ("|", ">", "<", "&", ";", "$(", "`", "&&", "||")
-    for arg in args:
+    for i, arg in enumerate(args):
         if not isinstance(arg, str):
             return {"error": "All arguments must be strings."}
-        if any(op in arg for op in shell_operators):
+        if i > 0 and args[i - 1] in _INLINE_CODE_FLAGS.get(command, ()):
+            # The program text for `python3 -c` / `node -e` is handed to the interpreter
+            # as one literal argument; ordinary code (arrow functions, semicolons, `a > b`)
+            # is full of these characters and no shell ever sees them.
+            continue
+        if _looks_like_shell_syntax(arg):
             return {
                 "error": "Argument '" + arg + "' contains a shell operator (pipe, redirect, chaining, or substitution). "
                 "There is no shell here at all -- this tool runs the program directly, so operators like |, >, 2>/dev/null, "
@@ -426,6 +519,9 @@ def _build_docker_sandbox_cmd(command, args, workspace):
         "-w", real_workspace,
         "--user", f"{uid}:{gid}",
         "-e", "HOME=/tmp",
+        # pip installs land in the workspace so they survive to the next call (every call is a fresh
+        # container); python3 picks the folder up on its own once it exists.
+        "-e", f"PYTHONUSERBASE={os.path.join(real_workspace, '.athena', 'pylibs')}",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges=true",
         "--read-only",
@@ -438,6 +534,35 @@ def _build_docker_sandbox_cmd(command, args, workspace):
     ] + list(args)
 
 
+_PY_FRAME = re.compile(r'File "([^"]+)", line (\d+)')
+_NODE_FRAME = re.compile(r"\(?((?:/|[A-Za-z]:[\\/])[^():\n]+?):(\d+):\d+\)?")
+
+
+def failing_code_context(output, workspace, radius=5):
+    """When a program the model wrote crashes, show the code around the crash. A traceback names one
+    line; without the lines around it, the model re-reads the file or rewrites all of it (minutes
+    of generation) to fix one statement. Only frames inside the workspace count: the last of those
+    is the model's own code that led into a library, which is where the fix belongs."""
+    real = os.path.realpath(workspace)
+    hit = None
+    for match in list(_PY_FRAME.finditer(output)) + list(_NODE_FRAME.finditer(output)):
+        path = os.path.realpath(match.group(1))
+        if path.startswith(real + os.sep) and os.path.isfile(path) and "node_modules" not in path:
+            if hit is None or match.start() >= hit[2]:
+                hit = (path, int(match.group(2)), match.start())
+    if not hit:
+        return None
+    path, line, _ = hit
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return None
+    lo, hi = max(1, line - radius), min(len(lines), line + radius)
+    excerpt = "\n".join(f"{n:>5}{'>' if n == line else ' '}| {lines[n - 1][:160]}" for n in range(lo, hi + 1))
+    return {"file": os.path.relpath(path, real), "line": line, "excerpt": excerpt}
+
+
 def execute_write_bash(command: str, args: list, workspace: str):
     if not workspace:
         return {"error": "bash_exec requires an active workspace."}
@@ -445,7 +570,7 @@ def execute_write_bash(command: str, args: list, workspace: str):
     if err:
         return err
     if not _docker_sandbox_available():
-        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
+        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing; build the image once with `docker build -t athena-sandbox:latest sandbox/` from Athena's folder) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
     try:
         result = subprocess.run(
             _build_docker_sandbox_cmd(command, args, workspace),
@@ -457,7 +582,12 @@ def execute_write_bash(command: str, args: list, workspace: str):
         output = result.stdout
         if result.stderr:
             output += "\n[stderr]\n" + result.stderr
-        return {"command": command, "args": args, "output": output[:10000], "exit_code": result.returncode}
+        reply = {"command": command, "args": args, "output": output[:10000], "exit_code": result.returncode}
+        if result.returncode != 0:
+            failing = failing_code_context(output, workspace)
+            if failing:
+                reply["failing_code"] = failing
+        return reply
     except FileNotFoundError:
         return {"error": "Command '" + command + "' not found on this system."}
     except subprocess.TimeoutExpired:
@@ -485,7 +615,7 @@ def start_background_bash(command: str, args: list, workspace: str):
     if err:
         return err
     if not _docker_sandbox_available():
-        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
+        return {"error": "The sandbox container isn't available right now (Docker or the athena-sandbox image is missing; build the image once with `docker build -t athena-sandbox:latest sandbox/` from Athena's folder) -- refusing to run this command unsandboxed rather than silently skipping the isolation it's supposed to have."}
     try:
         proc = subprocess.Popen(
             _build_docker_sandbox_cmd(command, args, workspace),
@@ -588,7 +718,7 @@ BASH_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash_exec",
-            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Not for searching or reading -- use bash_read_only for grep/sed/find/cat/etc. instead. Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Runs inside an isolated sandbox container: network access works (git clone/push over HTTPS, npm/pip installs), but nothing outside the mounted workspace is visible or writable -- no host SSH keys, no credential files, no other directories. If a command fails specifically because it can't find or write to something outside the workspace, that's this containment working as intended, not a bug to work around. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
+            "description": "Run a write-capable shell command, confined to the current workspace (cwd is pinned to the workspace root). Not for searching or reading -- use bash_read_only for grep/sed/find/cat/etc. instead. Only these commands are allowed: npm, npx, yarn, pip, pip3, python3, node, pytest, git, make, mkdir, touch, mv, cp, rm, zip, unzip. No shell chaining, pipes, or redirection -- provide the command and its arguments as a separate list, not as one combined string. Recursive rm with a broad target (., /, *, .., or no target) and git push --force are refused. Any file format that isn't plain text is made by writing a small python3 script with write_file and running it here: numpy (arrays, and sound as WAV via the stdlib wave module), python-docx (.docx), openpyxl and XlsxWriter (.xlsx), python-pptx (.pptx), reportlab and pypdf (PDF), Pillow, matplotlib and cairosvg (PNG/JPEG/charts, SVG to PNG), qrcode, lxml, PyYAML, Jinja2, markdown and the stdlib zipfile/sqlite3/csv are installed; anything else can be pip-installed and stays installed for the workspace. read_file can read the result back (text of docx/xlsx/pptx/pdf, size of images, contents of zips, and a measured report for WAV audio, since you cannot listen). Runs inside an isolated sandbox container: network access works (git clone/push over HTTPS, npm/pip installs), but nothing outside the mounted workspace is visible or writable -- no host SSH keys, no credential files, no other directories. If a command fails specifically because it can't find or write to something outside the workspace, that's this containment working as intended, not a bug to work around. Requires an active workspace; there is no bash_exec without one. Timeout is 300 seconds.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -53,7 +53,7 @@ def test_sed_without_dangerous_flag_allowed(workspace):
     "foo < in.txt",
     "foo && bar",
     "foo || bar",
-    "foo; bar",
+    "foo ; bar",
     "$(whoami)",
     "`whoami`",
 ])
@@ -61,6 +61,12 @@ def test_shell_operators_rejected_as_literal_text(workspace, operator_arg):
     result = bash_tools.execute_readonly_bash("grep", [operator_arg], workspace)
     assert "error" in result
     assert "shell operator" in result["error"]
+
+
+@pytest.mark.parametrize("pattern", [r"master\|_mix_into", "foo|bar", "=>", "return;", "a<b"])
+def test_search_patterns_that_merely_contain_operator_characters_run(workspace, pattern):
+    result = bash_tools.execute_readonly_bash("grep", ["-n", pattern, "."], workspace)
+    assert "shell operator" not in (result.get("error") or "")
 
 
 def test_missing_command_rejected(workspace):

@@ -78,7 +78,7 @@ def test_bot_delegation_cluster_blocked_when_session_required():
 
 
 def test_bot_delegation_cluster_allowed_in_correct_session(monkeypatch):
-    monkeypatch.setattr(bots, "_list_bots_tool", lambda: {"bots": []})
+    monkeypatch.setattr(bots, "_list_bots_for_model", lambda: {"bots": []})
     ctx = make_ctx(session_id=bots.ATHENA_BOTS_SESSION_ID, require_athena_bots_session=True)
     result = main.dispatch_tool("list_bots", {}, ctx)
     assert result == {"bots": []}

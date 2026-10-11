@@ -1,7 +1,9 @@
 import pytest
 
 import db
+import generated_files
 import logging_setup
+import model_profile
 import rag
 import settings
 
@@ -21,6 +23,12 @@ def isolated_data_files(tmp_path, monkeypatch):
     # this phase -- edit_file/replace_lines call it as a side effect, so
     # it's neutered here rather than actually running on every test.
     monkeypatch.setattr(rag, "index_codebase", lambda *a, **k: None)
+    # Model-profile probing makes real HTTP calls to the model's endpoint; no test
+    # should reach the network (tests that exercise the probes pass a mock transport).
+    monkeypatch.setattr(model_profile, "PROBING_ENABLED", False)
+    # Tools that produce files (PDFs, preview screenshots) must never write into the real generated_files/.
+    monkeypatch.setattr(generated_files, "ROOT", str(tmp_path / "generated_files"))
+    model_profile.clear_cache()
 
 
 @pytest.fixture

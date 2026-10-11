@@ -82,10 +82,10 @@ def _next_delegation_job_id():
         return str(_delegation_job_counter[0])
 
 
-def _delegation_step_worker(job_id, task_hash, req_fields, bot_id, instruction):
+def _delegation_step_worker(job_id, task_hash, req_fields, bot_id, instruction, known=None, report=None, task_text=""):
     task_context.current_task_hash.set(task_hash)  # each thread starts with its own empty context -- see _plan_delegation_tool's own comment on this
     try:
-        result = bots._run_delegation_step_tool(bot_id, instruction)
+        result = bots._run_delegation_step_tool(bot_id, instruction, known, report, task_text)
     except Exception as e:
         result = {"status": "error", "detail": f"Unhandled exception during background delegation: {e}", "instruction": instruction}
     with _delegation_jobs_lock:
@@ -93,14 +93,17 @@ def _delegation_step_worker(job_id, task_hash, req_fields, bot_id, instruction):
     bot_name = result.get("bot", "The bot")
     summary = (
         f"[Async delegation job {job_id} complete] {bot_name} on instruction {instruction!r} -- "
-        f"status: {result.get('status')}. {result.get('detail', result.get('error', ''))} "
-        f"Use read_scratch_file('{bot_name}') and read_tool_call_history('{bot_name}') for full findings."
+        f"status: {result.get('status')}. {result.get('detail', result.get('error', ''))}"
     )
+    if result.get("findings"):
+        summary += "\n\nFindings:\n" + result["findings"]
+    if result.get("citations", {}).get("not_found"):
+        summary += "\n\nCited places that were not found: " + "; ".join(result["citations"]["not_found"][:6])
     _deliver_delegation_result(req_fields, summary)
 
 
 
-def _run_delegation_step_async_tool(req, bot_id, instruction):
+def _run_delegation_step_async_tool(req, bot_id, instruction, known=None, report=None, task_text=""):
     is_compound, reason = bots._instruction_is_compound(instruction)
     if is_compound:
         return {
@@ -114,7 +117,7 @@ def _run_delegation_step_async_tool(req, bot_id, instruction):
     req_fields = _capture_req_fields(req)
     with _delegation_jobs_lock:
         _delegation_jobs[job_id] = {"status": "running", "kind": "step", "session_id": req.session_id, "result": None}
-    threading.Thread(target=_delegation_step_worker, args=(job_id, task_hash, req_fields, bot_id, instruction), daemon=True).start()
+    threading.Thread(target=_delegation_step_worker, args=(job_id, task_hash, req_fields, bot_id, instruction, known, report, task_text), daemon=True).start()
     return {
         "status": "pending",
         "handle": job_id,
@@ -124,10 +127,10 @@ def _run_delegation_step_async_tool(req, bot_id, instruction):
 
 
 
-def _delegation_plan_worker(job_id, task_hash, req_fields, steps):
+def _delegation_plan_worker(job_id, task_hash, req_fields, steps, task_text=""):
     task_context.current_task_hash.set(task_hash)
     try:
-        plan_result = bots._plan_delegation_tool(steps)
+        plan_result = bots._plan_delegation_tool(steps, task_text)
     except Exception as e:
         plan_result = {"error": f"Unhandled exception during background plan delegation: {e}"}
     with _delegation_jobs_lock:
@@ -137,12 +140,13 @@ def _delegation_plan_worker(job_id, task_hash, req_fields, steps):
     for r in step_results:
         bot_name = r.get("bot", f"bot_id {r.get('bot_id')}")
         lines.append(f"- step {r.get('step')} ({bot_name}): {r.get('status')} -- {r.get('detail', r.get('error', ''))}")
-    lines.append("Use read_scratch_file per bot for full findings.")
+        if r.get("findings"):
+            lines.append("  Findings: " + r["findings"].replace("\n", "\n  "))
     _deliver_delegation_result(req_fields, "\n".join(lines))
 
 
 
-def _plan_delegation_async_tool(req, steps):
+def _plan_delegation_async_tool(req, steps, task_text=""):
     if not steps or not isinstance(steps, list):
         return {"error": "steps must be a non-empty list of {bot_id, instruction} objects."}
     job_id = _next_delegation_job_id()
@@ -150,7 +154,7 @@ def _plan_delegation_async_tool(req, steps):
     req_fields = _capture_req_fields(req)
     with _delegation_jobs_lock:
         _delegation_jobs[job_id] = {"status": "running", "kind": "plan", "session_id": req.session_id, "result": None}
-    threading.Thread(target=_delegation_plan_worker, args=(job_id, task_hash, req_fields, steps), daemon=True).start()
+    threading.Thread(target=_delegation_plan_worker, args=(job_id, task_hash, req_fields, steps, task_text), daemon=True).start()
     return {
         "status": "pending",
         "handle": job_id,

@@ -1,0 +1,95 @@
+{% import "_macros.j2" as m %}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ d.name }}{% if d.headline %} - {{ d.headline }}{% endif %}</title>
+<style>
+{% include "_common.css.j2" %}
+@page {
+  size: {{ page_css }};
+  margin: .55in .7in .6in;
+  @bottom-right { content: "{{ d.name|css_str }}  ·  Page " counter(page) " of " counter(pages); font: 8pt "Inter", sans-serif; color: #8a919e; }
+}
+@page :first { @bottom-right { content: none; } }
+
+.head { padding-bottom: .8rem; border-bottom: 2px solid var(--accent); }
+.name { font-family: var(--f-display); font-size: 2.3rem; font-weight: 700; line-height: 1.05; letter-spacing: -.005em; }
+.headline { margin-top: .3rem; font-size: 1.05rem; font-weight: 500; color: var(--accent); }
+.contact { margin-top: .7rem; font-family: var(--f-label); font-size: .84rem; color: var(--muted); line-height: 1.6; }
+.contact li { display: inline; }
+.contact li + li::before { content: "•"; margin: 0 .6rem; color: var(--accent-bright); }
+.body { padding-top: calc(1.3rem * var(--sp)); }
+/* Tracked capitals extract as "E X P E R I E N C E" in text parsers; this is the ATS-oriented template, so headings stay unspaced. */
+.sec-title { border-bottom: 1px solid var(--rule); letter-spacing: 0; font-size: .78rem; }
+.skill-line { font-size: .93rem; line-height: 1.5; margin-top: .3rem; }
+.skill-line:first-of-type { margin-top: 0; }
+.skill-line b { font-weight: 600; margin-right: .25rem; }
+.skill-line .dot { color: var(--accent-bright); margin: 0 .3rem; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; column-gap: 1.6rem; margin-top: calc(1.4rem * (0.55 + 0.45 * var(--sp))); break-inside: avoid; }
+.pair.solo { grid-template-columns: 1fr; }
+.pair .sec { margin-top: 0; }
+.pair .entry { margin-top: calc(.7rem * var(--sp)); }
+.pair .sec-title + .entry { margin-top: 0; }
+.pair .et { font-size: .95rem; }
+.edu-detail { font-size: .88rem; color: var(--muted); margin-top: .15rem; }
+</style>
+</head>
+<body>
+<header class="head">
+  <h1 class="name">{{ d.name }}</h1>
+  {% if d.headline %}<div class="headline">{{ d.headline }}</div>{% endif %}
+  {% if d.location or d.phone or d.email or d.links %}
+  <ul class="contact">
+    {% if d.location %}<li>{{ d.location }}</li>{% endif %}
+    {% if d.phone %}<li>{% if d.phone_url %}<a href="{{ d.phone_url }}">{{ d.phone }}</a>{% else %}{{ d.phone }}{% endif %}</li>{% endif %}
+    {% if d.email %}<li>{% if d.email_url %}<a href="{{ d.email_url }}">{{ d.email }}</a>{% else %}{{ d.email }}{% endif %}</li>{% endif %}
+    {% for l in d.links %}<li><a href="{{ l.url }}">{{ l.label }}</a></li>{% endfor %}
+  </ul>
+  {% endif %}
+</header>
+
+<div class="body">
+  {% if d.summary %}
+  <section class="sec"><h2 class="sec-title">Summary</h2><p class="summary">{{ d.summary }}</p></section>
+  {% endif %}
+  {% if d.experience %}
+  <section class="sec"><h2 class="sec-title">Experience</h2>{{ m.experience(d.experience) }}</section>
+  {% endif %}
+  {% if d.skills or d.languages %}
+  <section class="sec">
+    <h2 class="sec-title">Skills</h2>
+    {% for g in d.skills %}
+    <p class="skill-line">{% if g.group %}<b>{{ g.group }}:</b>{% endif %}{% for s in g["items"] %}{{ s }}{% if not loop.last %}<span class="dot">·</span>{% endif %}{% endfor %}</p>
+    {% endfor %}
+    {% if d.languages %}<p class="skill-line"><b>Languages:</b>{{ d.languages|join(", ") }}</p>{% endif %}
+  </section>
+  {% endif %}
+  {% if d.education or d.certifications %}
+  <div class="pair{{ ' solo' if not (d.education and d.certifications) }}">
+    {% if d.education %}
+    <section class="sec">
+      <h2 class="sec-title">Education</h2>
+      {% for e in d.education %}
+      <div class="entry keep">
+        <div class="eh"><span class="et">{{ e.degree or e.school }}</span>{% if e.dates %}<span class="ed">{{ e.dates }}</span>{% endif %}</div>
+        {% if e.degree and e.school %}<div class="es">{{ e.school }}{% if e.location %}<span class="sep">|</span><span class="loc">{{ e.location }}</span>{% endif %}</div>{% endif %}
+        {% for line in e.details %}<div class="edu-detail">{{ line }}</div>{% endfor %}
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+    {% if d.certifications %}
+    <section class="sec">
+      <h2 class="sec-title">Certifications</h2>
+      {% for c in d.certifications %}
+      <div class="entry keep"><div class="et">{{ c.name }}</div>{% if c.issuer or c.date %}<div class="es"><span class="loc">{{ c.issuer }}{% if c.issuer and c.date %} · {% endif %}{{ c.date }}</span></div>{% endif %}</div>
+      {% endfor %}
+    </section>
+    {% endif %}
+  </div>
+  {% endif %}
+  {{ m.custom_sections(d.sections) }}
+</div>
+</body>
+</html>

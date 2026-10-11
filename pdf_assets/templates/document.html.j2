@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ d.title }}</title>
+<style>
+{% include "_common.css.j2" %}
+@page {
+  size: {{ page_css }};
+  margin: .85in .95in .9in;
+  @bottom-center { content: counter(page) " / " counter(pages); font: 8pt "Inter", sans-serif; color: #8a919e; }
+}
+body { font-size: 1.05rem; line-height: 1.55; }
+.title { font-family: var(--f-display); font-size: 2.3rem; font-weight: 700; line-height: 1.12; letter-spacing: -.01em; text-wrap: balance; }
+.subtitle { margin-top: .5rem; font-size: 1.2rem; line-height: 1.35; color: var(--muted); }
+.byline { margin-top: .9rem; font-family: var(--f-label); font-size: .72rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
+.mark { width: 3.2rem; height: 3px; background: var(--accent-bright); margin: 1.1rem 0 1.6rem; }
+
+h1, h2, h3 { break-after: avoid; font-family: var(--f-display); }
+h1 { font-size: 1.6rem; line-height: 1.2; margin: 2rem 0 .6rem; color: var(--ink); }
+h2 { font-size: 1.25rem; line-height: 1.25; margin: 1.7rem 0 .5rem; color: var(--accent); }
+h3 { font-family: var(--f-label); font-size: .78rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; margin: 1.4rem 0 .4rem; color: var(--muted); }
+.mark + h1, .mark + h2, .mark + h3 { margin-top: 0; }
+p { margin: .65rem 0; orphans: 3; widows: 3; }
+ul.bl, ol.nl { margin: .65rem 0; }
+ul.bl li, ol.nl li { position: relative; padding-left: 1.5rem; margin-top: .3rem; break-inside: avoid; }
+ul.bl li::before { content: ""; position: absolute; left: .3rem; top: .62em; width: .32rem; height: .32rem; border-radius: 50%; background: var(--accent-bright); }
+ol.nl { counter-reset: n; }
+ol.nl li { counter-increment: n; }
+ol.nl li::before { content: counter(n) "."; position: absolute; left: 0; width: 1.2rem; text-align: right; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+
+.callout { margin: 1.1rem 0; padding: .85rem 1.1rem; background: var(--tint); border-left: 4px solid var(--accent-bright); border-radius: 0 .3rem .3rem 0; break-inside: avoid; }
+.callout b { display: block; font-family: var(--f-label); font-size: .72rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; color: var(--accent); margin-bottom: .25rem; }
+.callout p { margin: 0; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 1.5rem 0; }
+.pb { break-after: page; height: 0; }
+
+table { width: 100%; border-collapse: collapse; margin: 1.1rem 0; font-size: .93rem; line-height: 1.4; }
+caption { caption-side: bottom; text-align: left; font-size: .8rem; color: var(--muted); padding-top: .4rem; }
+thead { display: table-header-group; }
+th { font-family: var(--f-label); font-size: .7rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); text-align: left; padding: .45rem .7rem; border-bottom: 2px solid var(--accent-bright); }
+td { padding: .5rem .7rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tbody tr { break-inside: avoid; }
+tbody tr:nth-child(even) { background: var(--tint); }
+.r { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1 class="title" style="margin:0">{{ d.title }}</h1>
+  {% if d.subtitle %}<div class="subtitle">{{ d.subtitle }}</div>{% endif %}
+  {% if d.byline %}<div class="byline">{{ d.byline }}</div>{% endif %}
+  <div class="mark"></div>
+</header>
+{% for b in d.blocks %}
+{% if b.type == "heading" %}<h{{ b.level }}>{{ b.text }}</h{{ b.level }}>
+{% elif b.type == "paragraph" %}<p>{{ b.text }}</p>
+{% elif b.type == "bullets" %}<ul class="bl">{% for it in b["items"] %}<li>{{ it }}</li>{% endfor %}</ul>
+{% elif b.type == "numbered" %}<ol class="nl">{% for it in b["items"] %}<li>{{ it }}</li>{% endfor %}</ol>
+{% elif b.type == "callout" %}<div class="callout">{% if b.title %}<b>{{ b.title }}</b>{% endif %}<p>{{ b.text }}</p></div>
+{% elif b.type == "divider" %}<hr>
+{% elif b.type == "page_break" %}<div class="pb"></div>
+{% elif b.type == "table" %}
+<table>
+  {% if b.caption %}<caption>{{ b.caption }}</caption>{% endif %}
+  {% if b.headers %}<thead><tr>{% for h in b.headers %}<th{% if b.rows and b.rows[0][loop.index0]|is_numeric %} class="r"{% endif %}>{{ h }}</th>{% endfor %}</tr></thead>{% endif %}
+  <tbody>{% for row in b.rows %}<tr>{% for c in row %}<td{% if c|is_numeric %} class="r"{% endif %}>{{ c }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+{% endif %}
+{% endfor %}
+</body>
+</html>

@@ -1,0 +1,223 @@
+{
+  "description": "finished catch-and-dodge game (loop, input, states, score, lives); only if that is the game you want, otherwise use canvas",
+  "entry": "index.html",
+  "notes": "This is a complete game with its own rules; change them if your idea differs (or start from the canvas shell instead). The look and wording come from THEME at the top of game.js (colors, what you collect and avoid, title) and the color tokens at the top of style.css, which start neutral on purpose: set them, and the shapes, for what you are making. game.js is organised theme -> constants -> state -> input -> update(dt) -> draw() -> loop: change the rules in update(), the difficulty in spawn(), and add new shapes to drawShape() (star, coin, gem, drop, spike, rock exist). The status line (#status) and window.__game mirror the game state so it can be checked with preview actions such as [\"click #start\", \"wait 1500\"]. Rename anything that still uses the starter's words in index.html.",
+  "theme_files": {
+    "css": "style.css",
+    "js": "game.js"
+  },
+  "base_css": {},
+  "themes": {
+    "night-sky": {
+      "description": "deep navy night, golden stars to catch, grey rocks to dodge",
+      "css": {
+        "--bg": "#0f1226",
+        "--glow": "#232a5c",
+        "--panel": "#181c3a",
+        "--ink": "#f2f4ff",
+        "--muted": "#b4b9dd",
+        "--accent": "#ffd166",
+        "--accent-ink": "#1a1500",
+        "--line": "#2c3263"
+      },
+      "js": {
+        "title": "Star Catcher",
+        "ink": "#f2f4ff",
+        "sky": [
+          "#1b2150",
+          "#0f1226"
+        ],
+        "specks": "#ffffff22",
+        "collectible": "star",
+        "collectColor": "#ffd166",
+        "collectAccent": "#ffd166",
+        "hazard": "rock",
+        "hazardColor": "#7d86b8",
+        "hazardAccent": "#5b6296",
+        "player": "#6ee7b7"
+      },
+      "text": {
+        "TITLE": "Star Catcher",
+        "COLLECT": "stars",
+        "HAZARD": "rocks"
+      },
+      "summary": "navy night, stars and rocks"
+    },
+    "candy": {
+      "description": "purple and pink sweet shop, gems to catch, icy spikes to dodge",
+      "css": {
+        "--bg": "#2a1033",
+        "--glow": "#5b2a86",
+        "--panel": "#3a1747",
+        "--ink": "#fff0fa",
+        "--muted": "#e2c3f0",
+        "--accent": "#ff9ad5",
+        "--accent-ink": "#2a0a24",
+        "--line": "#6a3a8c"
+      },
+      "js": {
+        "title": "Candy Catcher",
+        "ink": "#fff0fa",
+        "sky": [
+          "#5b2a86",
+          "#2a1033"
+        ],
+        "specks": "#ffffff33",
+        "collectible": "gem",
+        "collectColor": "#ff9ad5",
+        "collectAccent": "#ffffff",
+        "hazard": "spike",
+        "hazardColor": "#9be7ff",
+        "hazardAccent": "#9be7ff",
+        "player": "#ffd166"
+      },
+      "text": {
+        "TITLE": "Candy Catcher",
+        "COLLECT": "gems",
+        "HAZARD": "spikes"
+      },
+      "summary": "purple and pink, gems and spikes"
+    },
+    "arcade": {
+      "description": "near-black with neon green and magenta, coins to grab, spikes to avoid",
+      "css": {
+        "--bg": "#050507",
+        "--glow": "#1b1b33",
+        "--panel": "#0c0c14",
+        "--ink": "#eafff3",
+        "--muted": "#a8c9b8",
+        "--accent": "#39ff88",
+        "--accent-ink": "#03140a",
+        "--line": "#26264a"
+      },
+      "js": {
+        "title": "Coin Rush",
+        "ink": "#eafff3",
+        "sky": [
+          "#10102a",
+          "#050507"
+        ],
+        "specks": "#39ff8833",
+        "collectible": "coin",
+        "collectColor": "#39ff88",
+        "collectAccent": "#03140a",
+        "hazard": "spike",
+        "hazardColor": "#ff3b8d",
+        "hazardAccent": "#ff3b8d",
+        "player": "#29d3ff"
+      },
+      "text": {
+        "TITLE": "Coin Rush",
+        "COLLECT": "coins",
+        "HAZARD": "spikes"
+      },
+      "summary": "neon on black, coins and spikes"
+    },
+    "ocean": {
+      "description": "deep teal water, drifting pearls to collect, boulders to dodge",
+      "css": {
+        "--bg": "#04202e",
+        "--glow": "#0b4a63",
+        "--panel": "#06303f",
+        "--ink": "#e8fbff",
+        "--muted": "#9fd3e0",
+        "--accent": "#7ae7ff",
+        "--accent-ink": "#02141c",
+        "--line": "#1d6a85"
+      },
+      "js": {
+        "title": "Deep Dive",
+        "ink": "#e8fbff",
+        "sky": [
+          "#0b4a63",
+          "#04202e"
+        ],
+        "specks": "#7ae7ff2a",
+        "collectible": "drop",
+        "collectColor": "#7ae7ff",
+        "collectAccent": "#7ae7ff",
+        "hazard": "rock",
+        "hazardColor": "#4a7a8c",
+        "hazardAccent": "#2f5a6b",
+        "player": "#ffd166"
+      },
+      "text": {
+        "TITLE": "Deep Dive",
+        "COLLECT": "pearls",
+        "HAZARD": "boulders"
+      },
+      "summary": "deep teal, pearls and boulders"
+    },
+    "sunset": {
+      "description": "warm maroon dusk, gold coins to collect, dusty rocks to dodge",
+      "css": {
+        "--bg": "#200b12",
+        "--glow": "#7b2d3b",
+        "--panel": "#34121c",
+        "--ink": "#fff3e8",
+        "--muted": "#e8c4b8",
+        "--accent": "#ffb347",
+        "--accent-ink": "#2a1200",
+        "--line": "#6e2b3a"
+      },
+      "js": {
+        "title": "Sunset Run",
+        "ink": "#fff3e8",
+        "sky": [
+          "#7b2d3b",
+          "#2a0f1a"
+        ],
+        "specks": "#ffd1a02a",
+        "collectible": "coin",
+        "collectColor": "#ffd166",
+        "collectAccent": "#b4741a",
+        "hazard": "rock",
+        "hazardColor": "#c99aa6",
+        "hazardAccent": "#a06f7c",
+        "player": "#ff8a5c"
+      },
+      "text": {
+        "TITLE": "Sunset Run",
+        "COLLECT": "coins",
+        "HAZARD": "boulders"
+      },
+      "summary": "maroon dusk, gold coins"
+    },
+    "plain": {
+      "description": "neutral dark with a teal accent - a blank canvas to restyle",
+      "css": {
+        "--bg": "#111318",
+        "--glow": "#1f2430",
+        "--panel": "#1b1e26",
+        "--ink": "#eceff4",
+        "--muted": "#a3a9b8",
+        "--accent": "#5eead4",
+        "--accent-ink": "#06201c",
+        "--line": "#333846"
+      },
+      "js": {
+        "title": "Untitled game",
+        "ink": "#eceff4",
+        "sky": [
+          "#1f2430",
+          "#111318"
+        ],
+        "specks": "#ffffff18",
+        "collectible": "gem",
+        "collectColor": "#5eead4",
+        "collectAccent": "#06201c",
+        "hazard": "rock",
+        "hazardColor": "#8b93a7",
+        "hazardAccent": "#5e667a",
+        "player": "#eceff4"
+      },
+      "text": {
+        "TITLE": "Untitled game",
+        "COLLECT": "points",
+        "HAZARD": "hazards"
+      },
+      "summary": "neutral dark and teal"
+    }
+  },
+  "default_theme": "plain"
+}

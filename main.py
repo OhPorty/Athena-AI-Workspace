@@ -11,12 +11,15 @@ import time
 import threading
 import hashlib
 import queue
+import base64
+import io
 from typing import Optional, List
 import uuid
 import httpx
 import psutil
 import argparse
-from fastapi import FastAPI
+import pypdf
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from rag import SimpleCodeRAG
 import rag
@@ -34,6 +37,13 @@ import tool_output
 import bash_tools
 import backup_tools
 import file_tools
+import pdf_tools
+import generated_files
+import model_profile
+import workspace_kind
+import preview_tools
+import background_music
+import scaffold_tools
 import web_tools
 import host_locks
 import bots
@@ -64,6 +74,19 @@ DEFAULT_MODEL = os.environ.get("ATHENA_DEFAULT_MODEL", "gpt-oss-20b-32k:latest")
 
 app = FastAPI(title="Athena")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/api/generated-files/{token}")
+def get_generated_file(token: str):
+    path = generated_files.resolve(token)
+    if path is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(
+        path, media_type=generated_files.media_type(token), filename=generated_files.display_name(token),
+        content_disposition_type="inline" if generated_files.shown_inline(token) else "attachment",
+    )
+
+
 app.include_router(generation_streaming.router)
 app.include_router(voice.router)
 app.include_router(skills.router)
@@ -245,6 +268,25 @@ CODING_HARNESS_SECTIONS = [
      "not text search. Use backup_file before an edit whose current state matters and isn't "
      "already in version control this turn -- never a hand-rolled copy."),
 
+    # Build-mode variants (a small new project, see workspace_kind). The default prompt
+    # below keeps its original six sections byte-for-byte; these two replace
+    # tool_selection, whose search_codebase-first rule names a tool a build-mode turn
+    # isn't even given.
+    ("tool_selection_build",
+     "## Picking the right tool\n"
+     "Look at files with read_file or bash_read_only (ls, grep, cat, find); create and change them with "
+     "write_file and edit_file; run things with bash_exec (npm, node, python3, pip, git). scaffold copies in "
+     "working starter code (a bare page, a game loop) so you don't retype plumbing, and preview opens an "
+     "HTML page in a real browser and tells you what is wrong with it."),
+
+    ("build_loop",
+     "## Building something new\n"
+     "Get a working version in place early, then improve it. The design is yours: decide what this thing "
+     "should look like and how it should behave from its subject, and write the layout, styling, wording and "
+     "rules for it. A scaffold only saves you the plumbing, so change whatever it assumes. Run what you write, "
+     "and use preview to look at the result before you call it done -- fix what it flags and preview again. "
+     "A finished piece is one you have run and looked at; say what you checked, and what you could not."),
+
     ("research_discipline",
      "## Researching something real\n"
      "For a specific named library, SDK, or API: don't rely on general web search alone -- "
@@ -274,7 +316,14 @@ def _assemble_prompt_sections(sections, section_ids, extra_sections=None):
 # name so every existing reference to the coding-harness prompt keeps
 # working unchanged while the underlying mechanism stays genuinely
 # modular rather than one flat string.
-CODING_HARNESS_SYSTEM_PROMPT = _assemble_prompt_sections(CODING_HARNESS_SECTIONS, [sid for sid, _ in CODING_HARNESS_SECTIONS])
+CODING_HARNESS_SYSTEM_PROMPT = _assemble_prompt_sections(
+    CODING_HARNESS_SECTIONS,
+    ["identity", "plan_before_acting", "grounded_claims", "loop_signals", "tool_selection", "research_discipline"],
+)
+CODING_HARNESS_BUILD_PROMPT = _assemble_prompt_sections(
+    CODING_HARNESS_SECTIONS,
+    ["identity", "plan_before_acting", "grounded_claims", "loop_signals", "tool_selection_build", "build_loop", "research_discipline"],
+)
 
 # Same mechanism, casual mode's own independent registry (see
 # CASUAL_AGENT_SECTIONS above). Leading "\n\n" so BASE_SYSTEM_PROMPT +
@@ -338,7 +387,7 @@ def _resolve_mode_and_workspace(req):
     return "casual", ""
 
 
-def _get_mode_system_prompt(mode, req):
+def _get_mode_system_prompt(mode, req, build_task=False):
     """The stable identity and rules only -- memory, skills, and
     pinned-message context are deliberately NOT concatenated in here.
     They're dynamic, situational material that changes every request,
@@ -347,7 +396,9 @@ def _get_mode_system_prompt(mode, req):
     block as the model's actual operating instructions, the same
     distinction DeepSeek Harness draws between a stable system prompt
     and dynamically-sourced runtime context."""
-    if mode in ("workspace", "athena_delegation"):
+    if mode == "workspace" and build_task:
+        base = CODING_HARNESS_BUILD_PROMPT
+    elif mode in ("workspace", "athena_delegation"):
         base = CODING_HARNESS_SYSTEM_PROMPT
     else:
         base = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
@@ -438,6 +489,110 @@ _PLAN_REQUIRED_THRESHOLD = 3
 # number of times across a long turn, unlike the one-shot gates above.
 _PLAN_CHECKIN_THRESHOLD = 4
 
+# Calls that move real work forward -- create/modify files, run something, render a
+# document, look at the result. The gates above exist to stop *exploration* from
+# thrashing (the weather lookups, the search_codebase loops); applying them to a
+# turn that is steadily writing and running code penalizes exactly the work the
+# harness is for. A successful call from this set resets the "calls without a
+# plan" count and doesn't count toward the plan check-in cadence. It never
+# unlocks anything or caps anything -- a failed call earns no credit, and the
+# repeat-call and similar-search blocks still apply to every tool.
+_PROGRESS_TOOL_NAMES = {"write_file", "edit_file", "replace_lines", "bash_exec", "bash_exec_start", "generate_pdf", "generate_background_music", "preview", "scaffold"}
+
+
+def _result_is_progress(tool_name, result):
+    if tool_name not in _PROGRESS_TOOL_NAMES or not isinstance(result, dict) or result.get("error"):
+        return False
+    if tool_name == "bash_exec":
+        return result.get("exit_code") == 0
+    return True
+
+
+def _credit_progress(tool_name, result, calls_without_progress, calls_since_plan_touch):
+    """-> (calls_without_progress, calls_since_plan_touch) after crediting one finished call.
+    The caller already counted this call as +1 on both before it ran."""
+    if _result_is_progress(tool_name, result):
+        return 0, max(0, calls_since_plan_touch - 1)
+    return calls_without_progress, calls_since_plan_touch
+
+
+# Tool-call syntax that reached us as TEXT. A model that tries to call a tool and the backend
+# can't turn it into a real call (cut off, malformed, closing tags with no opening) leaves
+# exactly this behind, and the turn then looks like a normal finished answer.
+_TOOL_MARKUP = re.compile(r"</?tool_call>|</function>|</parameter>|<function=|<parameter=")
+
+
+_PATH_MENTION = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)*[\w-]+\.(?:py|js|ts|tsx|jsx|vue|html|css|json|md|txt|ya?ml|toml|sql|sh|go|rs|java|cpp|c|h|rb|php|svg|csv|wav|pdf|docx|xlsx|pptx))\b")
+
+
+def _ungrounded_paths(reply, messages, turn_base, workspace):
+    """Files a reply names that nothing this turn ever showed or touched. A long reply after real tool calls is
+    usually the final answer, so length says nothing; what can be checked is whether the files it talks about
+    appeared in a tool call or result, in the conversation before this turn, or exist in the workspace. A name that
+    is none of those was invented."""
+    mentioned = {m.group(1) for m in _PATH_MENTION.finditer(reply or "")}
+    if not mentioned:
+        return []
+    evidence = []
+    for i, m in enumerate(messages):
+        role = m.get("role")
+        if role == "system":
+            continue
+        if i >= turn_base and role in ("user", "assistant"):
+            # This turn's own text never counts: the model's replies would vouch for themselves, and the
+            # harness's nudges name the very files in question. Only what a tool was asked and answered does.
+            if role == "assistant":
+                evidence.append(json.dumps(m.get("tool_calls") or ""))
+            continue
+        if role == "assistant":
+            evidence.append(str(m.get("content") or ""))
+            evidence.append(json.dumps(m.get("tool_calls") or ""))
+        else:
+            evidence.append(str(m.get("content") or ""))
+    text = "\n".join(evidence)
+    unseen = []
+    for path in sorted(mentioned):
+        if path in text or os.path.basename(path) in text:
+            continue
+        if workspace and os.path.exists(os.path.join(workspace, path)):
+            continue
+        unseen.append(path)
+    return unseen
+
+
+def _leaked_tool_markup(*texts):
+    """Only the tail counts: a call that was started and lost leaves its remnants at the very end of the
+    output, whereas an answer that merely discusses tool syntax mentions it mid-text."""
+    return any(_TOOL_MARKUP.search((t or "")[-200:]) for t in texts)
+
+
+# Calls that change the project. After one succeeds, an identical *look* at the project (preview,
+# read_file, a test run) can legitimately answer differently, so it stops counting as a repeat.
+# Identical *writes* stay counted: rewriting the same thing over and over is still a loop. A look
+# (even a successful preview) never clears anything -- preview, preview, preview is still a loop.
+_STATE_CHANGING_TOOL_NAMES = {"write_file", "edit_file", "replace_lines", "scaffold", "generate_pdf", "generate_background_music", "bash_exec", "bash_exec_start"}
+_REPEAT_COUNTED_AFTER_CHANGE = {"write_file", "edit_file", "replace_lines", "scaffold", "generate_pdf", "generate_background_music"}
+
+
+def _forget_stale_repeats(fingerprints):
+    return [fp for fp in fingerprints if fp[0] in _REPEAT_COUNTED_AFTER_CHANGE]
+
+
+def _gate_thresholds_for(mode, profile):
+    """A model's tier loosens the checkpoints for ordinary work, but never the delegation
+    session's: its self-investigation cutoff exists to force sub-agent delegation (roadmap
+    item 1, confirmed working) and isn't a statement about how capable the model is."""
+    return _default_gate_thresholds() if mode == "athena_delegation" else dict(profile["thresholds"])
+
+
+def _default_gate_thresholds():
+    """Read at call time (not import time) so the module constants stay authoritative."""
+    return {
+        "plan_required": _PLAN_REQUIRED_THRESHOLD, "plan_checkin": _PLAN_CHECKIN_THRESHOLD,
+        "self_investigation": _SELF_INVESTIGATION_TOOL_THRESHOLD, "workspace_search": _WORKSPACE_SEARCH_CODEBASE_THRESHOLD,
+    }
+
 
 def _plan_is_complete(plan_state):
     """True once every recorded step is done or failed -- i.e. there's
@@ -449,7 +604,7 @@ def _plan_is_complete(plan_state):
     return bool(plan_state) and all(s.get("status") in ("done", "failed") for s in plan_state)
 
 
-def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False):
+def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False, thresholds=None, build_task=False):
     """The seven structural tool-availability gates, checked against a
     snapshot of state as of the START of the current round (not the
     live-updating turn totals) -- so a tool unlocked by a call earlier
@@ -458,11 +613,17 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
     matching the sequencing the old schema-hiding approach enforced.
     Returns an error dict if `name` is currently gated, else None. A
     standalone function (not inlined in chat_stream's _execute_tool_call)
-    so it's independently testable without spinning up a real turn."""
-    if mode in ("workspace", "athena_delegation") and name in _SEARCH_GATED_TOOL_NAMES and "search_codebase" not in pre_round_called:
+    so it's independently testable without spinning up a real turn.
+
+    thresholds (a model profile's tier, see model_profile.GATE_THRESHOLDS)
+    defaults to the module constants. build_task skips the search-first gate:
+    in a small new project there is nothing for search_codebase to find, so
+    forcing it before read_file is a wasted call, not orientation."""
+    th = thresholds or _default_gate_thresholds()
+    if mode in ("workspace", "athena_delegation") and name in _SEARCH_GATED_TOOL_NAMES and "search_codebase" not in pre_round_called and not build_task:
         return {"error": f"BLOCKED: '{name}' is not available yet this turn -- call search_codebase first before using bash_read_only or read_file directly, so you're working from search results rather than blind exploration."}
     if (mode == "athena_delegation" and name in _EXPLORATION_TOOL_NAMES
-            and pre_round_exploration_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
+            and pre_round_exploration_count >= th["self_investigation"]
             and not (pre_round_called & _DELEGATION_TOOL_NAMES)):
         return {"error": (
             "BLOCKED: you've made enough self-investigation tool calls this turn that direct exploration "
@@ -472,7 +633,7 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
             "or run_delegation_step to get any further investigation done instead of continuing to look yourself."
         )}
     if (mode == "workspace" and name == "search_codebase"
-            and pre_round_search_codebase_count >= _WORKSPACE_SEARCH_CODEBASE_THRESHOLD):
+            and pre_round_search_codebase_count >= th["workspace_search"]):
         return {"error": (
             "BLOCKED: you've made enough search_codebase calls this turn that it's no longer available for the "
             "rest of this turn -- it returns ranked snippets, not full files, and rewording the same question "
@@ -487,7 +648,7 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
             "back incomplete, do not work around it with a one-off run_delegation_step call: fix the step (or "
             "steps) and call plan_delegation again with the corrected list."
         )}
-    if pre_round_total_count >= _PLAN_REQUIRED_THRESHOLD and "write_plan" not in pre_round_called and name != "write_plan":
+    if pre_round_total_count >= th["plan_required"] and "write_plan" not in pre_round_called and name != "write_plan":
         return {"error": (
             "BLOCKED: you've made several tool calls this turn without writing a plan. Every tool except "
             "write_plan is now unavailable until you call it. This does not limit how much you can do for the "
@@ -502,7 +663,7 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
             "genuinely more work needed, which will unlock tools again."
         )}
     if (not pre_round_plan_complete and pre_round_plan_exists
-            and pre_round_calls_since_plan_touch >= _PLAN_CHECKIN_THRESHOLD
+            and pre_round_calls_since_plan_touch >= th["plan_checkin"]
             and name not in ("write_plan", "update_plan_step")):
         return {"error": (
             f"BLOCKED: you've made {pre_round_calls_since_plan_touch} tool calls since you last touched your "
@@ -513,7 +674,7 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
     return None
 
 
-def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0, search_codebase_call_count=0, plan_exists=False, calls_since_plan_touch=0, plan_complete=False):
+def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0, search_codebase_call_count=0, plan_exists=False, calls_since_plan_touch=0, plan_complete=False, thresholds=None, build_task=False):
     """Casual chat no longer carries bash_read_only/backup_file -- a mode only
     gets tools it actually needs, matching the same principle behind
     bots never getting write tools at the registration level rather
@@ -524,24 +685,34 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
     plan_complete let a caller recompute this per round within one turn
     (see chat_stream's generation loop) so tool availability can shift as
     the model's own actions this turn accumulate, instead of being fixed
-    once at request start."""
-    tools = lcm_client.get_lcm_tools() + PLAN_TOOL_SCHEMAS
+    once at request start.
+
+    build_task (a small new project, see workspace_kind) sends the lean set --
+    files, bash, output paging -- and drops what only makes sense against an
+    existing codebase (search_codebase's index, LSP, file backups) along with
+    the search-first gate that existed to make that search worth doing. The
+    ~1/3 smaller schema is a real per-round saving on slow local models.
+    thresholds is a model profile's gate tier; None keeps the module constants."""
+    th = thresholds or _default_gate_thresholds()
+    tools = lcm_client.get_lcm_tools() + PLAN_TOOL_SCHEMAS + pdf_tools.PDF_TOOL_SCHEMAS
     if req.search_url:
         tools = tools + web_tools.WEB_TOOL_SCHEMAS
-    if mode in ("workspace", "athena_delegation"):
-        tools = tools + bash_tools.BASH_TOOL_SCHEMAS + backup_tools.BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS
+    if mode == "workspace" and build_task:
+        tools = tools + bash_tools.BASH_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS + preview_tools.PREVIEW_TOOL_SCHEMAS + scaffold_tools.SCAFFOLD_TOOL_SCHEMAS + background_music.BACKGROUND_MUSIC_TOOL_SCHEMAS
+    elif mode in ("workspace", "athena_delegation"):
+        tools = tools + bash_tools.BASH_TOOL_SCHEMAS + backup_tools.BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS + preview_tools.PREVIEW_TOOL_SCHEMAS + background_music.BACKGROUND_MUSIC_TOOL_SCHEMAS
     if skills.scan_skills():
         tools = tools + skills.SKILL_TOOL_SCHEMAS
     if mode == "athena_delegation":
         tools = tools + bots._bot_delegation_tool_schemas_for_mode(bool(settings.load_settings().get("delegation_async_enabled")))
     called = called_tool_names or set()
     if mode in ("workspace", "athena_delegation"):
-        if "search_codebase" not in called:
+        if "search_codebase" not in called and not build_task:
             tools = [t for t in tools if t.get("function", {}).get("name") not in _SEARCH_GATED_TOOL_NAMES]
-        if (mode == "athena_delegation" and exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
+        if (mode == "athena_delegation" and exploration_call_count >= th["self_investigation"]
                 and not (called & _DELEGATION_TOOL_NAMES)):
             tools = [t for t in tools if t.get("function", {}).get("name") not in _EXPLORATION_TOOL_NAMES]
-        if mode == "workspace" and search_codebase_call_count >= _WORKSPACE_SEARCH_CODEBASE_THRESHOLD:
+        if mode == "workspace" and search_codebase_call_count >= th["workspace_search"]:
             tools = [t for t in tools if t.get("function", {}).get("name") != "search_codebase"]
         if mode == "athena_delegation" and "plan_delegation" in called:
             # Hard commitment: once a plan has been submitted, any
@@ -552,14 +723,14 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
             # plan_delegation step led to abandoning the plan entirely
             # in favor of reworded, one-at-a-time retries.
             tools = [t for t in tools if t.get("function", {}).get("name") != "run_delegation_step"]
-    if total_tool_call_count >= _PLAN_REQUIRED_THRESHOLD and "write_plan" not in called:
+    if total_tool_call_count >= th["plan_required"] and "write_plan" not in called:
         tools = [t for t in tools if t.get("function", {}).get("name") == "write_plan"]
     elif plan_complete:
         # Every step is done/failed -- the only way forward is to
         # explicitly declare more work via a fresh write_plan, or just
         # answer now that there's nothing left to justify another call.
         tools = [t for t in tools if t.get("function", {}).get("name") == "write_plan"]
-    elif plan_exists and calls_since_plan_touch >= _PLAN_CHECKIN_THRESHOLD:
+    elif plan_exists and calls_since_plan_touch >= th["plan_checkin"]:
         # Forced check-in: report progress against the existing plan
         # before making any other kind of call.
         tools = [t for t in tools if t.get("function", {}).get("name") in ("write_plan", "update_plan_step")]
@@ -623,7 +794,7 @@ class ChatIn(BaseModel):
     endpoint_url: str = ""  # empty = use the default OLLAMA_URL
     search_url: str = ""  # SearXNG base URL; empty = web_search/web_fetch tools unavailable
     images: list = []  # base64-encoded image strings (no data: prefix), passed through to vision-capable models
-    attachments: list = []  # [{"name": str, "content": str}] text-file attachments, inlined into the prompt
+    attachments: list = []  # [{"name": str, "content": str}] text-file attachments inlined into the prompt, or [{"name": str, "base64": str}] for PDFs -- text is extracted server-side and inlined the same way
     allowed_tools: Optional[List[str]] = None  # None = no restriction (normal chat); a task run passes its own explicit allowlist
     allowed_skills: Optional[List[str]] = None  # same, for which skills load_skill can actually load
     provider: str = ""  # "" = Ollama-native (default); "openai"/"openrouter"/"custom"/"anthropic"/"google" route through an adapter in _stream_completion
@@ -767,9 +938,22 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
     if name == "load_skill":
         return skills.load_skill(args.get("name", ""))
     if name == "bash_read_only":
-        return bash_tools.execute_readonly_bash(args.get("command", ""), args.get("args", []), ctx.workspace, args.get("pipe_to"))
+        command, cmd_args, pipe_to = bash_tools.normalize_read_only_call(args.get("command", ""), args.get("args") or [], args.get("pipe_to"))
+        return bash_tools.execute_readonly_bash(command, cmd_args, ctx.workspace, pipe_to)
+    if name in ("bash_exec", "bash_exec_start"):
+        args = {**args}
+        args["command"], args["args"] = bash_tools.normalize_command_line(args.get("command", ""), args.get("args") or [])
     if name == "bash_exec":
-        return bash_tools.execute_write_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
+        command = args.get("command", "")
+        if command in bash_tools.BASH_ALLOWED_COMMANDS and command not in bash_tools.BASH_EXEC_ALLOWED_COMMANDS:
+            # grep/cat/ls/... sent to bash_exec: models reach for the wrong shell tool constantly
+            # (19 of 36 recorded bash_exec calls). The read-only tool handles it safely, so run it
+            # there instead of bouncing the call back as an error.
+            result = bash_tools.execute_readonly_bash(command, args.get("args", []), ctx.workspace, args.get("pipe_to"))
+            if isinstance(result, dict) and not result.get("error"):
+                result = {**result, "note": f"'{command}' is a read-only command, so it ran via bash_read_only."}
+            return result
+        return bash_tools.execute_write_bash(command, args.get("args", []), ctx.workspace)
     if name == "bash_exec_start":
         return bash_tools.start_background_bash(args.get("command", ""), args.get("args", []), ctx.workspace)
     if name == "bash_exec_check":
@@ -789,11 +973,19 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
     if name == "read_file":
         return file_tools.read_file(ctx.workspace, args.get("path", ""), args.get("offset", 0))
     if name == "write_file":
-        return file_tools.write_file(ctx.workspace, args.get("path", ""), args.get("content", ""))
+        return file_tools.write_file(ctx.workspace, args.get("path", ""), args.get("content", ""), bool(args.get("append")))
     if name == "edit_file":
         return file_tools.edit_file(ctx.workspace, args.get("path", ""), args.get("old_text", ""), args.get("new_text", ""))
     if name == "replace_lines":
         return file_tools.replace_lines(ctx.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
+    if name == "generate_pdf":
+        return pdf_tools.generate_pdf(args, ctx.workspace)
+    if name == "generate_background_music":
+        return background_music.generate_background_music(args, ctx.workspace)
+    if name == "preview":
+        return preview_tools.preview(ctx.workspace, args)
+    if name == "scaffold":
+        return scaffold_tools.scaffold(ctx.workspace, args)
     if name == "backup_file":
         return backup_tools.backup_file(args.get("path", ""))
     if name == "restore_file":
@@ -803,7 +995,7 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
         if ctx.require_athena_bots_session and ctx.session_id != bots.ATHENA_BOTS_SESSION_ID:
             return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
         if name == "list_bots":
-            return bots._list_bots_tool()
+            return bots._list_bots_for_model()
         if name == "draft_bot_prompt":
             return bots._draft_bot_prompt(args.get("name", ""), args.get("job_scope", ""), args.get("tools", []), args.get("additional_constraints"))
         if name == "message_bot":
@@ -820,18 +1012,20 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
             return bots._update_bot_tool(args.get("bot_id"), args.get("description"), args.get("allowed_tools"))
         if name == "run_delegation_step":
             task_context.get_task_hash(ctx.session_id)
+            task_text = task_context.remember_task_text(getattr(ctx.req, "message", "") if ctx.req is not None else "")
             if ctx.req is not None and settings.load_settings().get("delegation_async_enabled"):
-                return delegation_jobs._run_delegation_step_async_tool(ctx.req, args.get("bot_id"), args.get("instruction", ""))
-            return bots._run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""))
+                return delegation_jobs._run_delegation_step_async_tool(ctx.req, args.get("bot_id"), args.get("instruction", ""), args.get("known"), args.get("report"), task_text)
+            return bots._run_delegation_step_tool(args.get("bot_id"), args.get("instruction", ""), args.get("known"), args.get("report"), task_text)
         if name == "read_scratch_file":
             return bots._read_scratch_file(args.get("bot_name", ""))
         if name == "read_tool_call_history":
             return bots._read_tool_call_history(args.get("bot_name", ""))
         if name == "plan_delegation":
             task_context.get_task_hash(ctx.session_id)
+            task_text = task_context.remember_task_text(getattr(ctx.req, "message", "") if ctx.req is not None else "")
             if ctx.req is not None and settings.load_settings().get("delegation_async_enabled"):
-                return delegation_jobs._plan_delegation_async_tool(ctx.req, args.get("steps", []))
-            return bots._plan_delegation_tool(args.get("steps", []))
+                return delegation_jobs._plan_delegation_async_tool(ctx.req, args.get("steps", []), task_text)
+            return bots._plan_delegation_tool(args.get("steps", []), task_text)
 
     if name == "search_codebase":
         return _search_codebase(args.get("query", ""), args.get("limit", 3), workspace=ctx.workspace)
@@ -983,6 +1177,25 @@ def detect_models(req: DetectModelsIn):
         return {"error": f"Endpoint responded with HTTP {resp.status_code}"}
     except Exception as e:
         return {"error": f"Could not reach endpoint: {e}"}
+
+
+class ModelProfileIn(BaseModel):
+    model: str
+    url: str = ""
+    provider: str = ""
+    api_key: str = ""
+
+@app.post("/api/model-profile")
+def get_model_profile(req: ModelProfileIn):
+    """What the harness knows about a model and which tier it runs under -- for the
+    Models page. Probes the endpoint (cached), so the first call can take ~2s. POST
+    so an API key never lands in a URL (and from there in access logs)."""
+    p = model_profile.resolve(req.provider, req.url, req.api_key, req.model)
+    return {
+        "tier": p["tier"], "tier_source": p["tier_source"], "vision": p["vision"],
+        "thresholds": p["thresholds"], "facts": p["facts"], "max_context": model_profile.max_context(p["facts"]), "summary": model_profile.summarize(p["facts"]),
+        "override": model_profile.get_override(req.model),
+    }
 
 
 @app.get("/api/workspace/browse")
@@ -1217,6 +1430,19 @@ def _stream_openai_compatible(req, messages, tools, cancel_flag, timeout=_MAIN_A
     }
     if tools:
         payload["tools"] = tools
+    if req.think and req.provider == "custom":
+        # "reasoning_effort" is real OpenAI's own field for o-series/gpt-5
+        # reasoning models, but OpenAI validates it strictly against the
+        # specific model -- sending it to a non-reasoning model is a hard
+        # 400, "Unsupported parameter". Self-hosted OpenAI-compatible
+        # servers (this is what Strata documents) are typically permissive
+        # about extra fields, so this is scoped to provider == "custom"
+        # only, not real openai/openrouter -- broadening it would risk
+        # breaking existing non-reasoning-model requests that currently
+        # work, to fix a provider nobody reported this for. "max" isn't a
+        # level Strata recognizes (only none/low/medium/high), so it
+        # collapses to its ceiling, "high".
+        payload["reasoning_effort"] = "high" if req.think == "max" else req.think
     accumulated_tool_calls = {}
     try:
         with httpx.stream("POST", url, headers=headers, json=payload, timeout=timeout) as resp:
@@ -1256,15 +1482,17 @@ def _stream_openai_compatible(req, messages, tools, cancel_flag, timeout=_MAIN_A
                 out_msg = {}
                 if delta.get("content"):
                     out_msg["content"] = delta["content"]
-                if delta.get("reasoning"):
-                    # OpenRouter's own extension for reasoning-capable
-                    # models -- separate from "content", and previously
-                    # not read at all here, so a model that reasons
-                    # before calling a tool (very common) had its
-                    # entire visible output silently dropped: nothing
-                    # in the thinking panel, nothing in the reply, only
-                    # the tool call itself showed up.
-                    out_msg["thinking"] = delta["reasoning"]
+                if delta.get("reasoning") or delta.get("reasoning_content"):
+                    # Two different field names for the same thing, depending
+                    # on the provider: OpenRouter uses "reasoning"; llama.cpp-
+                    # based servers (Strata, vLLM, SGLang -- the convention
+                    # DeepSeek-R1's API popularized) use "reasoning_content".
+                    # Previously only "reasoning" was read here, so a
+                    # reasoning model served through one of these had its
+                    # entire visible thinking silently dropped: nothing in
+                    # the thinking panel, nothing in the reply, only the
+                    # final tool call or answer showed up.
+                    out_msg["thinking"] = delta.get("reasoning") or delta.get("reasoning_content")
                 if delta.get("tool_calls"):
                     for tc_delta in delta["tool_calls"]:
                         idx = tc_delta.get("index", 0)
@@ -1672,7 +1900,10 @@ def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag, 
         "options": {"num_ctx": ctx_size},
         "stream": True,
     }
-    if req.think:
+    # Ollama rejects `think` outright ("<model> does not support thinking") for a
+    # model without that capability, so only send it unless /api/show said no.
+    # None (endpoint didn't say) is not "no" -- behavior is unchanged there.
+    if req.think and model_profile.thinking_supported("", (target_url or "").split("/api/")[0], "", req.model) is not False:
         # Ollama's own accepted shape: a boolean, or one of the exact
         # strings "low"/"medium"/"high"/"max" -- "none" (Athena's own
         # "force thinking off" option) is the one value that needs
@@ -1725,14 +1956,25 @@ def _stream_completion(req, target_url, messages, tools, ctx_size, cancel_flag, 
                 continue
 
 
+def _extract_pdf_text(b64_data: str) -> str:
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(base64.b64decode(b64_data)))
+        return "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    except Exception as e:
+        return f"[Could not read PDF: {e}]"
+
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
     activity.touch()
     logger.debug(f"model={req.model!r} endpoint_url={req.endpoint_url!r}")
     effective_message = req.message
     for att in req.attachments:
-        att_content = (att.get("content") or "")[:20000]
-        effective_message += f"\n\n[Attached file: {att.get('name', 'file')}]\n```\n{att_content}\n```"
+        if att.get("base64"):
+            att_content = _extract_pdf_text(att["base64"])[:20000]
+        else:
+            att_content = (att.get("content") or "")[:20000]
+        effective_message += f"\n\n[Attached file: {att.get('name', 'file')} -- full contents below, already extracted. This is not a file on disk; there is nothing to search or open for it.]\n```\n{att_content}\n```"
     _user_msg_id = lcm_client.send_to_lcm(req.session_id, "user", effective_message, has_image=bool(req.images))
     if _user_msg_id is None:
         # Don't silently generate a response for a message that was
@@ -1754,7 +1996,12 @@ def chat_stream(req: ChatIn):
     # bound to it, regardless of how it reads an ambiguous prompt.
     mode, effective_workspace = _resolve_mode_and_workspace(req)
     req.workspace = effective_workspace
-    system_prompt = _get_mode_system_prompt(mode, req)
+    # Once per turn, never per round: a project must not flip between build and
+    # maintain halfway through a turn, and probing the endpoint is cached anyway.
+    profile = model_profile.resolve(req.provider, req.endpoint_url, req.api_key, req.model)
+    _thresholds = _gate_thresholds_for(mode, profile)
+    _build_task = mode == "workspace" and workspace_kind.is_build_task(effective_workspace)
+    system_prompt = _get_mode_system_prompt(mode, req, build_task=_build_task)
     # The maximum tool set this turn could ever reach (as if
     # search_codebase were already called) -- used for ctx_size estimation
     # below, and as round 0's starting tools payload. generate()'s round
@@ -1769,7 +2016,7 @@ def chat_stream(req: ChatIn):
     # costs nothing extra in the common case -- the one time it genuinely
     # changes is exactly the one time the model's options should visibly
     # shrink.
-    tools = _get_mode_tools(mode, req, called_tool_names={"search_codebase"})
+    tools = _get_mode_tools(mode, req, called_tool_names={"search_codebase"}, thresholds=_thresholds, build_task=_build_task)
     logger.debug(f"tools for this turn: {[t.get('function', {}).get('name') for t in tools]}")
 
     _dynamic_context_msg = _get_dynamic_context_message(req)
@@ -1788,10 +2035,11 @@ def chat_stream(req: ChatIn):
             if _m.get("role") == "user":
                 _m["images"] = req.images
                 break
-    effective_max = req.max_ctx if req.max_ctx > 0 else MAX_CTX_DEFAULT
-    ctx_size = pick_dynamic_ctx(messages, tools, max_ctx=effective_max)
+    model_max_ctx = model_profile.max_context(profile["facts"])
     if req.max_ctx > 0:
-        ctx_size = req.max_ctx
+        ctx_size = min(req.max_ctx, model_max_ctx) if model_max_ctx else req.max_ctx
+    else:
+        ctx_size = pick_dynamic_ctx(messages, tools, max_ctx=min(MAX_CTX_DEFAULT, model_max_ctx or MAX_CTX_DEFAULT))
     prompt_tokens = estimate_tokens(messages, tools)
 
     # Per-turn plan state, mutated in place (never rebound) via
@@ -1823,6 +2071,7 @@ def chat_stream(req: ChatIn):
         gate_error = _check_tool_gate(
             mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count,
             pre_round_search_codebase_count, pre_round_plan_exists, pre_round_calls_since_plan_touch, pre_round_plan_complete,
+            thresholds=_thresholds, build_task=_build_task,
         )
         if gate_error is not None:
             return gate_error
@@ -1897,19 +2146,24 @@ def chat_stream(req: ChatIn):
                 total_tool_calls=_total_tool_call_count, outcome=outcome, **extra,
             )
 
-        log_trace_event(req.session_id, "turn_start", mode=mode, model=req.model, workspace=req.workspace, endpoint_url=req.endpoint_url, think=req.think)
+        log_trace_event(
+            req.session_id, "turn_start", mode=mode, model=req.model, workspace=req.workspace, endpoint_url=req.endpoint_url, think=req.think,
+            tier=profile["tier"], tier_source=profile["tier_source"], engine=profile["facts"]["engine"], build_task=_build_task,
+        )
         yield f"data: {json.dumps({'user_message_id': _user_msg_id})}\n\n"
         full_reply = ""
         full_thinking = ""
         full_tool_calls = []
         _target_url = (req.endpoint_url.rstrip("/") + "/api/chat") if req.endpoint_url else OLLAMA_URL
         _messages = list(messages)
+        _turn_base = len(_messages)          # everything after this index was produced during this turn
         logger.debug(f"_messages roles={[m.get('role') for m in _messages]!r}")
         MAX_ROUNDS = 1000  # effectively unbounded; the stop button is the real safety net now
         last_eval_count = None
         last_eval_duration = None
         consecutive_loop_detections = 0
         consecutive_ungrounded_claims = 0
+        consecutive_lost_tool_calls = 0
         consecutive_empty_final_answers = 0
         made_any_tool_calls_this_turn = False
         # Tool availability is recomputed every round from the counters
@@ -1926,12 +2180,15 @@ def chat_stream(req: ChatIn):
         _search_codebase_call_count = 0
         _search_gate_notified = False
         _total_tool_call_count = 0
+        _calls_without_progress = 0
+        _preview_image_msg = None
         _plan_gate_notified = False
         _delegation_commitment_notified = False
         _calls_since_plan_touch = 0
 
         for _round in range(MAX_ROUNDS):
             round_reply = ""
+            round_thinking = ""
             round_tool_calls = []
             loop_detected = False
 
@@ -1966,6 +2223,7 @@ def chat_stream(req: ChatIn):
                         thinking_delta = msg.get("thinking", "")
                         if thinking_delta:
                             full_thinking += thinking_delta
+                            round_thinking += thinking_delta
                             yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
                         delta = msg.get("content", "")
                         if delta:
@@ -2046,41 +2304,57 @@ def chat_stream(req: ChatIn):
             consecutive_loop_detections = 0
 
             if not round_tool_calls:
-                # A substantial, tool-free round arriving after this same
-                # turn already made real tool calls is the exact pattern
-                # behind a real, observed failure: the model made a few
-                # genuine tool calls, then started fabricating further
-                # "I read/found/fixed X" narration with no real tool
-                # activity behind it at all. This check is model-agnostic
-                # by design -- it never parses the text itself for
-                # language patterns (which would only ever catch one
-                # model's specific phrasing), it only checks the one
-                # verifiable fact available: whether a real, structured
-                # tool call actually happened. Only fires in workspace
-                # (coding-harness) sessions, where tool use is expected,
-                # and only once real tool use has already started this
-                # turn, so a genuine short question or a real final
-                # answer that never needed tools at all is unaffected.
-                if made_any_tool_calls_this_turn and req.workspace and len(round_reply) > 400:
-                    consecutive_ungrounded_claims += 1
-                    if consecutive_ungrounded_claims >= 3:
-                        failure_msg = "I started describing further progress without actually making the tool calls to back it up, and wasn't able to correct that after a few attempts -- stopping here rather than continuing to report unverified work."
+                # The model tried to call a tool but it never became a real call: its output (thinking or
+                # reply) carries tool-call text and the backend returned no structured call. Observed with
+                # Qwen3.6 on Ollama: the round was 122 tokens of thinking ending in </parameter></function>
+                # </tool_call> with no opening tag, no body, done_reason "stop". Without this the turn ends
+                # as "completed" with the work silently unfinished.
+                if _leaked_tool_markup(round_reply, round_thinking):
+                    consecutive_lost_tool_calls += 1
+                    if consecutive_lost_tool_calls >= 3:
+                        failure_msg = "I tried to make a tool call several times in a row but the model's output never came through as a usable call, so nothing was done on those attempts -- stopping here rather than leaving you waiting. Asking again, or switching models, usually gets past it."
                         full_reply += ("\n\n" + failure_msg if full_reply else failure_msg)
                         _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                         yield f"data: {json.dumps({'delta': '\n\n' + failure_msg})}\n\n"
-                        _log_turn_end("ungrounded_claims_giveup")
+                        _log_turn_end("lost_tool_call_giveup")
+                        yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
+                        return
+                    if round_reply.strip():
+                        _messages.append({"role": "assistant", "content": _TOOL_MARKUP.sub("", round_reply)})
+                    _messages.append({"role": "user", "content": (
+                        "Your last output ended with tool-call text, but no tool call actually ran -- the call "
+                        "did not come through as a real call (it was cut off or malformed), so nothing you "
+                        "meant to do has happened. Make that call again now as a real tool call. If it was a "
+                        "large file, write it in smaller pieces: write_file the first part, then write_file "
+                        "with append set to true for each next part."
+                    )})
+                    continue
+                consecutive_lost_tool_calls = 0
+
+                # A tool-free reply after real tool calls is normally the final answer, so a long one is not
+                # suspicious by itself. The real failure -- seen in practice -- is the model narrating work on
+                # files it never actually looked at ("I read X and found..."), so the check is mechanical: does
+                # the reply name files that no tool call, result, earlier message or workspace file accounts
+                # for? Only then is it nudged, and the nudge names the files. Only in workspace sessions, where
+                # tool use is expected, and only once real tool use has started this turn.
+                invented = _ungrounded_paths(round_reply, _messages, _turn_base, req.workspace) if (made_any_tool_calls_this_turn and req.workspace and len(round_reply) > 400) else []
+                if invented:
+                    consecutive_ungrounded_claims += 1
+                    shown = ", ".join(invented[:5])
+                    if consecutive_ungrounded_claims >= 3:
+                        failure_msg = f"I described files I never actually looked at ({shown}) and wasn't able to correct that after a few attempts -- stopping here rather than continuing to report unverified work."
+                        full_reply += ("\n\n" + failure_msg if full_reply else failure_msg)
+                        _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
+                        yield f"data: {json.dumps({'delta': '\n\n' + failure_msg})}\n\n"
+                        _log_turn_end("ungrounded_claims_giveup", files=invented[:5])
                         yield f"data: {json.dumps({'done': True, 'ctx_used': ctx_size, 'prompt_tokens': prompt_tokens, 'assistant_message_id': _msg_id})}\n\n"
                         return
                     _messages.append({"role": "assistant", "content": round_reply})
                     _messages.append({"role": "user", "content": (
-                        "You wrote a substantial amount of text describing further progress -- reading, "
-                        "checking, or changing something -- but did not actually make a real tool call this "
-                        "round to back any of it up. Do not treat anything you just described as having "
-                        "actually happened; it did not. If you genuinely already have everything you need "
-                        "from real tool results earlier in this conversation, state your actual final answer "
-                        "now, directly and concisely, without describing further actions you have not taken. "
-                        "Otherwise, make a real tool call right now for whatever you still need, instead of "
-                        "describing what it would show."
+                        f"Your reply names {shown}, but no tool call or result this turn ever showed or touched "
+                        "that, and it is not in the workspace. Do not treat anything you said about it as having "
+                        "happened. Either make a real tool call to look at it now, or state your answer again "
+                        "using only what the tool results actually showed."
                     )})
                     continue
                 consecutive_ungrounded_claims = 0
@@ -2095,7 +2369,7 @@ def chat_stream(req: ChatIn):
                 # Nudge for an actual answer a couple of times before
                 # giving up honestly, same shape as the other two
                 # recovery paths above.
-                if made_any_tool_calls_this_turn and not full_reply.strip():
+                if made_any_tool_calls_this_turn and not round_reply.strip():
                     consecutive_empty_final_answers += 1
                     if consecutive_empty_final_answers >= 3:
                         failure_msg = "I did some real investigation this turn but wasn't able to put together an actual answer from it after a few attempts -- stopping here rather than ending with nothing. Check the tool results above for what was actually found."
@@ -2123,12 +2397,12 @@ def chat_stream(req: ChatIn):
             made_any_tool_calls_this_turn = True
             consecutive_ungrounded_claims = 0
 
-            _gate_was_open = _exploration_call_count < _SELF_INVESTIGATION_TOOL_THRESHOLD
-            _search_gate_was_open = _search_codebase_call_count < _WORKSPACE_SEARCH_CODEBASE_THRESHOLD
-            _plan_gate_was_open = _total_tool_call_count < _PLAN_REQUIRED_THRESHOLD
+            _gate_was_open = _exploration_call_count < _thresholds["self_investigation"]
+            _search_gate_was_open = _search_codebase_call_count < _thresholds["workspace_search"]
+            _plan_gate_was_open = _calls_without_progress < _thresholds["plan_required"]
             _delegation_commitment_was_open = "plan_delegation" not in _called_tool_names
             _plan_was_complete = _plan_is_complete(_current_plan)
-            _checkin_gate_was_open = (not _plan_was_complete) and _calls_since_plan_touch < _PLAN_CHECKIN_THRESHOLD
+            _checkin_gate_was_open = (not _plan_was_complete) and _calls_since_plan_touch < _thresholds["plan_checkin"]
             # Snapshot of gate state as of the START of this round, before
             # this round's own calls get folded into the running totals
             # below -- passed into _execute_tool_call so a tool unlocked by
@@ -2137,7 +2411,7 @@ def chat_stream(req: ChatIn):
             _pre_round_called = set(_called_tool_names)
             _pre_round_exploration_count = _exploration_call_count
             _pre_round_search_codebase_count = _search_codebase_call_count
-            _pre_round_total_count = _total_tool_call_count
+            _pre_round_total_count = _calls_without_progress
             _pre_round_plan_exists = bool(_current_plan)
             _pre_round_calls_since_plan_touch = _calls_since_plan_touch
             _pre_round_plan_complete = _plan_was_complete
@@ -2153,17 +2427,19 @@ def chat_stream(req: ChatIn):
                 else:
                     _calls_since_plan_touch += 1
                 _total_tool_call_count += 1
+                _calls_without_progress += 1
 
             # Model wants to call tool(s) -- execute each, tell the
             # frontend what's happening, then loop back with results
             # appended so the model can use them for its next turn.
             _messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
+            _round_shots = []
             for tc in round_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "unknown")
                 log_trace_event(req.session_id, "tool_call", round=_round, tool=tool_name, args=tc.get("function", {}).get("arguments"))
                 yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
                 fingerprint = _tool_call_fingerprint(tc)
-                repeat_count = _tool_call_fingerprints.count(fingerprint)
+                repeat_count = _tool_call_fingerprints.count((tool_name, fingerprint))
                 similar_query = None
                 if repeat_count < 2 and tool_name in _SIMILARITY_CHECKED_TOOL_NAMES:
                     fn_args = tc.get("function", {}).get("arguments", {})
@@ -2196,7 +2472,7 @@ def chat_stream(req: ChatIn):
                         tc, _pre_round_called, _pre_round_exploration_count, _pre_round_total_count, _pre_round_search_codebase_count,
                         _pre_round_plan_exists, _pre_round_calls_since_plan_touch, _pre_round_plan_complete,
                     )
-                    _tool_call_fingerprints.append(fingerprint)
+                    _tool_call_fingerprints.append((tool_name, fingerprint))
                     if len(_tool_call_fingerprints) > 20:
                         _tool_call_fingerprints.pop(0)
                     if tool_name in _SIMILARITY_CHECKED_TOOL_NAMES:
@@ -2211,6 +2487,13 @@ def chat_stream(req: ChatIn):
                             _recent_queries_by_tool[tool_name].append(query)
                             if len(_recent_queries_by_tool[tool_name]) > 10:
                                 _recent_queries_by_tool[tool_name].pop(0)
+                if isinstance(result, dict) and "_images" in result:
+                    _round_shots = result.pop("_images") or _round_shots
+                _calls_without_progress, _calls_since_plan_touch = _credit_progress(
+                    tool_name, result, _calls_without_progress, _calls_since_plan_touch,
+                )
+                if tool_name in _STATE_CHANGING_TOOL_NAMES and _result_is_progress(tool_name, result):
+                    _tool_call_fingerprints[:] = _forget_stale_repeats(_tool_call_fingerprints)
                 _result_error = result.get("error") if isinstance(result, dict) else None
                 log_trace_event(
                     req.session_id, "tool_blocked" if isinstance(_result_error, str) and _result_error.startswith("BLOCKED:") else "tool_result",
@@ -2227,8 +2510,19 @@ def chat_stream(req: ChatIn):
                 # The person always sees the real, full result above (nothing hidden) --
                 # only what actually goes back into the model's own context gets compressed,
                 # since that's the thing burning tokens, not what's shown in the UI.
-                _result_for_context = result if tool_name in tool_output.UNCOMPRESSED_TOOL_NAMES else tool_output.compress_tool_result(result)
+                # The UI gets screenshot URLs; the model has no use for them (and every token costs prefill time).
+                _context_source = {k: v for k, v in result.items() if k != "screenshot_urls"} if tool_name == "preview" and isinstance(result, dict) else result
+                _result_for_context = _context_source if tool_name in tool_output.UNCOMPRESSED_TOOL_NAMES else tool_output.compress_tool_result(_context_source)
                 _messages.append({"role": "tool", "content": json.dumps(_result_for_context)})
+
+            # Screenshots go to the model only if it can see them, and only the latest
+            # set is kept (an older render is stale and each one costs real tokens).
+            # They never enter the UI stream, the trace log, or saved history.
+            if _round_shots and profile["vision"]:
+                if _preview_image_msg in _messages:
+                    _messages.remove(_preview_image_msg)
+                _preview_image_msg = {"role": "user", "content": "Screenshots from the preview you just ran (desktop first, then mobile):", "images": _round_shots}
+                _messages.append(_preview_image_msg)
 
             # Recomputed here (after this round's calls actually ran, not
             # right after counting their names above) because plan_exists/
@@ -2249,14 +2543,15 @@ def chat_stream(req: ChatIn):
                 mode, req,
                 called_tool_names=_called_tool_names,
                 exploration_call_count=_exploration_call_count,
-                total_tool_call_count=_total_tool_call_count,
+                total_tool_call_count=_calls_without_progress,
                 search_codebase_call_count=_search_codebase_call_count,
                 plan_exists=bool(_current_plan),
                 calls_since_plan_touch=_calls_since_plan_touch,
                 plan_complete=_plan_is_complete(_current_plan),
+                thresholds=_thresholds, build_task=_build_task,
             )
 
-            if (_gate_was_open and _exploration_call_count >= _SELF_INVESTIGATION_TOOL_THRESHOLD
+            if (_gate_was_open and _exploration_call_count >= _thresholds["self_investigation"]
                     and mode == "athena_delegation" and not _investigation_gate_notified
                     and not (_called_tool_names & _DELEGATION_TOOL_NAMES)):
                 _investigation_gate_notified = True
@@ -2269,7 +2564,7 @@ def chat_stream(req: ChatIn):
                     "investigation done instead of continuing to look yourself."
                 )})
 
-            if (_search_gate_was_open and _search_codebase_call_count >= _WORKSPACE_SEARCH_CODEBASE_THRESHOLD
+            if (_search_gate_was_open and _search_codebase_call_count >= _thresholds["workspace_search"]
                     and mode == "workspace" and not _search_gate_notified):
                 _search_gate_notified = True
                 _messages.append({"role": "user", "content": (
@@ -2279,7 +2574,7 @@ def chat_stream(req: ChatIn):
                     "the same search."
                 )})
 
-            if (_plan_gate_was_open and _total_tool_call_count >= _PLAN_REQUIRED_THRESHOLD
+            if (_plan_gate_was_open and _calls_without_progress >= _thresholds["plan_required"]
                     and not _plan_gate_notified and "write_plan" not in _called_tool_names):
                 _plan_gate_notified = True
                 _messages.append({"role": "user", "content": (
@@ -2312,7 +2607,7 @@ def chat_stream(req: ChatIn):
             # legitimately re-arm and fire again later in a long turn --
             # that recurrence is the whole point, not a bug to dedupe away.
             elif (_checkin_gate_was_open and not _plan_now_complete
-                    and _current_plan and _calls_since_plan_touch >= _PLAN_CHECKIN_THRESHOLD):
+                    and _current_plan and _calls_since_plan_touch >= _thresholds["plan_checkin"]):
                 _messages.append({"role": "user", "content": (
                     f"You've made {_calls_since_plan_touch} tool calls since you last touched your plan. Only "
                     "update_plan_step or write_plan are available until you check in -- call update_plan_step "
@@ -2549,6 +2844,8 @@ class SettingsIn(BaseModel):
     bot_ptc_enabled: Optional[bool] = None
     delegation_async_enabled: Optional[bool] = None
     laya_gating_enabled: Optional[bool] = None
+    model_profiles: Optional[dict] = None  # {model id: {"tier": "small|standard|large", "vision": bool}} manual overrides
+    workspace_mode: Optional[str] = None   # "auto" (default) | "build" | "maintain"
 
 class MCPServerIn(BaseModel):
     name: str

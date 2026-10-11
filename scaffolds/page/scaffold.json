@@ -1,0 +1,5 @@
+{
+  "description": "bare responsive page (any site, tool, form or app UI): reset, readable type, color/font tokens; layout, look and wording are yours",
+  "entry": "index.html",
+  "notes": "Nothing here is design: the palette and fonts are neutral defaults in the :root block at the top of styles.css. Choose colors, type and shape that fit what you are building, write the sections and layout yourself, and keep the tokens so the whole page restyles from one place. Link more files as needed."
+}

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Studio Name - one-line description of what you do</title>
+  <meta name="description" content="Replace with one or two sentences describing the site; search engines show this.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-hero="{{HERO}}" data-cards="{{CARDS}}">
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="container bar">
+      <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"></span>Studio Name</a>
+      <button class="nav-toggle" aria-expanded="false" aria-controls="nav">Menu</button>
+      <nav id="nav" class="nav" aria-label="Main">
+        <a href="#work">Work</a>
+        <a href="#about">About</a>
+        <a href="#contact" class="btn btn-small">Get in touch</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="container hero-grid">
+        <div>
+          <p class="eyebrow">Independent studio</p>
+          <h1>A clear headline that says what you make and who it is for</h1>
+          <p class="lede">One or two sentences that back up the headline: the problem you solve, how you work, and why someone should keep scrolling.</p>
+          <div class="actions">
+            <a class="btn" href="#contact">Start a project</a>
+            <a class="btn btn-ghost" href="#work">See our work</a>
+          </div>
+        </div>
+        <div class="hero-art" role="img" aria-label="Decorative abstract shapes">
+          <span class="shape s1"></span><span class="shape s2"></span><span class="shape s3"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="services">
+      <div class="container">
+        <h2>What we do</h2>
+        <p class="section-lede">A short sentence introducing the three things below.</p>
+        <div class="cards">
+          <article class="card">
+            <h3>First service</h3>
+            <p>Two lines describing this service in plain language, focused on the outcome rather than the process.</p>
+          </article>
+          <article class="card">
+            <h3>Second service</h3>
+            <p>Two lines describing this service in plain language, focused on the outcome rather than the process.</p>
+          </article>
+          <article class="card">
+            <h3>Third service</h3>
+            <p>Two lines describing this service in plain language, focused on the outcome rather than the process.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tint" id="work">
+      <div class="container">
+        <h2>Selected work</h2>
+        <p class="section-lede">Replace the tiles with real project images when you have them.</p>
+        <ul class="gallery">
+          <li><figure><div class="tile t1"></div><figcaption><strong>Project one</strong><span>Branding and website</span></figcaption></figure></li>
+          <li><figure><div class="tile t2"></div><figcaption><strong>Project two</strong><span>Product design</span></figcaption></figure></li>
+          <li><figure><div class="tile t3"></div><figcaption><strong>Project three</strong><span>Campaign</span></figcaption></figure></li>
+          <li><figure><div class="tile t4"></div><figcaption><strong>Project four</strong><span>Illustration</span></figcaption></figure></li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" id="about">
+      <div class="container split">
+        <div>
+          <h2>About us</h2>
+          <p>A paragraph about who you are and what you care about. Keep it specific: a real detail is worth more than an adjective.</p>
+          <p>A second paragraph, if you need one, about how you work with clients and what they can expect.</p>
+        </div>
+        <dl class="facts">
+          <div><dt>Founded</dt><dd>2020</dd></div>
+          <div><dt>Projects delivered</dt><dd>120+</dd></div>
+          <div><dt>Based in</dt><dd>Your city</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="section section-dark" id="contact">
+      <div class="container contact">
+        <div>
+          <h2>Let's talk</h2>
+          <p>Tell us a little about your project and we will reply within two working days.</p>
+        </div>
+        <form class="form" action="#" onsubmit="return false">
+          <label for="name">Your name</label>
+          <input id="name" name="name" autocomplete="name" required>
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required>
+          <label for="message">Message</label>
+          <textarea id="message" name="message" rows="4"></textarea>
+          <button class="btn" type="submit">Send message</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container foot">
+      <p>&copy; <span id="year">2026</span> Studio Name. All rights reserved.</p>
+      <p><a href="#top">Back to top</a></p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

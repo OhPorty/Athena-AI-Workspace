@@ -113,7 +113,7 @@ def create_bot(req: BotIn):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             req.name, req.endpoint_url, req.provider, req.api_key or "", req.model, req.description,
-            json.dumps(req.allowed_tools), req.unload_strategy, time.time(),
+            json.dumps(effective_tools(req.allowed_tools)), req.unload_strategy, time.time(),
         ))
         conn.commit()
         return {"id": cur.lastrowid}
@@ -130,7 +130,7 @@ def update_bot(bot_id: int, req: BotIn):
             WHERE id=?
         """, (
             req.name, req.endpoint_url, req.provider, req.api_key or "", req.model, req.description,
-            json.dumps(req.allowed_tools), req.unload_strategy, bot_id,
+            json.dumps(effective_tools(req.allowed_tools)), req.unload_strategy, bot_id,
         ))
         conn.commit()
         return {"id": bot_id}
@@ -186,7 +186,7 @@ def _call_bot_endpoint(bot, chat_messages):
     was offered to Ollama, it produced a fast non-answer, and got
     unloaded right after, which looked like an instant flash-on then
     flash-off with no real work ever happening."""
-    from main import _stream_completion, _SUB_AGENT_TIMEOUT  # deferred: main.py imports bots.py at module load
+    from main import _stream_completion, _SUB_AGENT_TIMEOUT, _leaked_tool_markup, _TOOL_MARKUP  # deferred: main.py imports bots.py at module load
     provider = bot.get("provider") or ""
     if provider not in _BOT_ALLOWED_PROVIDERS:
         return {"error": f"Bots may not use provider '{provider}' -- local inference only (Ollama-native or OpenAI-compatible)."}
@@ -204,7 +204,7 @@ def _call_bot_endpoint(bot, chat_messages):
     workspace = _settings_snapshot.get("workspace") or ""
     search_url = _settings_snapshot.get("search_url") or ""
     ptc_enabled = bool(_settings_snapshot.get("bot_ptc_enabled"))
-    allowed_tools = bot.get("allowed_tools") or []
+    allowed_tools = effective_tools(bot.get("allowed_tools"))
     messages = list(chat_messages)
     session_key = f"bot-{bot.get('id', 'unknown')}"
 
@@ -235,6 +235,8 @@ def _call_bot_endpoint(bot, chat_messages):
     # instead (see the per-tc loop), the same way _execute_bot_tool_program
     # already enforces it for calls made inside a PTC script.
     tool_schemas = _bot_tool_schemas(allowed_tools, None, ptc_enabled)
+    ctx_size = _bot_ctx_size(bot)
+    recoveries = 0
     for _ in range(_BOT_MAX_ROUNDS):
         activity.touch()
         round_reply = ""
@@ -242,7 +244,7 @@ def _call_bot_endpoint(bot, chat_messages):
         cancel_flag = threading.Event()
         try:
             round_thinking = ""
-            for chunk in _stream_completion(fake_req, target_url, messages, tool_schemas if tool_schemas else None, _BOT_CTX_SIZE, cancel_flag, timeout=_SUB_AGENT_TIMEOUT):
+            for chunk in _stream_completion(fake_req, target_url, messages, tool_schemas if tool_schemas else None, ctx_size, cancel_flag, timeout=_SUB_AGENT_TIMEOUT):
                 msg = chunk.get("message", {})
                 thinking_delta = msg.get("thinking", "")
                 if thinking_delta:
@@ -264,8 +266,23 @@ def _call_bot_endpoint(bot, chat_messages):
             return {"error": f"Bot endpoint call failed: {e}", "tool_call_history": tool_call_history}
 
         if not round_tool_calls:
+            # Small models sometimes end a round with nothing, or with tool-call text that never became a call.
+            # That is not an answer: nudge twice before letting an empty or garbled reply stand as the result.
+            blank = not round_reply.strip()
+            if (blank or _leaked_tool_markup(round_reply, round_thinking)) and recoveries < 2:
+                recoveries += 1
+                if round_reply.strip():
+                    messages.append({"role": "assistant", "content": _TOOL_MARKUP.sub("", round_reply)})
+                messages.append({"role": "user", "content": (
+                    "You produced no output. Continue: make the tool call you need to answer the question, or if you already have "
+                    "findings, call append_scratch_note with them now." if blank else
+                    "Your last output ended with tool-call text, but no call actually ran (it was cut off or malformed). "
+                    "Make that call again now as a real tool call."
+                )})
+                continue
             _log_bot_turn_end("completed")
             return {"content": round_reply, "tool_call_history": tool_call_history}
+        recoveries = 0
 
         messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
         for tc in round_tool_calls:
@@ -361,7 +378,7 @@ def _build_bot_system_prompt(bot):
     job_scope = bot.get("description") or f"Act as a general-purpose specialist assistant named {bot['name']}."
     tools = [
         {"name": t, "when_to_use": _BOT_TOOL_DESCRIPTIONS.get(t, "use when relevant to the job")}
-        for t in (bot.get("allowed_tools") or [])
+        for t in effective_tools(bot.get("allowed_tools"))
     ]
     return _draft_bot_prompt(bot["name"], job_scope, tools)
 
@@ -381,64 +398,54 @@ def _draft_bot_prompt(name, job_scope, tools, additional_constraints=None):
     constraints_block = f"\n\n## Additional Constraints\n{additional_constraints}" if additional_constraints else ""
     return f"""You are {name}.
 
-## Think Before Acting
-Plan your approach before calling a tool. If something doesn't match what you expected, say so plainly rather than guessing or working around it silently.
+Your job: {job_scope}
 
-## Simplicity First
-Investigate only what the job below actually requires. Don't expand scope on your own just because something seems related.
+You investigate and report. You never write files, run commands or change anything.
 
-## Reading Large Files
-Never read a large file from the start to the end just because it was mentioned in your job. Orient first -- use search_codebase or a targeted bash_read_only grep to find the specific section, function, or line range that actually answers your job, then use read_file with offset to read only that section. If read_file reports has_more: true, that does not mean you should keep paginating through the whole file -- only continue if the specific section you actually need is further in. You have a limited number of rounds and a limited context budget for this one job; exhaustively reading a large file page by page will leave you unable to report your findings at all. A partial, targeted read that answers the actual question is far more useful than an incomplete attempt at reading everything.
+How to work:
+- Say what you are about to look at before you call a tool, and say plainly when something is not what you expected instead of guessing.
+- Orient first: use search_codebase or a targeted grep to find the right spot, then read_file with an offset for just that section. A targeted partial read that answers the question beats an unfinished read of a whole large file; you have a limited number of rounds and a limited context.
+- Stay inside the question you were asked. If a tool fails, report the failure rather than retrying blindly or guessing.
 
-## Scoped Tool Use
-Use only the tools relevant to this job:
+Your tools:
 {tool_lines}
 
-## Goal-Driven, With a Stop Rule
-Your job: {job_scope}
-That's what must be true when you're done. If a tool call fails, report the failure honestly rather than retrying blindly or guessing at an answer anyway.
-
-## Relay, Don't Execute
-You investigate and report. You never write files, run commands, or make any real change yourself. When you've finished -- or when you're genuinely stuck -- if append_scratch_note is one of your tools, call it with your findings; that is the only way they actually reach Athena, so don't reply with them in plain text instead. If append_scratch_note is not one of your tools, reply with your findings directly. Either way, Athena is the one who acts on what you report -- you never do.{constraints_block}"""
+When you are done, or genuinely stuck, call append_scratch_note with your findings: that is the only way they reach Athena, and a plain-text reply is discarded. If append_scratch_note is not one of your tools, reply with your findings directly.{constraints_block}"""
 
 
 
 ATHENA_BOTS_SESSION_ID = "athena-bots-agent"
 
 
+def _roster_lines():
+    """The bots as the main agent needs to see them: id, what each can do, what it is for. Put in the prompt so
+    the ids are never guessed (a real run called plan_delegation with bot ids 1 and 2 for bots 19 and 22)."""
+    roster = _list_bots_for_model()
+    if not roster:
+        return "Your roster is empty: no bots exist yet."
+    return "Your bots:\n" + "\n".join(
+        f"- {b['name']} (id {b['id']}): can {b['can']}. {b['description'][:140].rstrip()}" for b in roster)
+
+
 def _get_bot_delegation_prompt_section(workspace=None, async_enabled=False, laya_gating_enabled=False):
     base = """
 
 ## Stay On the Current Task
-Treat the person's most recent message as your current task. Earlier messages are context and history, not standing instructions -- if something discussed a few messages ago feels similar to what's being asked now, that doesn't make it the same task. This doesn't change how you work: keep using search_codebase and delegating to bots for the current request exactly as you normally would. It only means match what you investigate or delegate to what was JUST asked, not to an earlier topic that happens to feel related.
+The person's most recent message is your current task. Earlier messages are background: something similar discussed before is not the same task.
 
 ## Bot Delegation
-You have access to a roster of specialist bots you can delegate investigate-only work to. Bots never write files or run commands -- they investigate and report back to you; you are the one who acts on their findings.
+You have a roster of bots for read-only investigation. They read, search and report; they never write files or run commands, so you act on what they find. Their ids are listed below; use exactly those ids.
 
-Delegate the moment you don't already know exactly which file (or small, specific set of files) contains the answer to what you're being asked -- that's the concrete signal to delegate, not a subjective judgment call about how 'significant' the task feels. If you'd have to explore to find out where the answer lives, that exploration is a bot's job, not yours. Decide once, before your first tool call on the topic: either you already know exactly where to look (read it yourself, it's fine), or you don't (delegate it, and don't explore it yourself first). Never investigate something yourself first and then ALSO delegate the same investigation to a bot -- that wastes both your own context and the bot's work for no reason.
+Delegate when you would otherwise have to explore to find where the answer lives. If you already know which file holds it, just read it yourself. Decide before your first tool call on a topic, and don't investigate it yourself and then delegate the same thing.
 
-Use list_bots to see who's available before delegating. draft_bot_prompt helps you write a new bot's system prompt in the right structure when creating one. Before creating a bot with create_bot, always check list_bots first and pick a name that isn't already in use -- a duplicate name will be rejected.
+Ask each bot one focused question per step (use plan_delegation when you already have several). A bot starts with no memory of earlier steps, but it is automatically told what the person asked, so any restriction they gave reaches it without you restating it. Add `known` for what you have already ruled out and `report` for the shape of answer you need. A step's findings come back in its result, along with a check on whether the files and lines the bot cites really exist.
 
-Bots must be broad, general-purpose specialists (e.g. "web research", "UI/frontend code", "backend/API work") -- never a narrow one-off bot scoped to a single specific task. Check whether an existing bot's field already fits before creating a new one; reuse it rather than creating something redundant. If the roster is currently empty, the first bot you create must be a fully general-purpose one with no specific niche at all, since there's nothing yet to route more specialized work to.
+Treat a report as evidence to weigh, not as the answer. When a step comes back possibly_fabricated, no_scratch_note, rejected or error, it did not produce a usable finding: fix the step and run it again once, or tell the person plainly what could not be found (read_tool_call_history shows what a bot actually did). A rejected step says what to change. Once you call plan_delegation, correct the plan and resubmit it instead of falling back to single steps. message_bot is for a quick informal question, not for investigation.
 
-## Carrying Constraints Into a Step
-A bot in an isolated delegation step knows NOTHING you and the person discussed in this conversation -- only the exact instruction text you write for that specific step. If the person gives you any constraint, restriction, or scope limit -- "don't look at X", "avoid anything listed in .gitignore", "only consider Y", "these files are personal, not for public documentation" -- you must explicitly restate that constraint inside the instruction text of every single step where it applies, every time, not just remember it yourself for the conversation. A constraint the person told YOU does not exist for the bot unless you wrote it into that step's instruction. This applies even when it feels repetitive across many steps -- repeating it costs nothing; omitting it means the bot has no way to know the restriction exists at all.
+When you need something from a large file, delegate that question: reading it yourself spends your context. Reading a small file you know is short is fine.
 
-## Two Ways to Talk to a Bot
-message_bot and message_room are ONLY for quick, informal back-and-forth that is not part of a real investigation -- e.g. asking a bot a one-off question with no expectation of a formal finding. message_bot is NEVER an acceptable way to perform, continue, retry, or work around delegation -- not as a first choice, not as a fallback, not "just to get an answer" when a delegation step is being difficult. If you are doing investigative work for the person, the only tools you may use are run_delegation_step and plan_delegation, start to finish, including every retry. read_room_messages lets you review any conversation's full history, including ones between two bots, since nothing here is hidden from you.
-
-For real investigative work, use run_delegation_step or plan_delegation. These give a bot one single-topic instruction as a completely fresh, isolated call -- no DM history, no memory of prior steps -- which keeps a bot from getting bogged down or confused by its own past turns on a long investigation. The bot appends its findings to its own scratch file via append_scratch_note rather than replying with them directly; you then call read_scratch_file for that bot to see what it found. Use plan_delegation when you already know the full set of single-topic steps you want to run -- give it the whole list at once rather than calling run_delegation_step yourself one at a time. Bots run on small, resource-constrained local models, so a single step's instruction must cover ONE focused topic, never a compound multi-part request (e.g. "cover these nine areas: setup, config, LCM, voice, coding harness, web UI, API, dependencies, project structure") -- a bundled instruction like that overwhelms a small model and produces slow, incomplete, or truncated results regardless of which tool carries it.
-
-If run_delegation_step or plan_delegation reports status "no_scratch_note", that step genuinely failed -- the bot did not record findings, full stop. Retry that one step once, ideally with a more explicit instruction telling the bot to call append_scratch_note. If it fails a second time, or if read_scratch_file comes back with no file, report that failure to the person honestly.
-
-## Committing to a Plan
-Once you call plan_delegation in a turn, that commitment is permanent for the rest of the turn: run_delegation_step structurally disappears from your tool list and will not come back. This is deliberate -- if a step in the plan comes back rejected (e.g. flagged as a compound, multi-topic instruction) or incomplete, the fix is to correct that step's wording (or split it into proper single-topic steps) and call plan_delegation again with the corrected list, never to fall back to one-off run_delegation_step calls as a workaround. Rewording the same ask and re-running it as an individual step instead of fixing and resubmitting the plan is exactly the pattern this exists to stop.
-
-Under no circumstances switch to message_bot to "get an answer anyway" when a delegation step fails -- an informal reply obtained that way is not a substitute for a real investigation, was not produced under the same isolation guarantees, and must never be presented as a delegation finding. A reported failure is always the correct outcome over a message_bot workaround.
-
-The same applies if a scratch file's content looks fabricated or ungrounded (invented file structure, generic placeholder-style detail, claims that don't match anything you already know to be true) -- treat that as a failed step too, not a usable finding. When you suspect that, use read_tool_call_history for that bot before deciding: it shows every tool call the bot actually made for each instruction and roughly what each one returned, so you can check whether the tool activity behind a note is really there instead of guessing from the note's wording alone.
-
-Do NOT use read_file yourself on a large file (main.py or anything else of comparable size) while doing delegation work. You have a limited context budget for your own turn, and reading a large file directly -- especially across the multiple paginated calls a big file requires -- burns through that budget on investigation you don't need to do yourself, since a bot has its own separate, isolated context for exactly this. If you need to know something about a large file, delegate that investigation to a bot via run_delegation_step or plan_delegation and read its findings back with read_scratch_file, the same as any other investigative work in this mode. read_file is fine for small, targeted files you already know are short."""
+Bots should be broad specialists (for example web research, frontend code, backend code), not one-off bots for a single task. Check list_bots before creating one; a duplicate name is rejected, and if the roster is empty the first bot should be a general-purpose one. draft_bot_prompt shows how a bot's prompt is assembled."""
+    base += "\n\n" + _roster_lines()
     if async_enabled:
         base += (
             "\n\n## Async Delegation\n"
@@ -446,21 +453,14 @@ Do NOT use read_file yourself on a large file (main.py or anything else of compa
             "immediately with {\"status\": \"pending\", \"handle\": <job id>} -- that is not a failure, and "
             "there is no findings content in that return value yet. You are free to keep working (answer the "
             "person, delegate another step, or just end your turn) while the bot works in the background. "
-            "When it finishes, its result arrives as a brand new message in this same conversation, and you "
-            "should react to it then -- read the bot's scratch file (and tool call history if anything about "
-            "it looks fabricated or ungrounded) and continue from there. Do not treat a 'pending' status as "
-            "something to retry, poll, or wait on synchronously; just proceed with your turn."
+            "When it finishes, its findings arrive as a brand new message in this same conversation; react to "
+            "it then. A 'pending' status is not a failure: don't retry, poll or wait on it, just continue your turn."
         )
     if laya_gating_enabled:
         base += (
             "\n\n## Automatic Fabrication Screening\n"
-            "A step that returns status \"possibly_fabricated\" already went through an automatic check comparing "
-            "the bot's scratch note against its actual tool call history -- you don't need to also manually judge "
-            "whether the note looks fabricated or ungrounded the way you would otherwise. Treat this status exactly "
-            "like a failed step: don't use its findings, and use read_tool_call_history/read_scratch_file yourself "
-            "before deciding whether to retry. A step returning \"done\" already passed this screening; you can "
-            "still double-check it yourself if something about it still feels off, but you no longer have to "
-            "eyeball every note for fabrication signs on your own."
+            "A step returning \"possibly_fabricated\" failed an automatic check of the bot's note against its actual "
+            "tool calls: don't use its findings. A \"done\" step passed that check."
         )
     defaults = (settings.load_settings().get("bot_creation_defaults") or {})
     naming_guidance = defaults.get("naming_guidance")
@@ -486,6 +486,19 @@ def _list_bots_tool():
     finally:
         conn.close()
 
+
+
+def _list_bots_for_model():
+    """What list_bots shows the main agent: who each bot is and what it can actually do. The raw rows
+    (endpoint, api key, a bare allowed_tools list) are for the app, not for a model's context."""
+    out = []
+    for b in _list_bots_tool():
+        tools = effective_tools(b.get("allowed_tools"))
+        out.append({
+            "id": b["id"], "name": b["name"], "description": b.get("description") or "", "model": b["model"],
+            "tools": tools, "can": ", ".join(_capabilities(tools)) or "reason over the instruction text only",
+        })
+    return out
 
 
 BOT_SCRATCH_TOOL_NAME = "append_scratch_note"
@@ -566,7 +579,18 @@ def _get_bot_row(bot_id):
     for b in _list_bots_tool():
         if b.get("id") == bot_id:
             return b
+    if isinstance(bot_id, str):                      # a bot named instead of numbered, or "19" as text
+        wanted = bot_id.strip().lower()
+        for b in _list_bots_tool():
+            if b["name"].lower() == wanted or str(b["id"]) == wanted:
+                return b
     return None
+
+
+def _unknown_bot_message(bot_id):
+    roster = _list_bots_for_model()
+    listing = "; ".join(f"{b['name']} (id {b['id']})" for b in roster) or "none exist yet"
+    return f"No bot with id {bot_id!r}. The bots are: {listing}. Use one of those ids."
 
 
 
@@ -683,7 +707,105 @@ def _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_hi
 
 
 
-def _run_delegation_step_tool(bot_id, instruction):
+# ---------- what a step hands the bot, and what it hands back ----------
+_FINDINGS_INLINE_LIMIT = 3500       # characters of findings returned with the step; the scratch file keeps everything
+_DEFAULT_REPORT = ("A short answer, under 200 words. Back each claim with the file path and line number where you saw it, "
+                   "and say plainly what you could not find.")
+
+
+def _compose_step_message(instruction, known=None, report=None, task_text=""):
+    """The bot knows nothing but this message, so it carries what a colleague arriving cold would need:
+    what the person actually asked (their own words, so any restriction they gave travels with it), the
+    one question, what is already known, and the shape of answer wanted."""
+    parts = []
+    if task_text and task_text.strip():
+        parts.append("What the person asked (context only; your job is just the question below):\n" + task_text.strip()[:1200])
+    parts.append("Your question:\n" + instruction.strip())
+    if known and str(known).strip():
+        parts.append("Already known or ruled out:\n" + str(known).strip()[:600])
+    parts.append("Report back: " + (str(report).strip()[:300] if report and str(report).strip() else _DEFAULT_REPORT))
+    parts.append("This is an isolated step. When you have your findings, call append_scratch_note with them: that is the only way "
+                 "they reach Athena. Do not reply with plain text.")
+    return "\n\n".join(parts)
+
+
+def _read_new_findings(scratch_path, before_size):
+    try:
+        with open(scratch_path, "rb") as f:
+            f.seek(before_size)
+            return f.read().decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+_CITATION_RE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:py|js|ts|tsx|jsx|vue|html|css|json|md|txt|ya?ml|toml|sql|sh|go|rs|java|cpp|c|h|rb|php))"
+    r"(?::|[ \t]*,?[ \t]*\(?(?:lines?|L)[ \t]*)(\d+)(?:[ \t]*[-\u2013][ \t]*(\d+))?", re.I)
+_SKIP_WALK = {".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build", ".athena", "file_backups"}
+
+
+def _locate_cited_file(workspace, cited):
+    direct = os.path.join(workspace, cited)
+    if os.path.isfile(direct):
+        return direct
+    base, matches = os.path.basename(cited), []
+    for root, dirs, files in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in _SKIP_WALK]
+        if base in files:
+            matches.append(os.path.join(root, base))
+            if len(matches) > 1:
+                break
+    return matches[0] if len(matches) == 1 else (matches[0] if matches else None)
+
+
+def verify_citations(findings, workspace, limit=20):
+    """Check that the places a bot says it looked exist: the file is in the workspace and has that line.
+    A report that cites files and lines which are not there was not written from looking at them."""
+    if not findings or not workspace or not os.path.isdir(workspace):
+        return {"checked": 0, "not_found": []}
+    seen, missing = set(), []
+    for match in _CITATION_RE.finditer(findings):
+        cited, line, end = match.group(1), int(match.group(2)), int(match.group(3) or match.group(2))
+        if (cited, line) in seen:
+            continue
+        seen.add((cited, line))
+        if len(seen) > limit:
+            seen.discard((cited, line))
+            break
+        path = _locate_cited_file(workspace, cited)
+        if path is None:
+            missing.append(f"{cited}:{line} (no such file)")
+            continue
+        try:
+            with open(path, "rb") as f:
+                total = sum(1 for _ in f)
+        except OSError:
+            continue
+        if max(line, end) > total:
+            missing.append(f"{cited}:{line} (the file has only {total} lines)")
+    return {"checked": len(seen), "not_found": missing}
+
+
+def _step_result(bot, instruction, step_history, scratch_path, before_size, retried, findings_limit):
+    findings = _read_new_findings(scratch_path, before_size)
+    workspace = settings.load_settings().get("workspace") or ""
+    cites = verify_citations(findings, workspace)
+    base = {"bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
+    if cites["checked"] >= 2 and len(cites["not_found"]) * 2 >= cites["checked"]:
+        return {**base, "status": "possibly_fabricated", "citations": cites,
+                "detail": f"{len(cites['not_found'])} of the {cites['checked']} places this report cites do not exist ({'; '.join(cites['not_found'][:4])}). "
+                          "Treat it as a failed step, not a finding; read_tool_call_history shows what the bot actually looked at."}
+    result = {**base, "status": "done", "detail": "Step complete" + (" after one internal retry." if retried else "."),
+              "findings": findings[:findings_limit]}
+    if len(findings) > findings_limit:
+        result["findings_truncated"] = True
+        result["detail"] += f" Findings are cut off here at {findings_limit} characters; read_scratch_file with bot_name \"{bot['name']}\" has all of it."
+    if cites["checked"]:
+        result["citations"] = cites
+    return result
+
+
+def _run_delegation_step_tool(bot_id, instruction, known=None, report=None, task_text="", findings_limit=_FINDINGS_INLINE_LIMIT):
     is_compound, reason = _instruction_is_compound(instruction)
     if is_compound:
         return {
@@ -694,7 +816,10 @@ def _run_delegation_step_tool(bot_id, instruction):
         }
     bot = _get_bot_row(bot_id)
     if bot is None:
-        return {"error": f"No bot with id {bot_id}.", "instruction": instruction}
+        return {"error": _unknown_bot_message(bot_id), "instruction": instruction}
+    gap = capability_gap(bot, instruction)
+    if gap:
+        return {"status": "rejected", "error": gap, "bot": bot["name"], "instruction": instruction}
     task_hash = task_context.current_task_hash.get()
     if task_hash is None:
         return {"error": "No active task context -- this should only be called mid-delegation.", "instruction": instruction}
@@ -703,79 +828,58 @@ def _run_delegation_step_tool(bot_id, instruction):
     scratch_path = os.path.join(task_context.BOT_TASK_FOLDER_ROOT, task_hash, f"{safe_name}.md")
     before_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
 
-    system_prompt = _build_bot_system_prompt(bot)
-    user_content = (
-        f"{instruction}\n\n"
-        "This is an isolated delegation step -- when you have your findings, "
-        "call append_scratch_note with them. Do not reply with plain text; "
-        "use the tool, since that is the only way your findings reach Athena from here."
-    )
     chat_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
+        {"role": "system", "content": _build_bot_system_prompt(bot)},
+        {"role": "user", "content": _compose_step_message(instruction, known, report, task_text)},
     ]
-    # Same per-host lock plan_delegation's own concurrency setting relies
-    # on (see _plan_delegation_tool) -- steps can run in parallel threads,
-    # but two of them landing on the same physical inference host must
-    # still never generate at the same time.
+    # Steps can run in parallel threads (plan_delegation's concurrency setting), but two of them landing
+    # on the same physical inference host must still never generate at the same time.
     host_lock = host_locks.get_host_lock(host_locks.endpoint_host(bot.get("endpoint_url")))
     with host_lock:
         result = _call_bot_endpoint(bot, chat_messages)
-    # Accumulated across the initial call and (if it happens) the retry
-    # below, then persisted as one entry so read_tool_call_history shows
-    # everything this one step actually did, not just the final attempt.
+    # One entry for the whole step, covering the first attempt and the retry if there is one.
     step_history = list(result.get("tool_call_history", []))
-    if result.get("error"):
-        _append_tool_call_history(bot["name"], instruction, step_history)
-        return {"status": "error", "detail": result["error"], "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
 
-    after_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
-    if after_size <= before_size:
-        # Internal auto-retry: one nudge in the SAME isolated conversation,
-        # continuing from the bot's own reply, before ever surfacing a
-        # failure to Athena2. This mirrors the external retry Athena2 was
-        # already doing herself (a whole extra run_delegation_step call) --
-        # moving it in-process saves her a full round trip for the common
-        # case where one nudge is all it takes.
+    def failed(detail):
+        _append_tool_call_history(bot["name"], instruction, step_history)
+        return {"status": "error", "detail": detail, "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
+
+    if result.get("error"):
+        return failed(result["error"])
+    size = lambda: os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
+    retried = False
+    if size() <= before_size:
+        # One nudge in the SAME isolated conversation before ever surfacing a failure: usually all it takes.
+        retried = True
         chat_messages.append({"role": "assistant", "content": result.get("content", "")})
-        chat_messages.append({
-            "role": "user",
-            "content": (
-                "You did not call append_scratch_note. That is the only way your findings "
-                "reach Athena -- a plain text reply is discarded. Call append_scratch_note "
-                "now with your findings from above. Do not reply with plain text again."
-            ),
-        })
+        chat_messages.append({"role": "user", "content": (
+            "You did not call append_scratch_note. That is the only way your findings reach Athena -- a plain text reply "
+            "is discarded. Call append_scratch_note now with your findings from above. Do not reply with plain text again.")})
         with host_lock:
             retry_result = _call_bot_endpoint(bot, chat_messages)
         step_history += retry_result.get("tool_call_history", [])
         if retry_result.get("error"):
+            return failed(retry_result["error"])
+        if size() <= before_size:
             _append_tool_call_history(bot["name"], instruction, step_history)
-            return {"status": "error", "detail": retry_result["error"], "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
-        after_retry_size = os.path.getsize(scratch_path) if os.path.exists(scratch_path) else 0
-        _append_tool_call_history(bot["name"], instruction, step_history)
-        if after_retry_size <= before_size:
             return {
                 "status": "no_scratch_note",
                 "detail": "The bot replied without calling append_scratch_note, even after one internal retry -- no findings were recorded for this step.",
-                "bot": bot["name"],
-                "instruction": instruction,
-                "tool_calls_recorded": len(step_history),
+                "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history),
             }
+    _append_tool_call_history(bot["name"], instruction, step_history)
+    result = _step_result(bot, instruction, step_history, scratch_path, before_size, retried, findings_limit)
+    # Cited files and lines that really exist are evidence; the optional scoring model is only an estimate (a real
+    # run was rejected at 0.43 against a 0.45 line). So it is consulted only when the report cites too little to check.
+    if result["status"] == "done" and result.get("citations", {}).get("checked", 0) < 2:
         fabrication_flag = _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history)
         if fabrication_flag is not None:
             return fabrication_flag
-        return {"status": "done", "detail": "Step complete after one internal retry. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
-
-    _append_tool_call_history(bot["name"], instruction, step_history)
-    fabrication_flag = _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history)
-    if fabrication_flag is not None:
-        return fabrication_flag
-    return {"status": "done", "detail": "Step complete. Use read_scratch_file to see this bot's findings.", "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
+    return result
 
 
 
-def _plan_delegation_tool(steps):
+def _plan_delegation_tool(steps, task_text=""):
     if not steps or not isinstance(steps, list):
         return {"error": "steps must be a non-empty list of {bot_id, instruction} objects."}
     results = [None] * len(steps)
@@ -786,7 +890,7 @@ def _plan_delegation_tool(steps):
         if not bot_id or not instruction:
             results[i] = {"step": i, "status": "error", "detail": "Missing bot_id or instruction."}
             continue
-        runnable.append((i, bot_id, instruction))
+        runnable.append((i, bot_id, instruction, step.get("known"), step.get("report")))
 
     # Sequential (1) by default -- Athena targets hardware of all sizes,
     # including old/cheap machines that shouldn't pay for concurrency
@@ -796,9 +900,11 @@ def _plan_delegation_tool(steps):
     # inference host regardless of what this is set to.
     concurrency = max(1, int(settings.load_settings().get("delegation_concurrency") or 1))
 
+    per_step_limit = max(1200, 6000 // max(1, len(runnable)))      # a whole plan's findings come back in one result; keep it bounded
+
     if concurrency <= 1 or len(runnable) <= 1:
-        for i, bot_id, instruction in runnable:
-            r = _run_delegation_step_tool(bot_id, instruction)
+        for i, bot_id, instruction, known, report in runnable:
+            r = _run_delegation_step_tool(bot_id, instruction, known, report, task_text, per_step_limit)
             results[i] = {"step": i, "bot_id": bot_id, **r}
     else:
         # Each worker thread starts with its own empty context, so
@@ -811,16 +917,16 @@ def _plan_delegation_tool(steps):
         task_hash = task_context.current_task_hash.get()
 
         def _run(item):
-            i, bot_id, instruction = item
+            i, bot_id, instruction, known, report = item
             task_context.current_task_hash.set(task_hash)
-            r = _run_delegation_step_tool(bot_id, instruction)
+            r = _run_delegation_step_tool(bot_id, instruction, known, report, task_text, per_step_limit)
             return i, {"step": i, "bot_id": bot_id, **r}
 
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             for i, r in executor.map(_run, runnable):
                 results[i] = r
 
-    return {"plan_results": results, "note": "Findings were not returned here -- use read_scratch_file per bot to review them."}
+    return {"plan_results": results}
 
 
 
@@ -896,7 +1002,7 @@ def _update_bot_tool(bot_id, description=None, allowed_tools=None):
     try:
         existing = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ?", (bot_id,)).fetchone()
         if not existing:
-            return {"error": f"No bot with id {bot_id}."}
+            return {"error": _unknown_bot_message(bot_id)}
         current = _row_to_bot(existing)
         new_description = description if description is not None else current["description"]
         new_tools = allowed_tools if allowed_tools is not None else current["allowed_tools"]
@@ -914,15 +1020,17 @@ def _update_bot_tool(bot_id, description=None, allowed_tools=None):
 BOT_DELEGATION_TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "run_delegation_step",
-        "description": "Give one bot one single-topic instruction as a fresh, isolated call -- no DM/room history involved, no memory of prior steps. The bot investigates internally and appends its findings to its own scratch file via append_scratch_note; this call returns only a status, never the findings themselves. Use read_scratch_file afterward to see what it found.",
+        "description": "Ask one bot one focused question and get its findings back. The bot starts fresh with no memory of earlier steps, and is automatically told what the person asked; it investigates read-only and the report comes back in this result, with a check that the files and lines it cites exist.",
         "parameters": {"type": "object", "properties": {
-            "bot_id": {"type": "integer", "description": "The bot to run this step with."},
-            "instruction": {"type": "string", "description": "A single, self-contained topic or question -- not a multi-part task."},
+            "bot_id": {"type": "integer", "description": "The bot to ask."},
+            "instruction": {"type": "string", "description": "The question: one topic, self-contained."},
+            "known": {"type": "string", "description": "Optional: what is already known or ruled out, so the bot does not redo it."},
+            "report": {"type": "string", "description": "Optional: the shape of answer you need. Default: short, with file paths and line numbers."},
         }, "required": ["bot_id", "instruction"]},
     }},
     {"type": "function", "function": {
         "name": "read_scratch_file",
-        "description": "Read the current task's scratch file for one bot -- its accumulated findings from any run_delegation_step calls so far this task. Scoped automatically to the task you're currently delegating within.",
+        "description": "Read a bot's complete scratch file for this task: everything it reported across all steps. A step's own findings already come back with it (cut off only when very long), so this is for the full text or an earlier step.",
         "parameters": {"type": "object", "properties": {
             "bot_name": {"type": "string", "description": "The bot's name, exactly as it appears in list_bots."},
         }, "required": ["bot_name"]},
@@ -936,16 +1044,18 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "plan_delegation",
-        "description": "Give a whole roadmap of single-topic delegation steps at once, instead of calling run_delegation_step yourself one at a time. Each step runs in the same strict isolation as run_delegation_step (fresh context, no history) -- but you supply the full list up front rather than remembering to call each one separately. Returns only per-step status; use read_scratch_file per bot afterward to see what each one found.",
+        "description": "Run several focused questions in order, one result per step, each with its findings (see run_delegation_step). Use it when you already know all the questions.",
         "parameters": {"type": "object", "properties": {
             "steps": {
                 "type": "array",
-                "description": "One entry per single-topic step. Do not bundle multiple questions into one instruction -- split them into separate steps instead.",
+                "description": "One entry per question; split a bundled question into separate steps.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "bot_id": {"type": "integer"},
-                        "instruction": {"type": "string", "description": "One single, self-contained topic or question."},
+                        "instruction": {"type": "string", "description": "One self-contained question."},
+                        "known": {"type": "string", "description": "Optional: already known or ruled out."},
+                        "report": {"type": "string", "description": "Optional: the shape of answer you need."},
                     },
                     "required": ["bot_id", "instruction"],
                 },
@@ -1017,17 +1127,14 @@ BOT_DELEGATION_TOOL_SCHEMAS = [
 
 
 _ASYNC_RUN_DELEGATION_STEP_DESCRIPTION = (
-    "Give one bot one single-topic instruction. Runs in the background and returns immediately with "
-    "{\"status\": \"pending\", \"handle\": <job id>} -- it does NOT wait for the bot to finish. When the bot "
-    "is done, its result arrives as a new message in this same conversation; you don't need to poll or wait "
-    "for it, and you're free to keep working (including delegating another step) in the meantime. Use "
-    "read_scratch_file/read_tool_call_history once that message tells you the job is complete."
+    "Ask one bot one focused question. Runs in the background and returns immediately with "
+    "{\"status\": \"pending\", \"handle\": <job id>}. When the bot is done, its findings arrive as a new message "
+    "in this same conversation; you don't need to poll or wait, and can keep working in the meantime."
 )
 _ASYNC_PLAN_DELEGATION_DESCRIPTION = (
-    "Give a whole roadmap of single-topic delegation steps at once. Runs in the background and returns "
-    "immediately with {\"status\": \"pending\", \"handle\": <job id>} for the whole plan -- it does NOT wait "
-    "for the steps to finish. Once every step in the plan is done, ONE combined message summarizing all of "
-    "them arrives in this same conversation; you don't need to poll or wait for it."
+    "Run several focused questions in order. Runs in the background and returns immediately with "
+    "{\"status\": \"pending\", \"handle\": <job id>}. Once every step is done, ONE message with all the findings "
+    "arrives in this same conversation; you don't need to poll or wait."
 )
 
 
@@ -1070,7 +1177,73 @@ BOT_ALLOWED_TOOL_NAMES = {
 }
 
 
+# What a bot gets when no tools were chosen. The Bots page used to save every bot with an empty list, so
+# bots described as investigators could not read a file or fetch a page; "nothing chosen" now means this set.
+DEFAULT_BOT_TOOLS = ["bash_read_only", "list_files", "read_file", "search_codebase"]
+
+
+def effective_tools(allowed):
+    chosen = [t for t in (allowed or []) if t in BOT_ALLOWED_TOOL_NAMES]
+    return chosen or list(DEFAULT_BOT_TOOLS)
+
+
+def _capabilities(tools):
+    tools = set(tools)
+    caps = []
+    if tools & {"read_file", "list_files", "bash_read_only"}:
+        caps.append("read files")
+    if tools & {"search_codebase", "find_definition", "find_references", "type_info"}:
+        caps.append("search code")
+    if "web_search" in tools:
+        caps.append("search the web")
+    if "web_fetch" in tools:
+        caps.append("fetch web pages")
+    return caps
+
+
+_URL_RE = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+_WEB_WORDS_RE = re.compile(r"\b(?:search the web|web search|google|look (?:it )?up online|online)\b", re.I)
+_FILE_WORDS_RE = re.compile(
+    r"\b[\w-]+\.(?:py|js|ts|tsx|jsx|html|css|json|md|txt|ya?ml|toml|sql|sh|go|rs|java|cpp|c|h)\b"
+    r"|\b(?:directory|directories|folder|codebase|repository|repo|source files?|files?)\b", re.I)
+_FILE_TOOLS = {"read_file", "list_files", "bash_read_only", "search_codebase"}
+_WEB_TOOLS = {"web_fetch", "web_search"}
+
+
+def capability_gap(bot, instruction):
+    """-> a refusal message when this instruction needs files or the web and the bot has neither, else None.
+    A bot that cannot look at anything just answers from its own guesses, so the main agent is told at once
+    (and which bots could do it) instead of discovering it from an empty report a whole step later."""
+    tools = set(effective_tools(bot.get("allowed_tools")))
+    text = instruction or ""
+    needs_web = bool(_URL_RE.search(text) or _WEB_WORDS_RE.search(text))
+    needs_files = bool(_FILE_WORDS_RE.search(_URL_RE.sub(" ", text)))
+    missing = []
+    if needs_web and not tools & _WEB_TOOLS:
+        missing.append("web")
+    if needs_files and not tools & _FILE_TOOLS:
+        missing.append("file")
+    if not missing:
+        return None
+    others = [b["name"] for b in _list_bots_tool()
+              if b["id"] != bot.get("id") and (("web" not in missing) or set(effective_tools(b.get("allowed_tools"))) & _WEB_TOOLS)
+              and (("file" not in missing) or set(effective_tools(b.get("allowed_tools"))) & _FILE_TOOLS)]
+    can = ", ".join(_capabilities(tools)) or "nothing but reasoning over the instruction text"
+    return (f"{bot['name']} cannot do this: it can only {can}, and this step needs {' and '.join(missing)} access. "
+            + (f"Bots that can: {', '.join(others)}." if others else "No bot in the roster can, so do this yourself."))
+
+
 _BOT_CTX_SIZE = 32768
+
+
+def _bot_ctx_size(bot):
+    """The context a bot's turn asks for: the default, or less when its model cannot take that much."""
+    try:
+        import model_profile
+        cap = model_profile.max_context(model_profile.get_facts(bot.get("provider") or "", bot.get("endpoint_url") or "", bot.get("api_key") or "", bot["model"]))
+    except Exception:
+        cap = None
+    return min(_BOT_CTX_SIZE, cap) if cap else _BOT_CTX_SIZE
 
 _BOT_MAX_ROUNDS = 200  # absolute outer safety net; per-tool-type limits below are what actually catches an exploration binge in practice
 

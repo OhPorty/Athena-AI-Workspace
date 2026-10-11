@@ -215,7 +215,7 @@ class SimpleCodeRAG:
         # resolves to the identical filepath string. Chunk ids are derived
         # from filepath (see below), so without this the same file gets
         # indexed twice under two different spellings, permanently.
-        exclude_dirs = {".git", "venv", "node_modules", "file_backups", "__pycache__"}
+        exclude_dirs = {".git", ".athena", "venv", "node_modules", "file_backups", "__pycache__"}
         root_dir = os.path.realpath(root_dir)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()

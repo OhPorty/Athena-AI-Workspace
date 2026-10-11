@@ -11,6 +11,7 @@ skills/
 pins.db
 ratings.db
 file_backups/
+generated_files/
 bots.db
 rag_index.db
 tasks.db

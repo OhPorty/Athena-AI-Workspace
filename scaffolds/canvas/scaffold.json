@@ -1,0 +1,5 @@
+{
+  "description": "bare canvas game shell (any 2D game): loop, keyboard/pointer input, title/pause/game-over states, score; no rules or art",
+  "entry": "index.html",
+  "notes": "The rules and look are yours. In game.js write reset() (set up a round), update(dt) (advance the game; call endGame() when it is lost) and draw(); read input from keys (a Set of lowercase key names) and pointer {x, y, down}. Colors come from the tokens at the top of style.css. Rename the title in index.html. setStatus() mirrors the state into #status and window.__game, so preview actions such as [\"click #start\", \"wait 1500\"] can check it."
+}

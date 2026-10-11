@@ -1,0 +1,101 @@
+{% import "_macros.j2" as m %}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ d.name }}{% if d.headline %} - {{ d.headline }}{% endif %}</title>
+<style>
+{% include "_common.css.j2" %}
+@page { size: {{ page_css }}; margin: 0; }
+html { background: linear-gradient(to right, #fff calc(100% - 2.55in), var(--tint) calc(100% - 2.55in)); }
+.banner { background: var(--dark); color: #fff; padding: .55in .6in .42in; display: flex; justify-content: space-between; align-items: flex-end; gap: 1.5rem; border-bottom: .06in solid var(--accent-light); }
+.name { font-family: var(--f-display); font-size: 2.35rem; font-weight: 700; line-height: 1.04; letter-spacing: -.01em; text-wrap: balance; }
+.headline { margin-top: .6rem; font-family: var(--f-label); font-size: .72rem; font-weight: 600; letter-spacing: .15em; text-transform: uppercase; color: var(--accent-light); }
+.contact { text-align: right; font-size: .84rem; line-height: 1.55; color: #e6e9f0; flex: none; max-width: 3in; }
+.contact a { color: var(--accent-light); }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) 2.55in; }
+.main { padding: .42in .45in .5in .6in; min-width: 0; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.aside { padding: .42in .34in .5in .34in; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.aside .sec { margin-top: calc(1.4rem * (0.55 + 0.45 * var(--sp))); }
+.aside .sec:first-child { margin-top: 0; }
+.aside .sec-title { border-bottom-width: 1px; }
+.chips { display: flex; flex-wrap: wrap; gap: .3rem; }
+.chip { font-size: .76rem; line-height: 1.35; padding: .14rem .5rem; border-radius: .25rem; color: #fff; background: var(--dark); }
+.group + .group { margin-top: .8rem; }
+.group-label { font-size: .72rem; color: var(--muted); margin-bottom: .3rem; }
+.item { margin-top: calc(.75rem * var(--sp)); break-inside: avoid; }
+.sec-title + .item { margin-top: 0; }
+.item b { display: block; font-weight: 600; font-size: .88rem; line-height: 1.3; }
+.item span { display: block; font-size: .77rem; color: var(--muted); margin-top: .05rem; }
+.plain li { font-size: .86rem; margin-top: .3rem; }
+.plain li:first-child { margin-top: 0; }
+</style>
+</head>
+<body>
+<header class="banner">
+  <div>
+    <h1 class="name">{{ d.name }}</h1>
+    {% if d.headline %}<div class="headline">{{ d.headline }}</div>{% endif %}
+  </div>
+  <ul class="contact">
+    {% if d.location %}<li>{{ d.location }}</li>{% endif %}
+    {% if d.phone %}<li>{% if d.phone_url %}<a href="{{ d.phone_url }}">{{ d.phone }}</a>{% else %}{{ d.phone }}{% endif %}</li>{% endif %}
+    {% if d.email %}<li>{% if d.email_url %}<a href="{{ d.email_url }}">{{ d.email }}</a>{% else %}{{ d.email }}{% endif %}</li>{% endif %}
+    {% for l in d.links %}<li><a href="{{ l.url }}">{{ l.label }}</a></li>{% endfor %}
+  </ul>
+</header>
+
+<div class="cols">
+  <main class="main">
+    {% if d.summary %}
+    <section class="sec"><h2 class="sec-title">Summary</h2><p class="summary">{{ d.summary }}</p></section>
+    {% endif %}
+    {% if d.experience %}
+    <section class="sec"><h2 class="sec-title">Experience</h2>{{ m.experience(d.experience) }}</section>
+    {% endif %}
+    {{ m.custom_sections(d.sections) }}
+  </main>
+
+  <aside class="aside">
+    {% if d.education %}
+    <section class="sec">
+      <h2 class="sec-title">Education</h2>
+      {% for e in d.education %}
+      <div class="item">
+        <b>{{ e.degree or e.school }}</b>
+        {% if e.degree and e.school %}<span>{{ e.school }}{% if e.location %}, {{ e.location }}{% endif %}</span>{% endif %}
+        {% if e.dates %}<span>{{ e.dates }}</span>{% endif %}
+        {% for line in e.details %}<span>{{ line }}</span>{% endfor %}
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+    {% if d.certifications %}
+    <section class="sec">
+      <h2 class="sec-title">Certifications</h2>
+      {% for c in d.certifications %}
+      <div class="item"><b>{{ c.name }}</b>{% if c.issuer or c.date %}<span>{{ c.issuer }}{% if c.issuer and c.date %} · {% endif %}{{ c.date }}</span>{% endif %}</div>
+      {% endfor %}
+    </section>
+    {% endif %}
+    {% if d.skills %}
+    <section class="sec">
+      <h2 class="sec-title">Skills</h2>
+      {% for g in d.skills %}
+      <div class="group">
+        {% if g.group %}<div class="group-label">{{ g.group }}</div>{% endif %}
+        <div class="chips">{% for s in g["items"] %}<span class="chip">{{ s }}</span>{% endfor %}</div>
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+    {% if d.languages %}
+    <section class="sec">
+      <h2 class="sec-title">Languages</h2>
+      <ul class="plain">{% for l in d.languages %}<li>{{ l }}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+  </aside>
+</div>
+</body>
+</html>

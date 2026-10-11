@@ -19,6 +19,18 @@ _BOT_TASK_FOLDER_MAX = 50
 # are safe to import and share across modules as-is.
 current_task_hash = contextvars.ContextVar("current_task_hash", default=None)
 
+# What the person actually asked for this task, in their own words. Delegated bots start with no context,
+# so every step's brief carries this; the main agent never has to restate it (or any restriction in it).
+current_task_text = contextvars.ContextVar("current_task_text", default="")
+
+
+def remember_task_text(message):
+    """Keep the first real request seen for the task. Machine-written messages (an async delegation result
+    delivered back as a turn) are not what the person asked, so they never replace it."""
+    if not current_task_text.get() and message and not str(message).startswith("[Async delegation"):
+        current_task_text.set(str(message))
+    return current_task_text.get()
+
 
 def get_task_hash(session_id):
     h = current_task_hash.get()
