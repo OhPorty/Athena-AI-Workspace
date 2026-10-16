@@ -106,3 +106,62 @@ def test_replace_lines_fails_safely_when_ambiguous(workspace):
     file_tools.write_file(workspace, "code.py", "a\ndup\ndup\ndup\nb\n")
     result = file_tools.replace_lines(workspace, "code.py", 1, 1, "new", "dup")
     assert "error" in result
+
+
+# ---------- download the whole workspace as a zip ----------
+
+def test_zip_has_every_project_file_with_its_folders_and_leaves_out_rebuildable_and_private_things(workspace):
+    import os, zipfile
+    for rel, text in {"index.html": "<html>", "src/app.js": "x", "src/deep/more.css": "y", "README.md": "hi",
+                      "node_modules/pkg/index.js": "big", "__pycache__/a.pyc": "b", ".athena/preview/shot.png": "p", ".git/config": "[core]"}.items():
+        path = os.path.join(workspace, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").write(text)
+    zip_path, count, left_out = file_tools.zip_workspace(workspace)
+    try:
+        names = sorted(zipfile.ZipFile(zip_path).namelist())
+    finally:
+        os.remove(zip_path)
+    assert names == [".git/config", "README.md", "index.html", "src/app.js", "src/deep/more.css"] and count == 5
+    assert {"node_modules", "__pycache__", ".athena"} <= set(left_out)
+
+
+def test_zip_never_follows_a_link_out_of_the_workspace_and_an_empty_workspace_still_zips(workspace, tmp_path):
+    import os, zipfile
+    outside = tmp_path / "secret.txt"
+    outside.write_text("do not include")
+    os.symlink(str(outside), os.path.join(workspace, "link.txt"))
+    os.symlink(str(tmp_path), os.path.join(workspace, "linkdir"))
+    zip_path, count, left_out = file_tools.zip_workspace(workspace)
+    try:
+        names = zipfile.ZipFile(zip_path).namelist()
+    finally:
+        os.remove(zip_path)
+    assert names == [".empty"] and count == 0 and {"link.txt", "linkdir"} <= set(left_out)
+
+
+def test_zip_leaves_out_athenas_private_files_when_the_workspace_is_her_own_folder(tmp_path, monkeypatch):
+    import os, zipfile, safety
+    home = tmp_path / "athena"
+    (home / "logs").mkdir(parents=True)
+    for name in ("athena_auth.json", "athena_settings.json", "athena.db", "main.py"):
+        (home / name).write_text("x")
+    (home / "logs" / "agent_trace.jsonl").write_text("x")
+    monkeypatch.setattr(safety, "ATHENA_ROOT", str(home))
+    zip_path, count, left_out = file_tools.zip_workspace(str(home))
+    try:
+        names = sorted(zipfile.ZipFile(zip_path).namelist())
+    finally:
+        os.remove(zip_path)
+    assert names == ["main.py"] and {"athena_auth.json", "athena_settings.json", "athena.db", "logs"} <= set(left_out)
+
+
+
+def test_zip_too_big_is_refused_not_built(workspace, monkeypatch):
+    import os
+    open(os.path.join(workspace, "a.bin"), "wb").write(b"x" * 100)
+    monkeypatch.setattr(file_tools, "_ZIP_MAX_BYTES", 50)
+    with pytest.raises(ValueError, match="over 1 GB"):
+        file_tools.zip_workspace(workspace)
+    import glob, tempfile
+    assert not glob.glob(os.path.join(tempfile.gettempdir(), "athena_workspace_*.zip"))        # no half-built zip left behind

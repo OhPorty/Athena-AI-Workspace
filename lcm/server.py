@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import uuid
@@ -48,6 +49,32 @@ class MessageIn(BaseModel):
     has_image: bool = False
     thinking: Optional[str] = None
     tool_calls: Optional[list] = None
+
+_URL = re.compile(r"https?://[^\s<>\"'`)\]]+")
+_FILE = re.compile(r"(?<![\w/.:-])(?:[\w.-]+/)*[\w.-]+\.(?:html?|css|js|jsx|ts|tsx|py|json|md|txt|svg|png|jpe?g|gif|webp|pdf|ya?ml|toml|sql|sh)\b", re.I)
+_ANCHOR_LIMIT = 12
+
+
+def exact_details(texts):
+    """The links and file names mentioned in these texts, written out exactly. A small model's summary reliably drops
+    them (a link given once, many messages ago, was gone from every summary), so code collects them instead of
+    trusting the summary to keep them. A line or two per summary: the context stays small."""
+    urls, files = [], []
+    for text in texts:
+        for url in _URL.findall(text or ""):
+            url = url.rstrip(".,;:!?")
+            if url not in urls:
+                urls.append(url[:300])
+        for name in _FILE.findall(text or ""):
+            if name not in files and not any(name in u for u in urls):
+                files.append(name)
+    parts = []
+    if urls:
+        parts.append("links: " + " ".join(urls[:_ANCHOR_LIMIT]))
+    if files:
+        parts.append("files: " + ", ".join(files[:_ANCHOR_LIMIT]))
+    return ("\n[Exact details from this part -- " + "; ".join(parts) + "]") if parts else ""
+
 
 class SummarizeIn(BaseModel):
     session_id: str
@@ -286,7 +313,7 @@ def summarize(req: SummarizeIn):
         (req.session_id, *req.message_ids)
     ).fetchall()
     transcript = "\n".join(f"{role}: {content}" for role, content in rows)
-    summary_text = lcm.summarizer(transcript)
+    summary_text = lcm.summarizer(transcript) + exact_details([content for _, content in rows])
 
     cur = conn.execute(
         "INSERT INTO nodes (session_id, summary_text, level, covers_message_ids, created_at) VALUES (?, ?, 1, ?, ?)",
@@ -320,7 +347,7 @@ def summarize_nodes(req: SummarizeNodesIn):
         return {"error": "no matching nodes found"}
 
     transcript = "\n".join(f"[Summary {nid}]: {text}" for nid, text, _ in rows)
-    summary_text = lcm.summarizer(transcript)
+    summary_text = lcm.summarizer(transcript) + exact_details([text for _, text, _ in rows])
     max_level = max(level for _, _, level in rows)
 
     cur = conn.execute(
@@ -337,6 +364,13 @@ def summarize_nodes(req: SummarizeNodesIn):
     conn.commit()
     conn.close()
     return {"node_id": new_node_id, "level": max_level + 1, "summary": summary_text}
+
+_SUMMARY_NOTE = (
+    "Earlier parts of this conversation appear below as short summaries. A summary leaves out detail (exact wording, code, "
+    "numbers). When you need something that is not here, look it up with lcm_recall_search (a keyword) or lcm_recall_expand "
+    "(a summary's node id) instead of asking the person to repeat it."
+)
+
 
 @app.get("/context/{session_id}")
 def get_active_context(session_id: str, keep_recent_n: int = 4):
@@ -358,6 +392,8 @@ def get_active_context(session_id: str, keep_recent_n: int = 4):
     conn.close()
 
     context = [{"role": "system", "content": f"[Summary, node {nid}]: {text}"} for nid, text in nodes]
+    if context:
+        context.insert(0, {"role": "system", "content": _SUMMARY_NOTE})
     for _, role, content in raw[-keep_recent_n:]:
         context.append({"role": role, "content": content})
     return {"context": context}
@@ -876,6 +912,14 @@ def messages_since(last_id: int):
         {"id": r[0], "session_id": r[1], "role": r[2], "content": r[3]}
         for r in rows
     ]
+
+@app.get("/message-session/{message_id}")
+def message_session(message_id: int):
+    """Which session a message belongs to, so a caller can check who owns it before deleting."""
+    conn = lcm._conn()
+    row = conn.execute("SELECT session_id FROM messages WHERE id = ?", (message_id,)).fetchone()
+    conn.close()
+    return {"session_id": row[0] if row else None}
 
 @app.delete("/messages/{message_id}")
 def delete_message_pair(message_id: int):

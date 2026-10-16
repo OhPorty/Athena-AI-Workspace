@@ -1,8 +1,11 @@
 import json
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import approvals
+import ownership
 from logging_setup import logger
 
 router = APIRouter()
@@ -51,12 +54,22 @@ def update_snapshot(key, chunk):
     except (json.JSONDecodeError, ValueError):
         return
     snap = generation_snapshots.setdefault(key, {"thinking": "", "content": "", "tool_calls": []})
+    if obj.get("type") == "snapshot":
+        snap["turn_snapshot"] = {"id": obj.get("snapshot_id"), "files": obj.get("files"), "workspace": obj.get("workspace")}
+    if obj.get("type") == "approval_request":
+        snap.setdefault("approvals", []).append(obj)
+    if obj.get("type") == "approval_result":
+        snap["approvals"] = [a for a in snap.get("approvals", []) if a.get("id") != obj.get("id")]
     if obj.get("thinking"):
         snap["thinking"] += obj["thinking"]
     if obj.get("delta"):
         snap["content"] += obj["delta"]
+    if obj.get("type") == "queued":
+        snap["queue"] = {"position": obj.get("position"), "someone_else": obj.get("someone_else"), "message": obj.get("message")}
+    if obj.get("type") == "queue_started":
+        snap.pop("queue", None)
     if obj.get("type") == "tool_start":
-        snap["tool_calls"].append({"tool": obj.get("tool"), "status": "running", "output": None})
+        snap["tool_calls"].append({"tool": obj.get("tool"), "target": obj.get("target") or "", "status": "running", "output": None})
     if obj.get("type") == "tool_output":
         for tc in reversed(snap["tool_calls"]):
             if tc["tool"] == obj.get("tool") and tc["status"] == "running":
@@ -94,6 +107,8 @@ class CancelIn(BaseModel):
 
 @router.post("/api/chat/cancel")
 def cancel_chat(req: CancelIn):
+    if not ownership.session_allowed(req.session_id):
+        return {"cancelled": False}
     logger.debug(f"cancel request for session_id={req.session_id!r}, known flags={list(cancel_flags.keys())!r}")
     flag = cancel_flags.get(req.session_id)
     if flag:
@@ -114,6 +129,8 @@ def chat_status(session_id: str):
     updated snapshot (thinking so far, content so far, tool calls with
     status/output) so a reconnecting client can render genuine in-progress
     state, not just a boolean spinner."""
+    if not ownership.session_allowed(session_id):
+        return {"generating": False, "snapshot": None, "approvals": []}
     generating = session_id in active_generations
     snapshot = generation_snapshots.get(session_id) if generating else None
-    return {"generating": generating, "snapshot": snapshot}
+    return {"generating": generating, "snapshot": snapshot, "approvals": approvals.pending(session_id)}

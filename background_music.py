@@ -11,6 +11,8 @@ plus a measured report (binary_files).
 import math
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 import types
@@ -20,6 +22,7 @@ import numpy as np
 import backup_tools
 import binary_files
 import file_tools
+import generated_files
 
 _SYNTH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scaffolds", "audio", "synth.py")
 _synth = None
@@ -184,6 +187,11 @@ def _settings(args):
     s["bpm"] = _number(args, "bpm", int(rng.integers(lean["bpm"][0], lean["bpm"][1] + 1)), 50, 140, int)
     s["swing"] = _number(args, "swing", round(float(rng.uniform(*lean["swing"])), 2), 0, 0.33)
     s["vinyl"] = _number(args, "vinyl", round(float(rng.uniform(0.3, 0.7)), 2), 0, 1)
+    if "minutes" not in args:                                    # a length in seconds is a common way to ask for one
+        for alias in ("duration_seconds", "seconds", "length_seconds"):
+            if isinstance(args.get(alias), (int, float)) and not isinstance(args.get(alias), bool):
+                args = {**args, "minutes": args[alias] / 60}
+                break
     s["minutes"] = _number(args, "minutes", 3.0, 0.25, MAX_MINUTES)
     s["bars_per_chord"] = _number(args, "bars_per_chord", int(pick((2, 2, 4, 1))), 1, 4, int)
     if s["bars_per_chord"] not in (1, 2, 4):
@@ -344,13 +352,21 @@ def _stem(name):
 
 
 def generate_background_music(args, workspace):
-    if not workspace:
-        return {"error": "generate_background_music needs an active workspace to save the file in."}
-    args = args if isinstance(args, dict) else {}
+    """With a workspace the track is saved there. Without one (a plain chat) it is made in a scratch folder and handed back as a
+    download link, the same way a PDF is."""
+    scratch = None if workspace else tempfile.mkdtemp(prefix="athena_music_")
+    try:
+        return _generate(args if isinstance(args, dict) else {}, workspace, scratch)
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _generate(args, workspace, scratch):
     try:
         s = _settings(args)
         rel = _stem(args.get("filename")) + ".wav"
-        path = file_tools.resolve_workspace_path(workspace, rel)
+        path = os.path.join(scratch, rel) if scratch else file_tools.resolve_workspace_path(workspace, rel)
     except ValueError as e:
         return {"error": str(e)}
     synth = _load_synth()
@@ -375,8 +391,13 @@ def generate_background_music(args, workspace):
         finally:
             song = None
     _, report = binary_files.describe(path)
+    delivered = {"path": rel}
+    if scratch:
+        with open(path, "rb") as f:
+            data = f.read()
+        delivered = {"filename": rel, "url": generated_files.url_for(generated_files.store(data, rel)), "size": len(data)}
     return {
-        "path": rel, "minutes": round(length / 60, 2), "bpm": s["bpm"], "chords": s["chord_names"], "bars_per_chord": s["bars_per_chord"],
+        **delivered, "minutes": round(length / 60, 2), "bpm": s["bpm"], "chords": s["chord_names"], "bars_per_chord": s["bars_per_chord"],
         "style": s["style"], "keys": s["keys"], "comp": s["comp"], "bass": s["bass"], "groove": s["groove"],
         "melody": s["melody_style"] != "none", "texture": s["texture"], "brightness": s["brightness"], "swing": s["swing"], "seed": s["seed"],
         "seconds_to_make": round(time.time() - started, 1), "report": report,

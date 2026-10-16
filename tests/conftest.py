@@ -4,7 +4,11 @@ import db
 import generated_files
 import logging_setup
 import model_profile
+import auth_routes
+import backup_tools
+import ownership
 import rag
+import safety
 import settings
 
 
@@ -28,6 +32,19 @@ def isolated_data_files(tmp_path, monkeypatch):
     monkeypatch.setattr(model_profile, "PROBING_ENABLED", False)
     # Tools that produce files (PDFs, preview screenshots) must never write into the real generated_files/.
     monkeypatch.setattr(generated_files, "ROOT", str(tmp_path / "generated_files"))
+    # Snapshots and backups of test workspaces must never land in Athena's real file_backups/.
+    monkeypatch.setattr(backup_tools, "_BACKUP_ROOT", str(tmp_path / "file_backups"))
+    monkeypatch.setattr(safety, "_BACKUP_ROOT", str(tmp_path / "file_backups"))
+    monkeypatch.setattr(safety, "TURNS_INDEX", str(tmp_path / "file_backups" / "turns.jsonl"))
+    # Accounts and their sessions live in files too; no test may touch the real ones.
+    manager = auth_routes.auth_manager
+    monkeypatch.setattr(manager, "auth_path", str(tmp_path / "athena_auth.json"))
+    monkeypatch.setattr(manager, "_sessions_path", str(tmp_path / "athena_sessions.json"))
+    monkeypatch.setattr(manager, "_config", {})
+    monkeypatch.setattr(manager, "_sessions", {})
+    monkeypatch.setattr(manager, "_pending_2fa", {})
+    monkeypatch.setattr(settings, "_USERS_ROOT", str(tmp_path / "user_data"))
+    monkeypatch.setattr(ownership, "USERS_ROOT", str(tmp_path / "user_data"))
     model_profile.clear_cache()
 
 

@@ -2,6 +2,7 @@ import re
 import concurrent.futures
 
 import httpx
+from urllib.parse import urlparse
 
 from logging_setup import logger
 
@@ -23,6 +24,26 @@ WEB_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "inspect_page",
+            "description": "Look inside a public web page's DOM, the way browser dev tools do. With no selector you get the page's structure (tags, ids, classes), its stylesheet links and its CSS variables. With a CSS selector you get each match's classes, attributes, text, position and computed styles, and its HTML if you ask. Use it to learn what elements a page really has before writing CSS or scripts that target them.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The public page to inspect."},
+                    "selector": {"type": "string", "description": "A CSS selector, for example \".product-card h2\" or \"header nav a\". Leave out to get the page's overall structure."},
+                    "depth": {"type": "integer", "description": "How many levels of the structure to show when there is no selector (1-8, default 4)."},
+                    "limit": {"type": "integer", "description": "How many matching elements to describe (1-25, default 8)."},
+                    "html": {"type": "boolean", "description": "Include each match's HTML."},
+                    "styles": {"type": "array", "items": {"type": "string"}, "description": "CSS properties to read for each match, for example [\"gap\", \"grid-template-columns\"]. A useful default set is read when omitted."},
+                    "actions": {"type": "array", "items": {"type": "string"}, "description": "Steps to do on the page before inspecting it, such as \"click Cart\" or \"scroll 800\". Same steps as web_fetch actions."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_fetch",
             "description": "Fetch and extract readable text from a specific URL. Use after web_search to read a promising result in full, or when given a URL directly. Large pages are capped at 20000 characters per call -- if the response has has_more: true, call again with offset set to the returned next_offset to continue reading from where you left off.",
             "parameters": {
@@ -30,6 +51,10 @@ WEB_TOOL_SCHEMAS = [
                 "properties": {
                     "url": {"type": "string", "description": "The URL to fetch."},
                     "offset": {"type": "integer", "description": "Character offset to start reading from. Omit or use 0 to start from the beginning."},
+                    "screenshot": {"type": "boolean", "description": "Also look at the page as an image (only if you can view images). Public web pages only; useful when layout or visuals matter or the text comes back empty."},
+                    "actions": {"type": "array", "items": {"type": "string"}, "description": "Use the page like a person: open it, do these steps in order, then get the resulting page (text, what is clickable, and a picture if you can view images). Steps: \"click Sign in\" (visible words or a selector), \"type Search hello\" or \"type 'Search terms' hello\" (label, placeholder or selector, in quotes if it has spaces, then the text), \"press Enter\", \"hold ArrowRight 600\", \"hold mouse #canvas 800\", \"scroll 800\" (or top/bottom), \"wait 500\". Each call starts the page fresh, so put every step you need in one call."},
+                    "raw": {"type": "boolean", "description": "Get the page's real source (HTML, CSS or JS exactly as the server sends it) instead of readable text. Use it when you need the markup to copy, restyle or rebuild a page."},
+                    "save_to": {"type": "string", "description": "Save that source into the workspace at this path instead of returning it (implies raw). You get a short preview and can then read the parts you need from the file."},
                 },
                 "required": ["url"],
             },
@@ -93,6 +118,38 @@ def _extract_readable_text(html):
 _PLAYWRIGHT_UNAVAILABLE = False  # cached once Playwright itself is confirmed not installed, so we don't re-import it on every single fetch -- NOT set on a single page's navigation failure, since that's per-URL, not a global unavailability signal
 
 
+# Says what Athena is and where to read about it. Sites that turn away anonymous or "HeadlessChrome" clients
+# (Wikipedia asks for exactly this) answer this fine; nothing here pretends to be a person.
+USER_AGENT = "AthenaBot/1.0 (+https://github.com/OhPorty/Athena-AI-Workspace)"
+
+_REFUSAL_STATUSES = {401, 403, 429, 451}
+_BLOCK_PAGE = re.compile(
+    r"403 forbidden|access denied|you.ve been blocked|blocked by network security|just a moment|attention required|"
+    r"human verification|verify (?:that )?you are (?:a )?human|are you a robot|captcha|unusual traffic|"
+    r"enable javascript and cookies to continue|request blocked|bot detection", re.I)
+_BLOCK_PAGE_MAX_CHARS = 2000
+
+
+def looks_blocked(status, text):
+    """True when the site refused to serve the page to an automated client: a refusing status, or a short page that is
+    only a block/verification notice. Athena does not try to get past these; it reports them so the model moves on."""
+    if status in _REFUSAL_STATUSES:
+        return True
+    return len(text or "") < _BLOCK_PAGE_MAX_CHARS and bool(_BLOCK_PAGE.search(text or ""))
+
+
+def blocked_message(url, status):
+    host = urlparse(url).hostname or url
+    shown = f" (HTTP {status})" if status else ""
+    return (f"web_fetch: {host} refused to serve this page to an automated reader{shown}. It is behind the site's bot or "
+            "verification check, which Athena does not try to get around. Get this information from a different source.")
+
+
+class _Rendered(str):
+    """The browser-rendered HTML, carrying the HTTP status the page was served with."""
+    status = None
+
+
 def _fetch_with_browser(url):
     """Local, fully on-machine JS-rendering fallback for pages the fast
     httpx+BeautifulSoup path can't get real content from -- React/Vue/etc
@@ -124,13 +181,15 @@ def _fetch_with_browser(url):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
-                page = browser.new_page()
-                page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                page = browser.new_context(user_agent=USER_AGENT).new_page()
+                response = page.goto(url, timeout=20000, wait_until="domcontentloaded")
                 try:
                     page.wait_for_load_state("networkidle", timeout=5000)
                 except Exception:
                     pass  # some pages never go fully idle (ads/analytics polling) -- use whatever rendered so far
-                return page.content()
+                rendered = _Rendered(page.content())
+                rendered.status = response.status if response is not None else None
+                return rendered
             finally:
                 browser.close()
     except Exception as e:
@@ -260,8 +319,8 @@ def web_fetch(url: str, offset: int = 0):
 
     try:
         resp = httpx.get(url, timeout=15, follow_redirects=True, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; AthenaBot/1.0)"
-        })
+            "User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"})
+        status = resp.status_code
         title, text = _extract_readable_text(resp.text)
 
         # A page that comes back empty, with only a thin shell of static
@@ -270,22 +329,61 @@ def web_fetch(url: str, offset: int = 0):
         # headers can clear the length floor on their own -- confirmed
         # directly against weather.com, see _SPA_HTML_TO_TEXT_RATIO_THRESHOLD's
         # own comment) is almost always a JS-rendered SPA -- try
-        # rendering it locally before giving up. Only swap in the
-        # browser-rendered version if it's actually better, so a
-        # transient render hiccup can't make a working page worse.
+        # rendering it locally before giving up. An error status gets the
+        # same second look: a real browser is served pages a bare HTTP
+        # client is turned away from. Only swap in the browser-rendered
+        # version if it's actually better, so a transient render hiccup
+        # can't make a working page worse.
         html_to_text_ratio = len(resp.text) / max(1, len(text))
-        if len(text) < _MIN_READABLE_TEXT_LENGTH or html_to_text_ratio > _SPA_HTML_TO_TEXT_RATIO_THRESHOLD:
+        if status >= 400 or len(text) < _MIN_READABLE_TEXT_LENGTH or html_to_text_ratio > _SPA_HTML_TO_TEXT_RATIO_THRESHOLD:
             browser_html = _fetch_with_browser(url)
             if browser_html is not None:
                 browser_title, browser_text = _extract_readable_text(browser_html)
-                if len(browser_text) > len(text):
+                browser_status = getattr(browser_html, "status", None)
+                if (status >= 400 and browser_status is not None and browser_status < 400 and browser_text) or len(browser_text) > len(text):
                     title, text = browser_title, browser_text
+                    status = browser_status if browser_status is not None else status
 
+        if looks_blocked(status, text):
+            return {"error": blocked_message(url, status)}
+        if status >= 400:
+            return {"error": f"web_fetch: {url} answered HTTP {status}, so there is no page to read."}
         if not text:
             return {"error": f"web_fetch: {url}: no readable text content (page may need JS, and the local browser fallback wasn't available or also found nothing)"}
 
         header = f"# {title}\nSource: {url}\n\n" if title else f"Source: {url}\n\n"
         output = header + text
         return _chunk_content(url, output, offset)
+    except Exception as e:
+        return {"error": f"Fetch failed: {e}"}
+
+
+_SOURCE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def fetch_source(url: str):
+    """The page exactly as the server sends it (HTML, CSS, JS or any text file), not the readable-text version web_fetch gives. For
+    work that needs the real markup: copying, restyling or rebuilding a page. A page that turns the plain request away is read once
+    through the local browser, which gets the page after its scripts ran, and the result says so."""
+    try:
+        resp = httpx.get(url, timeout=20, follow_redirects=True, headers={
+            "User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"})
+        status, text, note = resp.status_code, resp.text, None
+        if status in _REFUSAL_STATUSES or status >= 400:
+            rendered = _fetch_with_browser(url)
+            if rendered is not None and not looks_blocked(getattr(rendered, "status", None) or 200, str(rendered)):
+                text, status, note = str(rendered), getattr(rendered, "status", None) or 200, "The server turned the plain request away, so this is the page as a browser shows it after its scripts ran, not the original file."
+        if status >= 400:
+            return {"error": f"web_fetch: {url} answered HTTP {status}, so there is no page source to read."}
+        content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+        if content_type and not (content_type.startswith("text/") or "json" in content_type or "xml" in content_type or "javascript" in content_type or "svg" in content_type):
+            return {"error": f"web_fetch: {url} is {content_type}, not text, so there is no source to read."}
+        truncated = len(text.encode("utf-8", "ignore")) > _SOURCE_MAX_BYTES
+        if truncated:
+            text = text.encode("utf-8", "ignore")[:_SOURCE_MAX_BYTES].decode("utf-8", "ignore")
+        result = {"url": str(resp.url), "status": status, "content_type": content_type, "text": text, "truncated": truncated}
+        if note:
+            result["note"] = note
+        return result
     except Exception as e:
         return {"error": f"Fetch failed: {e}"}

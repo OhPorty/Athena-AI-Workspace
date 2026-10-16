@@ -59,7 +59,7 @@ def test_actions_parse_and_reject_garbage():
             pt.parse_actions(bad)
 
 
-@pytest.mark.parametrize("host,expected", [("127.0.0.1", False), ("10.0.0.5", False), ("192.168.1.131", False),
+@pytest.mark.parametrize("host,expected", [("127.0.0.1", False), ("10.0.0.5", False), ("192.168.0.11", False),
                                            ("169.254.169.254", False), ("::1", False), ("8.8.8.8", True), ("", False)])
 def test_only_globally_routable_hosts_are_reachable(host, expected):
     assert pt._is_public_host(host) is expected
@@ -90,7 +90,7 @@ def test_clean_page_passes_and_reports_layout_and_screenshots(ws):
     for name in ("desktop", "mobile"):
         shot = os.path.join(ws, r["screenshots"][name])
         assert open(shot, "rb").read(8) == b"\x89PNG\r\n\x1a\n"
-    assert len(r["_images"]) == 2 and base64.b64decode(r["_images"][0])[:2] == b"\xff\xd8"
+    assert len(r["_images"]) == 2 and base64.b64decode(r["_images"][0])[:4] == b"\x89PNG"
 
 
 def test_broken_page_is_caught_with_actionable_detail(ws):
@@ -137,7 +137,7 @@ def test_actions_drive_the_page_before_the_check(ws):
 
 def test_failing_action_reports_instead_of_hanging(ws):
     r = pt.preview(ws, {"path": "app.html", "viewport": "desktop", "actions": ["click #does-not-exist"]})
-    assert "error" in r and "preview couldn't load" in r["error"]
+    assert "error" in r and "step 1 (click #does-not-exist) did not work" in r["error"] and '#start (button "Start")' in r["error"]
 
 
 def test_long_pages_are_cropped_not_exploded(tmp_path):
@@ -206,9 +206,9 @@ def test_dispatch_and_gate_integration(ws):
         search_url = ""
         allowed_tools = None
     names = lambda t: {x["function"]["name"] for x in t}
-    assert "preview" in names(main._get_mode_tools("workspace", Req(), build_task=True))
-    assert "preview" in names(main._get_mode_tools("workspace", Req()))
-    assert "preview" not in names(main._get_mode_tools("casual", Req()))
+    assert "preview" in names(main._get_mode_tools_legacy("workspace", Req(), build_task=True))
+    assert "preview" in names(main._get_mode_tools_legacy("workspace", Req()))
+    assert "preview" not in names(main._get_mode_tools_legacy("casual", Req()))
 
 
 # ---------- contrast over gradients (found when a 4B model's edit made a button unreadable and the check missed it) ----------

@@ -1,3 +1,4 @@
+import contextvars
 import time
 import threading
 
@@ -58,6 +59,7 @@ def _deliver_delegation_result(req_fields, content):
         while session_id in generation_streaming.active_generations:
             time.sleep(2)
         req = ChatIn(
+            interactive=False,
             session_id=session_id,
             message=content,
             model=req_fields["model"],
@@ -117,7 +119,7 @@ def _run_delegation_step_async_tool(req, bot_id, instruction, known=None, report
     req_fields = _capture_req_fields(req)
     with _delegation_jobs_lock:
         _delegation_jobs[job_id] = {"status": "running", "kind": "step", "session_id": req.session_id, "result": None}
-    threading.Thread(target=_delegation_step_worker, args=(job_id, task_hash, req_fields, bot_id, instruction, known, report, task_text), daemon=True).start()
+    threading.Thread(target=contextvars.copy_context().run, args=(_delegation_step_worker, job_id, task_hash, req_fields, bot_id, instruction, known, report, task_text), daemon=True).start()
     return {
         "status": "pending",
         "handle": job_id,
@@ -154,7 +156,7 @@ def _plan_delegation_async_tool(req, steps, task_text=""):
     req_fields = _capture_req_fields(req)
     with _delegation_jobs_lock:
         _delegation_jobs[job_id] = {"status": "running", "kind": "plan", "session_id": req.session_id, "result": None}
-    threading.Thread(target=_delegation_plan_worker, args=(job_id, task_hash, req_fields, steps, task_text), daemon=True).start()
+    threading.Thread(target=contextvars.copy_context().run, args=(_delegation_plan_worker, job_id, task_hash, req_fields, steps, task_text), daemon=True).start()
     return {
         "status": "pending",
         "handle": job_id,

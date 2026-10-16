@@ -7,6 +7,8 @@ import time
 import subprocess
 import threading
 
+import safety
+
 # Read-only shell access. Structured, not a raw command string: the
 # model supplies a bare command name plus a list of arguments, which
 # are passed directly to subprocess.run with shell=False -- no shell
@@ -499,7 +501,7 @@ def _docker_sandbox_available():
         return False
 
 
-def _build_docker_sandbox_cmd(command, args, workspace):
+def _build_docker_sandbox_cmd(command, args, workspace, name=None):
     """Every bash_exec command runs inside this container, not
     directly on the host -- allowlisting/pattern-blocking in
     _validate_bash_exec_call decides WHETHER a command runs; this
@@ -514,8 +516,10 @@ def _build_docker_sandbox_cmd(command, args, workspace):
     uid, gid = os.getuid(), os.getgid()
     return [
         "docker", "run", "--rm",
+        *(["--name", name] if name else []),
         "--network", "bridge",
         "-v", f"{real_workspace}:{real_workspace}",
+        *safety.container_mounts(real_workspace),
         "-w", real_workspace,
         "--user", f"{uid}:{gid}",
         "-e", "HOME=/tmp",

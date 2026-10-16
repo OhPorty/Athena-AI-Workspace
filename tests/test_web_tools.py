@@ -193,3 +193,53 @@ def test_fetch_with_browser_short_circuits_once_marked_unavailable(monkeypatch):
     # No httpx/playwright mocking needed -- should return immediately
     # without attempting any import or network activity at all.
     assert web_tools._fetch_with_browser("http://example.com") is None
+
+
+# ---------- sites that turn automated readers away ----------
+
+class _Rendered(str):
+    status = None
+
+
+def _rendered(html, status):
+    r = _Rendered(html)
+    r.status = status
+    return r
+
+
+def test_a_refusal_is_reported_as_one_not_handed_over_as_the_page(monkeypatch):
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **k: FakeResponse(text="<html><title>403 Forbidden</title><body><h1>403 Forbidden</h1></body></html>", status_code=403))
+    monkeypatch.setattr(web_tools, "_fetch_with_browser", lambda url: None)
+    out = web_tools.web_fetch("https://www.imdb.com/title/tt1/")
+    assert "content" not in out and "refused to serve" in out["error"] and "imdb.com" in out["error"] and "different source" in out["error"]
+
+
+def test_a_real_browser_that_gets_through_returns_the_page(monkeypatch):
+    article = "<html><title>Eiffel Tower</title><body><p>" + "The tower is in Paris. " * 40 + "</p></body></html>"
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **k: FakeResponse(text="<html><body>403</body></html>", status_code=403))
+    monkeypatch.setattr(web_tools, "_fetch_with_browser", lambda url: _rendered(article, 200))
+    out = web_tools.web_fetch("https://en.wikipedia.org/wiki/Eiffel_Tower")
+    assert "error" not in out and "The tower is in Paris." in out["content"]
+
+
+def test_a_verification_page_served_with_200_is_still_a_refusal(monkeypatch):
+    page = "<html><title>Human Verification</title><body><p>Please verify you are human to continue.</p></body></html>"
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **k: FakeResponse(text=page, status_code=200))
+    monkeypatch.setattr(web_tools, "_fetch_with_browser", lambda url: None)
+    assert "refused to serve" in web_tools.web_fetch("https://example.com/x")["error"]
+
+
+def test_a_missing_page_is_an_error_and_a_long_article_about_blocking_is_not(monkeypatch):
+    monkeypatch.setattr(web_tools, "_fetch_with_browser", lambda url: None)
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **k: FakeResponse(text="<html><title>Not found</title><body><p>There is nothing at this address, sorry about that, please check the link you followed and try again or head back to the home page.</p></body></html>", status_code=404))
+    assert "HTTP 404" in web_tools.web_fetch("https://example.com/gone")["error"]
+    essay = "<html><title>How CDNs work</title><body><p>" + "Some servers return 403 Forbidden or Access Denied when they decide a request is automated. " * 40 + "</p></body></html>"
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **k: FakeResponse(text=essay, status_code=200))
+    assert "403 Forbidden" in web_tools.web_fetch("https://example.com/essay")["content"]
+
+
+def test_plain_fetches_say_what_they_are(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(web_tools.httpx, "get", lambda url, **k: (seen.update(k.get("headers", {})), FakeResponse(text="<html><body><p>" + "words " * 100 + "</p></body></html>"))[1])
+    web_tools.web_fetch("https://example.com/a")
+    assert seen["User-Agent"].startswith("AthenaBot/") and "github.com" in seen["User-Agent"] and "Accept-Language" in seen

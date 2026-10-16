@@ -3,9 +3,12 @@ import os
 import shutil
 import tempfile
 import threading
+import zipfile
 
-from fastapi import APIRouter
+import ownership
+from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 import backup_tools
@@ -13,7 +16,7 @@ import binary_files
 import rag
 from logging_setup import logger
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(ownership.workspace_guard)])
 
 
 FILE_TOOL_SCHEMAS = [
@@ -33,12 +36,15 @@ FILE_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file's contents. Large files are capped at 20000 characters per call -- if the response has has_more: true, call again with offset set to the returned next_offset to continue reading from where you left off, rather than assuming you've seen the whole file.",
+            "description": "Read a file's contents. If you can view images, an image, SVG or PDF is also shown to you as a picture, so you can check what you made. Long files come in pieces of about 200 lines -- if the response has has_more: true, call again with offset set to the returned next_offset (or start_line to jump to a part) to continue, rather than assuming you've seen the whole file.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to workspace root."},
                     "offset": {"type": "integer", "description": "Character offset to start reading from. Omit or use 0 to start from the beginning."},
+                    "start_line": {"type": "integer", "description": "Start at this line number (1 is the first) instead of using offset."},
+                    "end_line": {"type": "integer", "description": "Stop after this line number. With start_line, reads exactly that range."},
+                    "page": {"type": "integer", "description": "For a PDF: which page to look at as a picture (1 is the first). Only if you can view images."},
                 },
                 "required": ["path"],
             },
@@ -128,9 +134,13 @@ def list_files(workspace: str, rel_path: str):
 
 
 _READ_FILE_CHUNK_SIZE = 20000
+_VIEWER_MAX_CHARS = 2_000_000
+# What a model gets from one read: about 200 lines. A long file arrives in pieces it can continue from, cut at a line end, instead of
+# a head and a tail with the middle thrown away -- small context windows stay small and no part of the file is ever out of reach.
+MODEL_READ_WINDOW = 8000
 
 
-def read_file(workspace: str, rel_path: str, offset: int = 0):
+def read_file(workspace: str, rel_path: str, offset: int = 0, chunk_size: int = _READ_FILE_CHUNK_SIZE, start_line=None, end_line=None, line_aligned=False):
     try:
         target = resolve_workspace_path(workspace, rel_path)
         if not os.path.isfile(target):
@@ -144,15 +154,33 @@ def read_file(workspace: str, rel_path: str, offset: int = 0):
                 content = f.read()
         offset = max(0, offset or 0)
         total_chars = len(content)
-        chunk = content[offset:offset + _READ_FILE_CHUNK_SIZE]
+        line_starts = [0] + [i + 1 for i, ch in enumerate(content) if ch == "\n" and i + 1 < total_chars]
+        total_lines = len(line_starts) if content else 0
+        limit_end = total_chars
+        if isinstance(start_line, int) and not isinstance(start_line, bool):
+            offset = line_starts[min(max(start_line, 1), max(total_lines, 1)) - 1] if content else 0
+        if isinstance(end_line, int) and not isinstance(end_line, bool) and 0 < end_line < total_lines:
+            limit_end = line_starts[end_line]
+        chunk = content[offset:min(offset + chunk_size, limit_end)]
+        if line_aligned and offset + len(chunk) < limit_end:             # the window ends mid-way: cut it at the end of a line
+            cut = chunk.rfind("\n")
+            if cut > 0:
+                chunk = chunk[:cut + 1]
         next_offset = offset + len(chunk)
-        has_more = next_offset < total_chars
+        has_more = next_offset < limit_end
+        first_line = content.count("\n", 0, offset) + 1 if content else 0
+        last_line = first_line + chunk.count("\n") - (1 if chunk.endswith("\n") else 0) if chunk else first_line
         result = {"path": rel_path, "content": chunk, "total_chars": total_chars, "has_more": has_more}
+        if line_aligned and content:
+            result["lines"] = f"{first_line}-{last_line} of {total_lines}"
         if kind:
             result["binary"] = True
             result["kind"] = kind
         if has_more:
             result["next_offset"] = next_offset
+            if line_aligned:
+                result["note"] = (f"This is lines {first_line}-{last_line} of {total_lines}, not the whole file. Continue with offset {next_offset} "
+                                  f"(or start_line {last_line + 1}), or jump to any part with start_line and end_line.")
         return result
     except ValueError as e:
         return {"error": str(e)}
@@ -407,6 +435,7 @@ def get_workspace_file(workspace: str, path: str = ""):
 def put_workspace_file(req: WorkspaceFileIn):
     if not req.workspace:
         return {"error": "No workspace set."}
+    ownership.workspace_guard(req.workspace)
     return save_edit(req.workspace, req.path, req.content, req.eol, req.base_version)
 
 
@@ -441,12 +470,11 @@ def list_workspace_files(workspace: str, path: str = ""):
 
 @router.get("/api/workspace/read")
 def read_workspace_file(workspace: str, path: str = "", offset: int = 0):
-    """Read a file's content for the file-browser panel's preview,
-    reusing the same read_file implementation the agent's read_file
-    tool uses."""
+    """The whole file for the file-browser preview (a person is reading it, so it is not cut to the
+    model's 20k-character chunk); only a very large file is cut, and has_more says so."""
     if not workspace:
         return {"error": "No workspace set."}
-    return read_file(workspace, path, offset)
+    return read_file(workspace, path, offset, _VIEWER_MAX_CHARS)
 
 
 _INLINE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".wav", ".mp3", ".ogg", ".oga", ".m4a", ".flac", ".opus"}
@@ -469,6 +497,68 @@ def download_workspace_file(workspace: str, path: str = "", inline: bool = False
     shown = os.path.splitext(target)[1].lower() in _INLINE_EXTENSIONS
     kind = "inline" if inline and shown else "attachment"
     return FileResponse(target, filename=os.path.basename(target), content_disposition_type=kind)
+
+
+# What a workspace zip leaves out: folders that are rebuilt by one command or only hold Athena's own scratch (previews, trash).
+_ZIP_SKIP_DIRS = {"node_modules", "__pycache__", ".venv", "venv", ".pytest_cache", ".athena"}
+_ZIP_MAX_BYTES = 1024 ** 3
+
+
+def zip_workspace(workspace: str):
+    """Zip the whole workspace into a temporary file. -> (path of the zip, number of files, names left out).
+    Symlinks are never followed (a link cannot pull in a file from outside), Athena's own private files are never included, and a workspace
+    over 1 GB is refused rather than filling the disk."""
+    import safety
+    root = resolve_workspace_path(workspace, "")
+    if not os.path.isdir(root):
+        raise ValueError("The workspace folder does not exist.")
+    handle, zip_path = tempfile.mkstemp(prefix="athena_workspace_", suffix=".zip")
+    os.close(handle)
+    count, total, left_out = 0, 0, []
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for current, dirs, files in os.walk(root):
+                kept = []
+                for d in dirs:
+                    full = os.path.join(current, d)
+                    if d in _ZIP_SKIP_DIRS or os.path.islink(full) or safety.classify(full) == "secret":
+                        left_out.append(os.path.relpath(full, root))
+                    else:
+                        kept.append(d)
+                dirs[:] = sorted(kept)
+                for name in sorted(files):
+                    full = os.path.join(current, name)
+                    if os.path.islink(full) or safety.classify(full) == "secret" or not os.path.isfile(full):
+                        left_out.append(os.path.relpath(full, root))
+                        continue
+                    try:
+                        total += os.path.getsize(full)
+                        if total > _ZIP_MAX_BYTES:
+                            raise ValueError("This workspace is over 1 GB, which is too big to zip here.")
+                        archive.write(full, os.path.relpath(full, root))
+                        count += 1
+                    except OSError:
+                        left_out.append(os.path.relpath(full, root))
+            if count == 0:
+                archive.writestr(".empty", "")           # a zip with no entries is not a valid download for most tools
+    except Exception:
+        os.remove(zip_path)
+        raise
+    return zip_path, count, left_out
+
+
+@router.get("/api/workspace/zip")
+def download_workspace_zip(workspace: str):
+    """The whole workspace as one .zip, for taking a project away. Confined to the workspace by resolve_workspace_path, like every file route."""
+    if not workspace:
+        return JSONResponse({"error": "No workspace set."}, status_code=400)
+    try:
+        zip_path, count, left_out = zip_workspace(workspace)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    name = (os.path.basename(os.path.realpath(workspace).rstrip(os.sep)) or "workspace") + ".zip"
+    return FileResponse(zip_path, media_type="application/zip", filename=name, background=BackgroundTask(os.remove, zip_path),
+                        headers={"X-Files-Zipped": str(count), "X-Files-Left-Out": str(len(left_out))})
 
 
 @router.delete("/api/workspace/delete")

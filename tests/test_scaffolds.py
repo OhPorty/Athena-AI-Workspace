@@ -164,8 +164,9 @@ def test_build_prompt_swaps_the_search_first_rule_for_build_guidance_and_default
 
 def test_system_prompt_selection_by_mode_and_build_flag():
     req = types.SimpleNamespace(workspace="")
-    assert main._get_mode_system_prompt("workspace", req, build_task=True) == main.CODING_HARNESS_BUILD_PROMPT
-    assert main._get_mode_system_prompt("workspace", req) == main.CODING_HARNESS_SYSTEM_PROMPT
+    assert main._get_mode_system_prompt("workspace", req, build_task=True).startswith(main.WORKSPACE_BUILD_PROMPT)      # workspace sessions have their own prompt layer
+    assert main._get_mode_system_prompt("workspace", req).startswith(main.WORKSPACE_PROMPT)
+    assert main.CODING_HARNESS_SYSTEM_PROMPT not in main._get_mode_system_prompt("workspace", req)
     assert main._get_mode_system_prompt("athena_delegation", req, build_task=True).startswith(main.CODING_HARNESS_SYSTEM_PROMPT)
     assert main.CODING_HARNESS_BUILD_PROMPT not in main._get_mode_system_prompt("casual", req, build_task=True)
 
@@ -175,9 +176,9 @@ def test_scaffold_tool_is_offered_only_for_build_tasks_and_counts_as_progress():
         search_url = ""
         allowed_tools = None
     names = lambda t: {x["function"]["name"] for x in t}
-    assert "scaffold" in names(main._get_mode_tools("workspace", Req(), build_task=True))
-    assert "scaffold" not in names(main._get_mode_tools("workspace", Req()))
-    assert "scaffold" not in names(main._get_mode_tools("casual", Req(), build_task=True))
+    assert "scaffold" in names(main._get_mode_tools_legacy("workspace", Req(), build_task=True))
+    assert "scaffold" not in names(main._get_mode_tools_legacy("workspace", Req()))
+    assert "scaffold" not in names(main._get_mode_tools_legacy("casual", Req(), build_task=True))
     assert main._result_is_progress("scaffold", {"created": ["index.html"]})
     ctx = main.ToolContext(session_id="s", workspace="", search_url="", bot=None, session_key=None, req=None,
                            plan_state=None, passthrough_session_id=None, require_athena_bots_session=False)

@@ -65,17 +65,48 @@
 }
 
 .shimmer-text {
+    /* The text itself is transparent so the moving gradient shows through, which means the gradient cannot be built from currentColor
+       (that is transparent too, and the label vanished): it has its own explicit colour. */
+    --shimmer: 115 115 115;
     background: linear-gradient(
         90deg,
-        color-mix(in srgb, currentColor 55%, transparent) 0%,
-        color-mix(in srgb, currentColor 90%, transparent) 45%,
-        color-mix(in srgb, currentColor 55%, transparent) 90%
+        rgb(var(--shimmer) / 0.55) 0%,
+        rgb(var(--shimmer) / 1) 45%,
+        rgb(var(--shimmer) / 0.55) 90%
     );
     background-size: 240% 100%;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
     animation: shimmer 1.8s linear infinite;
+}
+
+.dark .shimmer-text {
+    --shimmer: 190 190 190;
+}
+
+/* Three small dots that fade in turn beside "Thinking" while the model is still thinking. */
+.thinking-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.thinking-dots i {
+    width: 3px;
+    height: 3px;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.25;
+    animation: thinking-dot 1.2s ease-in-out infinite;
+}
+
+.thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes thinking-dot {
+    0%, 70%, 100% { opacity: 0.25; transform: translateY(0); }
+    35% { opacity: 1; transform: translateY(-2px); }
 }
 
 .spin-soft {
@@ -90,6 +121,7 @@
     .presence-orb::before,
     .presence-orb .presence-ring,
     .shimmer-text,
+    .thinking-dots i,
     .spin-soft,
     .rise-in {
         animation: none;

@@ -88,7 +88,7 @@ def test_strata_is_recognized_from_health_and_reads_window_vision_tools():
         ("GET", "/v1/models"): (200, {"data": [{"id": "qwen3.8-flash-next-coder-iq1_m", "meta": {"n_ctx": 32768},
                                                "architecture": {"input_modalities": ["text"]}}]}),
     })
-    f = mp.get_facts("custom", "http://192.168.1.131:8080/v1", "k", "qwen3.8-flash-next-coder-iq1_m", transport=t)
+    f = mp.get_facts("custom", "http://192.168.0.11:8080/v1", "k", "qwen3.8-flash-next-coder-iq1_m", transport=t)
     assert f["engine"] == "strata"
     assert (f["context_window"], f["vision"], f["tools"]) == (32768, False, True)
     assert f["quant"] == "IQ1_M" and f["bits_per_weight"] == pytest.approx(1.6)
@@ -178,7 +178,7 @@ def test_resolve_applies_settings_override_and_vision_override(monkeypatch):
 def test_small_tier_thresholds_equal_the_pre_profile_constants():
     import main
     t = mp.GATE_THRESHOLDS["small"]
-    assert (t["plan_required"], t["plan_checkin"]) == (main._PLAN_REQUIRED_THRESHOLD, main._PLAN_CHECKIN_THRESHOLD)
+    assert t["plan_checkin"] == main._PLAN_CHECKIN_THRESHOLD and "plan_required" not in t
     assert t["self_investigation"] == main._SELF_INVESTIGATION_TOOL_THRESHOLD
 
 

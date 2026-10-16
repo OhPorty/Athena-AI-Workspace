@@ -1,3 +1,4 @@
+import contextvars
 import re
 import json
 import time
@@ -17,6 +18,7 @@ import generation_streaming
 import host_locks
 from host_locks import OLLAMA_URL
 import bots
+import ownership
 from logging_setup import logger
 
 router = APIRouter()
@@ -39,6 +41,11 @@ def _row_to_room(r):
 _ROOM_COLUMNS = "id, kind, human_party, label, member_bot_ids_json, created_at, last_active, is_everyone_room"
 
 
+def _room_is_mine(conn, room_id):
+    where, params = ownership.owner_filter()
+    return conn.execute(f"SELECT 1 FROM rooms WHERE id = ? AND {where}", (room_id, *params)).fetchone() is not None
+
+
 @router.post("/api/rooms/everyone")
 def get_or_create_everyone_room():
     """The one canonical room containing every bot -- membership isn't
@@ -51,8 +58,9 @@ def get_or_create_everyone_room():
     displayed member list in the UI stays accurate."""
     conn = bots._bots_conn()
     try:
-        all_bot_ids = [r[0] for r in conn.execute("SELECT id FROM bots").fetchall()]
-        existing = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE is_everyone_room = 1").fetchone()
+        where, owner_params = ownership.owner_filter()
+        all_bot_ids = [r[0] for r in conn.execute(f"SELECT id FROM bots WHERE {where}", owner_params).fetchall()]
+        existing = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE is_everyone_room = 1 AND {where}", owner_params).fetchone()
         if existing:
             room_id = existing[0]
             conn.execute("UPDATE rooms SET member_bot_ids_json = ? WHERE id = ?", (json.dumps(all_bot_ids), room_id))
@@ -60,8 +68,8 @@ def get_or_create_everyone_room():
             return _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone())
         now = time.time()
         cur = conn.execute(
-            "INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active, is_everyone_room) VALUES ('group', NULL, 'Everyone', ?, ?, ?, 1)",
-            (json.dumps(all_bot_ids), now, now)
+            "INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active, is_everyone_room, owner) VALUES ('group', NULL, 'Everyone', ?, ?, ?, 1, ?)",
+            (json.dumps(all_bot_ids), now, now, ownership.stored_owner())
         )
         conn.commit()
         return _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
@@ -71,9 +79,10 @@ def get_or_create_everyone_room():
 
 @router.get("/api/rooms")
 def list_rooms():
+    where, owner_params = ownership.owner_filter()
     conn = bots._bots_conn()
     try:
-        rows = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms ORDER BY last_active DESC, created_at DESC").fetchall()
+        rows = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE {where} ORDER BY last_active DESC, created_at DESC", owner_params).fetchall()
         return [_row_to_room(r) for r in rows]
     finally:
         conn.close()
@@ -94,18 +103,19 @@ def find_or_create_room(req: RoomFindOrCreateIn):
     try:
         sorted_members = json.dumps(sorted(req.member_bot_ids))
         if req.kind == "dm":
+            where, owner_params = ownership.owner_filter()
             existing = conn.execute(
                 "SELECT " + _ROOM_COLUMNS + " FROM rooms WHERE kind = 'dm' AND "
-                "(human_party IS ? OR human_party = ?) AND member_bot_ids_json = ?",
-                (req.human_party, req.human_party, sorted_members)
+                "(human_party IS ? OR human_party = ?) AND member_bot_ids_json = ? AND " + where,
+                (req.human_party, req.human_party, sorted_members, *owner_params)
             ).fetchone()
             if existing:
                 return _row_to_room(existing)
         now = time.time()
         cur = conn.execute("""
-            INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (req.kind, req.human_party, req.label or "", sorted_members, now, now))
+            INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active, owner)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (req.kind, req.human_party, req.label or "", sorted_members, now, now, ownership.stored_owner()))
         conn.commit()
         return _row_to_room(conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
     finally:
@@ -122,6 +132,8 @@ class RoomMessageIn(BaseModel):
 def get_room_messages(room_id: int):
     conn = bots._bots_conn()
     try:
+        if not _room_is_mine(conn, room_id):
+            return []
         rows = conn.execute(
             "SELECT id, room_id, sender_type, sender_bot_id, content, created_at FROM room_messages WHERE room_id = ? ORDER BY id ASC",
             (room_id,)
@@ -135,6 +147,8 @@ def get_room_messages(room_id: int):
 def post_room_message(room_id: int, req: RoomMessageIn):
     conn = bots._bots_conn()
     try:
+        if not _room_is_mine(conn, room_id):
+            return {"error": f"Room {room_id} not found."}
         now = time.time()
         cur = conn.execute(
             "INSERT INTO room_messages (room_id, sender_type, sender_bot_id, content, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -285,9 +299,13 @@ def _run_athena_room_turn_gen(room_id):
     own done chunk -- so a real reply always lands in the room exactly
     once generation actually finishes, whether anyone's still watching
     or not."""
-    current_settings = settings.load_settings()
+    current_settings = settings.load_effective()
     defaults = current_settings.get("athena_agent_model") or {}
     model = defaults.get("model")
+    if model and ownership.endpoint_kind(defaults.get("provider", ""), defaults.get("endpoint_url", "")) is None:
+        yield f"data: {json.dumps({'error': 'This account cannot use the model set for Athena. Pick another in her model picker.'})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+        return
     if not model:
         yield f"data: {json.dumps({'error': "No model is configured for Athena's own agent turns yet. Set one via her Agent Defaults / model picker first."})}\n\n"
         yield f"data: {json.dumps({'done': True})}\n\n"
@@ -295,7 +313,8 @@ def _run_athena_room_turn_gen(room_id):
 
     conn = bots._bots_conn()
     try:
-        room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone()
+        where, owner_params = ownership.owner_filter()
+        room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ? AND {where}", (room_id, *owner_params)).fetchone()
         if not room_row:
             yield f"data: {json.dumps({'error': f'Room {room_id} not found.'})}\n\n"
             yield f"data: {json.dumps({'done': True})}\n\n"
@@ -304,7 +323,7 @@ def _run_athena_room_turn_gen(room_id):
             "SELECT sender_type, sender_bot_id, content FROM room_messages WHERE room_id = ? ORDER BY id ASC",
             (room_id,)
         ).fetchall()
-        all_bot_rows = conn.execute(f"SELECT {bots._BOT_COLUMNS} FROM bots").fetchall()
+        all_bot_rows = conn.execute(f"SELECT {bots._BOT_COLUMNS} FROM bots WHERE {where}", owner_params).fetchall()
         bots_by_id = {b["id"]: b for b in [bots._row_to_bot(r) for r in all_bot_rows]}
     finally:
         conn.close()
@@ -313,7 +332,7 @@ def _run_athena_room_turn_gen(room_id):
                 "sender_bot_name": bots_by_id.get(r[1], {}).get("name") if r[1] else None} for r in history_rows]
 
     from main import _stream_completion, CODING_HARNESS_SYSTEM_PROMPT  # deferred: main.py imports rooms.py at module load
-    room_turn_workspace = settings.load_settings().get("workspace") or ""
+    room_turn_workspace = settings.load_effective().get("workspace") or ""
     system_prompt = CODING_HARNESS_SYSTEM_PROMPT + bots._get_bot_delegation_prompt_section(room_turn_workspace)
     chat_messages = [{"role": "system", "content": system_prompt}]
     for m in history:
@@ -352,8 +371,10 @@ def _run_athena_room_turn_gen(room_id):
                     yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
                 delta = msg.get("content", "")
                 if delta:
-                    round_reply += delta
-                    yield f"data: {json.dumps({'delta': delta})}\n\n"
+                    # Text from an earlier round starts this round's text on a new paragraph instead of running into it.
+                    joiner = "\n\n" if (not round_reply and full_reply and not full_reply[-1].isspace() and not delta[0].isspace()) else ""
+                    round_reply += joiner + delta
+                    yield f"data: {json.dumps({'delta': joiner + delta})}\n\n"
                 if msg.get("tool_calls"):
                     round_tool_calls.extend(msg["tool_calls"])
                 if chunk.get("done"):
@@ -417,7 +438,7 @@ def _start_athena_room_turn_background(room_id):
     event_queue = queue.Queue()
     generation_streaming.active_generations[key] = event_queue
     generation_streaming.generation_snapshots[key] = {"thinking": "", "content": "", "tool_calls": []}
-    threading.Thread(target=generation_streaming.drain_generator_to_queue, args=(gen, event_queue, key), daemon=True).start()
+    threading.Thread(target=contextvars.copy_context().run, args=(generation_streaming.drain_generator_to_queue, gen, event_queue, key), daemon=True).start()
 
 
 
@@ -438,7 +459,8 @@ def send_room_message(room_id: int, req: RoomSendIn):
     each reply -- all visible in the same room_messages history."""
     conn = bots._bots_conn()
     try:
-        room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ?", (room_id,)).fetchone()
+        where, owner_params = ownership.owner_filter()
+        room_row = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = ? AND {where}", (room_id, *owner_params)).fetchone()
         if not room_row:
             return {"error": f"Room {room_id} not found."}
         room = _row_to_room(room_row)
@@ -451,7 +473,7 @@ def send_room_message(room_id: int, req: RoomSendIn):
         conn.execute("UPDATE rooms SET last_active = ? WHERE id = ?", (now, room_id))
         conn.commit()
 
-        all_bot_rows = conn.execute(f"SELECT {bots._BOT_COLUMNS} FROM bots").fetchall()
+        all_bot_rows = conn.execute(f"SELECT {bots._BOT_COLUMNS} FROM bots WHERE {where}", owner_params).fetchall()
         all_bots = [bots._row_to_bot(r) for r in all_bot_rows]
         bots_by_id = {b["id"]: b for b in all_bots}
 
@@ -523,9 +545,10 @@ def _message_room_tool(room_id, content):
 
 
 def _list_rooms_tool():
+    where, owner_params = ownership.owner_filter()
     conn = bots._bots_conn()
     try:
-        rows = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms ORDER BY last_active DESC").fetchall()
+        rows = conn.execute(f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE {where} ORDER BY last_active DESC", owner_params).fetchall()
         return [_row_to_room(r) for r in rows]
     finally:
         conn.close()

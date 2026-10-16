@@ -258,7 +258,6 @@ def test_the_delegation_prompt_is_short_positive_and_describes_the_new_flow():
 def test_prompt_extras_still_apply():
     assert "No workspace is currently bound" in bots._get_bot_delegation_prompt_section(workspace=None)
     assert "findings arrive as a brand new message" in bots._get_bot_delegation_prompt_section(workspace="/x", async_enabled=True)
-    assert "failed an automatic check" in bots._get_bot_delegation_prompt_section(workspace="/x", laya_gating_enabled=True)
 
 
 # ---------- bot ids are never guessed ----------
@@ -298,17 +297,3 @@ def test_delegation_results_are_not_paged_away_by_the_large_output_layer(workspa
     for name in ("run_delegation_step", "plan_delegation", "read_scratch_file"):
         assert name in tool_output.UNCOMPRESSED_TOOL_NAMES
     assert len(json.dumps(out)) < 9000                                               # and the delegation code keeps it bounded
-
-
-def test_a_report_whose_citations_check_out_is_not_rejected_by_the_scoring_model(workspace, monkeypatch):
-    """A real run: 29 tool calls, a report the optional scorer put at 0.43 against a 0.45 line, so a good report was
-    treated as failed. Citations that verify outrank that estimate; the scorer is only for reports with too little to check."""
-    monkeypatch.setattr(bots, "_maybe_flag_fabrication", lambda *a, **k: {"status": "possibly_fabricated", "detail": "scorer says no", "bot": "Iris"})
-    FakeBotLoop(monkeypatch, ["The route is static/app.js:40 and the state is main.py:3."])
-    assert bots._run_delegation_step_tool(make_bot(), "Where?")["status"] == "done"
-
-
-def test_the_scoring_model_still_decides_when_the_report_cites_nothing_checkable(workspace, monkeypatch):
-    monkeypatch.setattr(bots, "_maybe_flag_fabrication", lambda *a, **k: {"status": "possibly_fabricated", "detail": "scorer says no", "bot": "Iris"})
-    FakeBotLoop(monkeypatch, ["It is somewhere in the frontend, I think."])
-    assert bots._run_delegation_step_tool(make_bot(), "Where?")["status"] == "possibly_fabricated"

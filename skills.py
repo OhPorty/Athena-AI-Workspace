@@ -2,11 +2,18 @@ import os
 import re
 
 import yaml
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
 router = APIRouter()
+
+
+def _only_full_access():
+    """Skills are shared by every account and change what Athena does for all of them, so only accounts with full access edit them."""
+    import ownership
+    if not ownership.can_use_whole_host():
+        raise HTTPException(status_code=403, detail="Skills are shared; only an account with full access can change them.")
 
 SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
@@ -113,6 +120,7 @@ class SkillIn(BaseModel):
 
 @router.post("/api/skills")
 def save_skill(req: SkillIn):
+    _only_full_access()
     os.makedirs(SKILLS_DIR, exist_ok=True)
     folder = req.folder or _slugify(req.name)
     if ".." in folder or "/" in folder:
@@ -128,6 +136,7 @@ def save_skill(req: SkillIn):
 
 @router.delete("/api/skills/{folder}")
 def delete_skill(folder: str):
+    _only_full_access()
     if ".." in folder or "/" in folder:
         return {"error": "Invalid folder name."}
     skill_dir = os.path.join(SKILLS_DIR, folder)

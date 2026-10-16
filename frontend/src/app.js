@@ -61,11 +61,18 @@ export function athenaApp() {
             {id: "memory", label: "Memory", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H8m4-11A2.5 2.5 0 0 1 14.5 2h.01A2.5 2.5 0 0 1 17 4.5v15a2.5 2.5 0 0 1-4.96.5"/></svg>'},
             {id: "skills", label: "Skills", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.2H22l-6 4.6 2.3 7.2-6.3-4.6-6.3 4.6 2.3-7.2-6-4.6h7.6z"/></svg>'},
             {id: "tasks", label: "Tasks", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>'},
-            {id: "notes", label: "Notes", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>'},
+            {id: "notes", label: "Research", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>'},
             {id: "models", label: "Models", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>'},
             {id: "mcp", label: "MCP", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M12 17v5"/><path d="M6 8h12l-1 6a5 5 0 0 1-10 0z"/></svg>'},
             {id: "settings", label: "Settings", icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'},
         ],
+
+        // --- accounts ---
+        passwordRules: [],
+        accountName: "", isMain: false, fullAccess: false,
+        accounts: {users: [], one_prompt_at_a_time: false, main_authenticator_on: false},
+        newAccount: {username: "", password: "", full_access: false, share_authenticator: false},
+        accountNotice: null, accountError: "", confirmRemoveAccount: null,
 
         // --- theme ---
         theme: localStorage.getItem("athena_theme") || "light",
@@ -119,8 +126,8 @@ export function athenaApp() {
         modelProfileData: {},
         openProfileKey: null,
         botPtcEnabled: false,
+        planApprovalAll: false,
         asyncDelegationEnabled: false,
-        layaGatingEnabled: false,
         model: "",
         modelLabel: "Select a model",
         modelEndpointUrl: "",
@@ -161,6 +168,7 @@ export function athenaApp() {
         filePreviewOpen: false,
         filePreviewPath: "",
         filePreviewContent: "",
+        filePreviewCut: 0,
         filePreviewBinary: false,
         filePreviewKind: "",
         filePreviewEditing: false,
@@ -189,6 +197,14 @@ export function athenaApp() {
         newMcpName: "",
         newMcpCommand: "",
         newMcpArgs: "",
+        newMcpKind: "stdio",
+        newMcpUrl: "",
+        newMcpEnv: "",
+        newMcpHeaders: "",
+        newMcpCwd: "",
+        mcpEditing: null,
+        mcpEditArgs: null,
+        mcpEditSecrets: {env: [], headers: []},
         mcpAddError: "",
         expandedServer: null,
         mcpUiOpen: null,
@@ -241,11 +257,32 @@ export function athenaApp() {
         systemStats: null,
         systemStatsTimer: null,
 
+        // --- notifications on this device ---
+        push: {supported: "serviceWorker" in navigator && "PushManager" in window && "Notification" in window, enabled: false, busy: false, message: "", devices: 0},
+
+        // --- asking the person, and undo ---
+        pendingApprovals: [],
+        approvalText: {},
+        approvalDeclining: {},
+        botDescOpen: {},
+        htmlChoice: null,
+        clockTick: 0,
+        turnSnapshot: null,
+        undoBusy: false,
+        undoResult: "",
+
         // --- notes ---
         notes: [],
         activeNoteId: null,
+        notesTab: localStorage.getItem("athena_notes_tab") || "research",
+
+        // --- research (its own list of runs, separate from notes) ---
+        research: {runs: [], openId: localStorage.getItem("athena_research_open") || null, thread: [], followup: "", question: "", depth: localStorage.getItem("athena_research_depth") || "standard",
+                   modelKey: localStorage.getItem("athena_research_model") || "", checkKey: localStorage.getItem("athena_research_check") || "",
+                   starting: false, error: "", timer: null, confirmDeleteId: null, evidenceOpen: {}},
 
         async init() {
+            setInterval(() => { this.clockTick = (this.clockTick + 1) % 1000000; }, 1000);   // lets a live label notice that words stopped arriving
             await this.loadSettings();
             await this.loadNotes();
 
@@ -283,7 +320,8 @@ export function athenaApp() {
             this.$watch("model", () => this.loadCtxCap());
             this.$watch("modelEndpointUrl", () => this.loadCtxCap());
             this.loadCtxCap();
-            this.$watch("currentPage", () => this.updateHash());
+            this.$watch("currentPage", () => { this.updateHash(); if (this.currentPage === "notes" && this.notesTab === "research") this.loadResearch(); });
+            if (this.currentPage === "notes" && this.notesTab === "research") this.loadResearch();
             this.$watch("sessionId", () => this.updateHash());
 
             // Load the actual conversation for whatever session we
@@ -293,20 +331,67 @@ export function athenaApp() {
             this.loadSessionHistory(this.sessionId);
         },
 
+        // A card you opened or closed yourself stays that way; only cards you never touched are opened or closed for you.
+        userToggle(obj, key) {
+            obj[key] = !obj[key];
+            obj[key + "User"] = true;
+        },
+        toolFiles(tc) {
+            const out = tc && tc.output;
+            if (!out || typeof out !== "object") return [];
+            if (out.change && out.change.path) return [out.change].map(c => ({path: c.path, status: c.created ? "created" : "edited", added: c.added, removed: c.removed}));
+            return Array.isArray(out.files_changed) ? out.files_changed.slice(0, 2) : [];
+        },
+        toolTarget(tc) {
+            if (!tc || !tc.target || this.toolFiles(tc).length) return "";
+            return tc.target;
+        },
+        autoClose(obj, key) {
+            if (obj && !obj[key + "User"]) obj[key] = false;
+        },
+        // A fresh snapshot updates the cards already on screen instead of replacing them, so their open state survives.
+        _syncToolCalls(msg, incoming) {
+            const have = msg.toolCalls || [];
+            msg.toolCalls = (incoming || []).map((t, i) => {
+                const mine = have[i];
+                if (!mine || mine.tool !== t.tool) return t;
+                const {open, openUser} = mine;
+                return Object.assign(mine, t, {open, openUser});
+            });
+        },
+        _carryOpenState(fresh, previous) {
+            const old = new Map(previous.filter(m => m.messageId != null).map(m => [m.messageId, m]));
+            const live = previous.length && previous[previous.length - 1]._isLiveSnapshot ? previous[previous.length - 1] : null;
+            fresh.forEach((m, idx) => {
+                if (m.role !== "assistant") return;
+                const src = old.get(m.messageId) || (live && idx === fresh.length - 1 ? live : null);
+                if (!src) return;
+                if (src.thinkingOpenUser) { m.thinkingOpen = src.thinkingOpen; m.thinkingOpenUser = true; }
+                if (src.toolsOpenUser) { m.toolsOpen = src.toolsOpen; m.toolsOpenUser = true; }
+                (m.toolCalls || []).forEach((tc, i) => {
+                    const was = (src.toolCalls || [])[i];
+                    if (was && was.tool === tc.tool && was.openUser) { tc.open = was.open; tc.openUser = true; }
+                });
+            });
+        },
         async loadSessionHistory(id) {
             this.historyReady = false;
             try {
                 const resp = await fetch(`/api/history/${id}`);
                 const history = await resp.json();
-                this.messages = history.map(m => ({
+                const previous = this.messages || [];
+                const fresh = history.map(m => ({
                     ...m,
                     ttsLabel: "Play",
                     rating: null,
-                    model: m.role === "assistant" ? (m.model || this.getStoredMsgModel(m.messageId)) : undefined,
+                    model: m.role === "assistant" ? (this.labelForModelId(m.model) || this.getStoredMsgModel(m.messageId)) : undefined,
                     thinkingOpen: false,
                     toolCalls: m.toolCalls || [],
                     toolsOpen: false,
                 }));
+                if (this._historySessionId === id) this._carryOpenState(fresh, previous);
+                this._historySessionId = id;
+                this.messages = fresh;
                 await this.loadRatingsForSession(id);
                 await this.loadPinsForSession(id);
                 this.forceScrollToBottom();
@@ -383,10 +468,10 @@ export function athenaApp() {
                 } else if (thinkingGap > 0) {
                     liveMsg.thinking = targetThinking.slice(0, liveMsg.thinking.length + 3);
                 } else if (contentGap > SNAP_THRESHOLD) {
-                    liveMsg.thinkingOpen = false;
+                    this.autoClose(liveMsg, "thinkingOpen");
                     liveMsg.content = targetContent.slice(0, Math.max(liveMsg.content.length, targetContent.length - LAG_CHARS));
                 } else if (contentGap > 0) {
-                    liveMsg.thinkingOpen = false;
+                    this.autoClose(liveMsg, "thinkingOpen");
                     liveMsg.content = targetContent.slice(0, liveMsg.content.length + 3);
                 }
             }, 40);
@@ -420,6 +505,8 @@ export function athenaApp() {
                 const resp = await fetch(`/api/chat/status/${sessionId}`);
                 const data = await resp.json();
                 if (this.sessionId !== sessionId) return; // navigated away since this check started
+                this.pendingApprovals = data.approvals || [];
+                if (data.snapshot && data.snapshot.turn_snapshot && !this.turnSnapshot) this.turnSnapshot = data.snapshot.turn_snapshot;
                 if (data.generating) {
                     this.backgroundGenerating = true;
                     const snap = data.snapshot;
@@ -432,12 +519,14 @@ export function athenaApp() {
                             // of already-existing characters from scratch. The gradual
                             // reveal is only for genuinely NEW content arriving between
                             // polls from here on.
-                            this.messages.push({role: "assistant", content: snap.content, thinking: snap.thinking, thinkingOpen: !snap.content, toolCalls: snap.tool_calls, toolsOpen: false, model: this.modelLabel, ttsLabel: "Play", rating: null, messageId: null, _isLiveSnapshot: true});
+                            this.messages.push({role: "assistant", content: snap.content, thinking: snap.thinking, thinkingOpen: !snap.content, toolCalls: snap.tool_calls, toolsOpen: false, queueNote: snap.queue ? snap.queue.message : "", phase: this.phaseFromSnapshot(snap), phaseAt: Date.now(), _seenContent: (snap.content || "").length, _seenThinking: (snap.thinking || "").length, model: this.runningModelLabel(snap), ttsLabel: "Play", rating: null, messageId: null, _isLiveSnapshot: true});
                             liveMsg = this.messages[this.messages.length - 1]; // re-read the actual reactive object, not the pre-push reference
                         }
                         liveMsg._targetThinking = snap.thinking;
                         liveMsg._targetContent = snap.content;
-                        liveMsg.toolCalls = snap.tool_calls;
+                        this.followSnapshot(liveMsg, snap);
+                        liveMsg.model = this.runningModelLabel(snap);
+                        this._syncToolCalls(liveMsg, snap.tool_calls);
                         this._startLiveReveal(liveMsg);
                     }
                     setTimeout(() => this.checkBackgroundGeneration(sessionId), 2000);
@@ -587,11 +676,13 @@ export function athenaApp() {
             // metadata. Order matters where names could overlap (e.g.
             // check specific families before generic ones).
             if (!modelName) return null;
-            const name = modelName.toLowerCase();
+            // The label carries the endpoint name ("Spark-X2.5 (Ollama)"), which is not the model's maker, and "Ollama" contains
+            // "llama": match the model's own name only.
+            const name = modelName.replace(/\s*\([^)]*\)\s*$/, "").toLowerCase();
             const patterns = [
                 [/qwen/, 'qwen'],
                 [/nemotron|nvidia/, 'nvidia'],
-                [/llama|meta-?llama/, 'meta'],
+                [/(^|[^a-z])llama|meta-?llama|tinyllama/, 'meta'],
                 [/gemma|gemini/, 'google'],
                 [/mistral|mixtral|codestral|devstral/, 'mistralai'],
                 [/deepseek/, 'deepseek'],
@@ -605,6 +696,18 @@ export function athenaApp() {
                 if (re.test(name)) return slug;
             }
             return null;
+        },
+        // The same label the live message shows, for a saved message's raw model id, so the name does not change when a reply finishes.
+        labelForModelId(id) {
+            if (!id) return null;
+            const hit = this.allAvailableModels().find(m => m.value === id);
+            return hit ? hit.label : id;
+        },
+        // The label for the model a generation is really using (the server says which), not whichever one is selected now.
+        runningModelLabel(snap) {
+            if (!snap || !snap.model) return this.modelLabel;
+            const hit = this.allAvailableModels().find(m => m.value === snap.model && (m.endpointUrl || "") === (snap.endpoint_url || ""));
+            return hit ? hit.label : (this.modelAliases[snap.model] || snap.model);
         },
         setStoredMsgModel(id, model) {
             if (id === null || id === undefined || !model) return;
@@ -691,8 +794,9 @@ export function athenaApp() {
             return new Date(timestamp).toLocaleString(undefined, {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
         },
 
-        formatDateTime(seconds) {
-            const date = new Date(seconds * 1000);
+        formatDateTime(stamp) {
+            // Saved messages carry seconds; a value too big to be seconds is milliseconds. Either shows the right time.
+            const date = new Date(stamp > 1e11 ? stamp : stamp * 1000);
             const now = new Date();
             const isToday = date.toDateString() === now.toDateString();
             const options = isToday
@@ -1135,12 +1239,13 @@ export function athenaApp() {
                         let liveMsg = this.roomMessages[this.roomMessages.length - 1];
                         const isFreshReconnect = !liveMsg || !liveMsg._isLiveSnapshot;
                         if (isFreshReconnect) {
-                            this.roomMessages.push({sender_type: "athena", content: snap.content, thinking: snap.thinking, thinkingOpen: !snap.content, toolCalls: snap.tool_calls, toolsOpen: false, _isLiveSnapshot: true});
+                            this.roomMessages.push({sender_type: "athena", content: snap.content, thinking: snap.thinking, thinkingOpen: !snap.content, toolCalls: snap.tool_calls, toolsOpen: false, phase: this.phaseFromSnapshot(snap), phaseAt: Date.now(), _seenContent: (snap.content || "").length, _seenThinking: (snap.thinking || "").length, _isLiveSnapshot: true});
                             liveMsg = this.roomMessages[this.roomMessages.length - 1]; // re-read the actual reactive object, not the pre-push reference
                         }
                         liveMsg._targetThinking = snap.thinking;
                         liveMsg._targetContent = snap.content;
-                        liveMsg.toolCalls = snap.tool_calls;
+                        this.followSnapshot(liveMsg, snap);
+                        this._syncToolCalls(liveMsg, snap.tool_calls);
                         this._startLiveReveal(liveMsg);
                     }
                     setTimeout(() => this.checkAthenaAgentBackgroundGeneration(), 2000);
@@ -1205,25 +1310,29 @@ export function athenaApp() {
                             try {
                                 const obj = JSON.parse(line.slice(6));
                                 if (obj.thinking) {
+                                    this.setPhase(this.roomMessages[msgIndex], "Thinking");
                                     this.roomMessages[msgIndex].thinking += obj.thinking;
                                     this.scrollBotMsgToBottom();
                                 }
                                 if (obj.delta) {
-                                    this.roomMessages[msgIndex].thinkingOpen = false;
+                                    this.setPhase(this.roomMessages[msgIndex], "Speaking");
+                                    this.autoClose(this.roomMessages[msgIndex], "thinkingOpen");
                                     full += obj.delta;
                                     this.roomMessages[msgIndex].content = full;
                                     this.scrollBotMsgToBottom();
                                 }
                                 if (obj.type === "tool_start") {
-                                    this.roomMessages[msgIndex].toolCalls.push({tool: obj.tool, status: "running", output: null, open: true});
+                                    this.setPhase(this.roomMessages[msgIndex], "Working");
+                                    this.roomMessages[msgIndex].toolCalls.push({tool: obj.tool, target: obj.target || "", status: "running", output: null, open: true});
                                     this.scrollBotMsgToBottom();
                                 }
                                 if (obj.type === "tool_output") {
+                                    this.setPhase(this.roomMessages[msgIndex], "Working");
                                     const tc = this.roomMessages[msgIndex].toolCalls.find(t => t.tool === obj.tool && t.status === "running");
                                     if (tc) {
                                         tc.status = "done";
                                         tc.output = obj.output;
-                                        tc.open = false;
+                                        this.autoClose(tc, "open");
                                     }
                                     this.scrollBotMsgToBottom();
                                 }
@@ -1488,9 +1597,6 @@ export function athenaApp() {
             fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({delegation_async_enabled: this.asyncDelegationEnabled})}).catch(e => console.error("Failed to save async delegation setting:", e));
         },
 
-        saveLayaGatingEnabled() {
-            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({laya_gating_enabled: this.layaGatingEnabled})}).catch(e => console.error("Failed to save Laya gating setting:", e));
-        },
 
         openSaveNoteFilePopup() {
             this.saveNoteFilePopupOpen = true;
@@ -1674,10 +1780,69 @@ export function athenaApp() {
                 const resp = await fetch("/api/auth/status");
                 const data = await resp.json();
                 this.totpEnabled = !!data.totp_enabled;
+                this.passwordRules = data.password_rules || [];
+                this.accountName = data.username || "";
+                this.isMain = !!data.is_main;
+                this.fullAccess = !!data.full_access;
+                if (!this.isMain && this.currentPage === "mcp" && !this.fullAccess) this.currentPage = "chat";
             } catch (e) {
                 console.error("Failed to load auth status:", e);
             }
         },
+        visiblePages() {
+            return this.pages.filter(p => p.id !== "mcp" || this.fullAccess);
+        },
+        settingsTabList() {
+            const tabs = [{id: "appearance", label: "Appearance"}, {id: "defaults", label: "Defaults"}, {id: "security", label: "Security"}];
+            if (this.isMain) tabs.push({id: "accounts", label: "Accounts"});
+            tabs.push({id: "data", label: "Data"});
+            return tabs;
+        },
+        async _accountCall(url, method, body) {
+            this.accountError = "";
+            try {
+                const resp = await fetch(url, {method, headers: {"Content-Type": "application/json"}, body: body === undefined ? undefined : JSON.stringify(body)});
+                const data = await resp.json();
+                if (!resp.ok || data.error || data.detail) { this.accountError = data.error || data.detail || "That did not work."; return null; }
+                if (data.users) this.accounts = {users: data.users, one_prompt_at_a_time: !!data.one_prompt_at_a_time, main_authenticator_on: !!data.main_authenticator_on};
+                return data;
+            } catch (e) {
+                this.accountError = "Something went wrong: " + e.message;
+                return null;
+            }
+        },
+        async loadAccounts() { await this._accountCall("/api/accounts", "GET"); },
+        accountStatusText(u) {
+            if (u.must_change_password) return "temporary password, not changed yet";
+            if (u.must_setup_totp && !u.totp_enabled) return "authenticator not set up yet";
+            if (u.authenticator_shared) return "uses your authenticator";
+            return u.totp_enabled ? "own authenticator" : "no authenticator";
+        },
+        accountNoticeText() {
+            const n = this.accountNotice;
+            return n ? `${n.title}\nTemporary password: ${n.password}` + (n.codes && n.codes.length ? `\nBackup codes: ${n.codes.join(" ")}` : "") : "";
+        },
+        async createAccount() {
+            const a = this.newAccount;
+            const data = await this._accountCall("/api/accounts", "POST", {username: a.username, password: a.password, full_access: a.full_access, share_authenticator: a.share_authenticator});
+            if (!data) return;
+            this.accountNotice = {title: `Account "${data.username}" created`, password: data.temporary_password, codes: data.backup_codes || []};
+            this.newAccount = {username: "", password: "", full_access: false, share_authenticator: false};
+        },
+        async resetAccountPassword(name) {
+            const data = await this._accountCall(`/api/accounts/${encodeURIComponent(name)}/reset-password`, "POST");
+            if (data) this.accountNotice = {title: `New temporary password for "${name}"`, password: data.temporary_password, codes: []};
+        },
+        async resetAccountAuthenticator(name) {
+            const data = await this._accountCall(`/api/accounts/${encodeURIComponent(name)}/reset-authenticator`, "POST");
+            if (data) this.accountNotice = null;
+        },
+        async setAccountAccess(name, full) { await this._accountCall(`/api/accounts/${encodeURIComponent(name)}/access`, "PUT", {full_access: full}); },
+        async removeAccount(name) {
+            this.confirmRemoveAccount = null;
+            await this._accountCall(`/api/accounts/${encodeURIComponent(name)}`, "DELETE");
+        },
+        async setOnePromptAtATime(on) { await this._accountCall("/api/accounts/settings", "PUT", {one_prompt_at_a_time: on}); },
         async changePassword() {
             this.passwordChangeMessage = "";
             try {
@@ -1781,8 +1946,8 @@ export function athenaApp() {
                 if (data.workspace_mode) this.workspaceMode = data.workspace_mode;
                 if (data.model_profiles) this.modelProfileOverrides = data.model_profiles;
                 if (data.bot_ptc_enabled !== undefined && data.bot_ptc_enabled !== null) this.botPtcEnabled = data.bot_ptc_enabled;
+                this.planApprovalAll = !!data.plan_approval_all;
                 if (data.delegation_async_enabled !== undefined && data.delegation_async_enabled !== null) this.asyncDelegationEnabled = data.delegation_async_enabled;
-                if (data.laya_gating_enabled !== undefined && data.laya_gating_enabled !== null) this.layaGatingEnabled = data.laya_gating_enabled;
                 if (data.default_model !== undefined) this.defaultModel = data.default_model;
                 if (data.theme) {
                     this.customTheme = data.theme;
@@ -2001,34 +2166,95 @@ export function athenaApp() {
                 console.error("Failed to load MCP servers:", e);
             }
         },
+        clearMcpForm() {
+            this.newMcpName = ""; this.newMcpCommand = ""; this.newMcpArgs = ""; this.newMcpUrl = "";
+            this.newMcpEnv = ""; this.newMcpHeaders = ""; this.newMcpCwd = "";
+            this.newMcpKind = "stdio";
+            this.mcpEditing = null; this.mcpEditArgs = null; this.mcpEditSecrets = {env: [], headers: []};
+        },
+        startEditMcpServer(server) {
+            this.clearMcpForm();
+            this.mcpAddError = "";
+            this.mcpEditing = server.name;
+            this.newMcpName = server.name;
+            this.newMcpKind = server.transport || "stdio";
+            this.newMcpCommand = server.command || "";
+            this.newMcpArgs = (server.args || []).join(" ");
+            this.mcpEditArgs = server.args || [];
+            this.newMcpCwd = server.cwd || "";
+            this.newMcpUrl = server.url || "";
+            this.mcpEditSecrets = {env: server.env_names || [], headers: server.header_names || []};
+            this.$nextTick(() => document.getElementById("mcp-form")?.scrollIntoView({behavior: "smooth", block: "start"}));
+        },
+        cancelMcpEdit() {
+            this.clearMcpForm();
+            this.mcpAddError = "";
+        },
         async addMcpServer() {
             this.mcpAddError = "";
-            if (!this.newMcpName || !this.newMcpCommand) {
-                this.mcpAddError = "Name and command are required.";
+            const web = this.newMcpKind !== "stdio";
+            if (!this.newMcpName || (web ? !this.newMcpUrl : !this.newMcpCommand)) {
+                this.mcpAddError = web ? "Name and web address are required." : "Name and command are required.";
                 return;
             }
+            const editing = this.mcpEditing;
+            // arguments that were not touched go back exactly as saved, so one containing a space is not split in two
+            const args = this.newMcpArgs.trim() === (this.mcpEditArgs || []).join(" ") && this.mcpEditArgs !== null
+                ? this.mcpEditArgs : (this.newMcpArgs.trim() ? this.newMcpArgs.trim().split(/\s+/) : []);
+            const body = web ? {
+                name: this.newMcpName, transport: this.newMcpKind, url: this.newMcpUrl.trim(),
+                ...(this.newMcpHeaders.trim() || !editing ? {headers: this.newMcpHeaders} : {}),
+            } : {
+                name: this.newMcpName, command: this.newMcpCommand, args, cwd: this.newMcpCwd.trim(),
+                ...(this.newMcpEnv.trim() || !editing ? {env: this.newMcpEnv} : {}),
+            };
             try {
-                const resp = await fetch("/api/mcp/servers", {
-                    method: "POST",
+                const resp = await fetch(editing ? "/api/mcp/servers/" + encodeURIComponent(editing) : "/api/mcp/servers", {
+                    method: editing ? "PUT" : "POST",
                     headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({
-                        name: this.newMcpName,
-                        command: this.newMcpCommand,
-                        args: this.newMcpArgs.trim() ? this.newMcpArgs.trim().split(/\s+/) : [],
-                    }),
+                    body: JSON.stringify(body),
                 });
                 const data = await resp.json();
                 if (!data.connected) {
                     this.mcpAddError = data.error || "Failed to connect.";
+                    if (editing) this.expandedServer = null;
                 } else {
-                    this.newMcpName = "";
-                    this.newMcpCommand = "";
-                    this.newMcpArgs = "";
+                    this.clearMcpForm();
                 }
                 await this.loadMcpServers();
             } catch (e) {
                 this.mcpAddError = "Request failed: " + e.message;
             }
+        },
+        async setMcpAccess(server, modelAccess, enabledTools) {
+            try {
+                const resp = await fetch("/api/mcp/servers/" + encodeURIComponent(server.name) + "/access", {
+                    method: "PUT", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({model_access: modelAccess, enabled_tools: enabledTools}),
+                });
+                const data = await resp.json();
+                if (data.server) Object.assign(server, data.server);
+            } catch (e) {
+                console.error("Failed to update MCP access:", e);
+            }
+        },
+        toggleMcpModelAccess(server) {
+            return this.setMcpAccess(server, !server.model_access, server.enabled_tools);
+        },
+        toggleMcpTool(server, toolName) {
+            const current = server.tools.filter(t => t.enabled).map(t => t.name);
+            const next = current.includes(toolName) ? current.filter(n => n !== toolName) : [...current, toolName];
+            // every tool ticked means "all", so tools the server adds later are included without another visit here
+            return this.setMcpAccess(server, server.model_access, next.length === server.tools.length ? null : next);
+        },
+        async reconnectMcpServer(server) {
+            server.status = "connecting";
+            try {
+                await fetch("/api/mcp/servers/" + encodeURIComponent(server.name) + "/reconnect", {method: "POST"});
+            } catch (e) {
+                console.error("Failed to reconnect MCP server:", e);
+            }
+            await this.loadMcpServers();
         },
         async removeMcpServer(name) {
             try {
@@ -2595,9 +2821,11 @@ export function athenaApp() {
             this.pendingImages = [];
             this.pendingAttachments = [];
             this.sending = true;
+            clearInterval(this._approvalTimer);
+            this._approvalTimer = setInterval(() => this.refreshApprovals(), 3000);
             this.sendingSessionId = this.sessionId;
 
-            this.messages.push({role: "user", content: text, hasImage: imagesToSend.length > 0, created_at: Date.now()});
+            this.messages.push({role: "user", content: text, hasImage: imagesToSend.length > 0, created_at: Date.now() / 1000});
             let activeSession = this.sessions.find(s => s.id === this.sessionId);
             if (!activeSession) {
                 activeSession = {id: this.sessionId, label: text.slice(0, 40), createdAt: Date.now(), pinned: false};
@@ -2611,7 +2839,7 @@ export function athenaApp() {
             }
             this.forceScrollToBottom();
 
-            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, tokensPerSec: null, model: this.modelLabel, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null, created_at: Date.now()};
+            const assistantMsg = {role: "assistant", content: "", thinking: "", thinkingOpen: true, ctxUsed: null, promptTokens: null, tokensPerSec: null, model: this.modelLabel, ttsLabel: "Play", toolCalls: [], toolsOpen: false, rating: null, messageId: null, created_at: Date.now() / 1000, phase: "Working", phaseAt: Date.now()};
             this.messages.push(assistantMsg);
             const msgIndex = this.messages.length - 1;
 
@@ -2656,12 +2884,14 @@ export function athenaApp() {
                             }
                         }
                         if (data.thinking) {
+                            this.setPhase(this.messages[msgIndex], "Thinking");
                             this.messages[msgIndex].thinking += data.thinking;
                             this.scrollToBottom();
                             this._scrollThinkingToBottom();
                         }
                         if (data.delta) {
-                            this.messages[msgIndex].thinkingOpen = false;
+                            this.setPhase(this.messages[msgIndex], "Speaking");
+                            this.autoClose(this.messages[msgIndex], "thinkingOpen");
                             this._streamBuffer += data.delta;
                             if (!this._streamFlushTimer) {
                                 this._streamFlushTimer = setTimeout(() => {
@@ -2673,18 +2903,26 @@ export function athenaApp() {
                             }
                         }
                         if (data.type === "tool_start") {
-                            this.messages[msgIndex].toolCalls.push({tool: data.tool, status: "running", output: null, open: true});
+                            this.setPhase(this.messages[msgIndex], "Working");
+                            this.messages[msgIndex].toolCalls.push({tool: data.tool, target: data.target || "", status: "running", output: null, open: true});
                             this.scrollToBottom();
                         }
                         if (data.type === "tool_output") {
+                            this.setPhase(this.messages[msgIndex], "Working");
                             const tc = this.messages[msgIndex].toolCalls.find(t => t.tool === data.tool && t.status === "running");
                             if (tc) {
                                 tc.status = "done";
                                 tc.output = data.output;
-                                tc.open = false;
+                                this.autoClose(tc, "open");
                             }
                             this.scrollToBottom();
                         }
+                        if (data.type === "queued") { this.messages[msgIndex].queueNote = data.message; this.setPhase(this.messages[msgIndex], "Waiting"); }
+                        if (data.type === "queue_started" || data.done) this.messages[msgIndex].queueNote = "";
+                        if (data.type === "queue_started") this.setPhase(this.messages[msgIndex], "Working");
+                        if (data.type === "approval_request") { this.addApproval(data); this.setPhase(this.messages[msgIndex], "Waiting"); }
+                        if (data.type === "approval_result") { this.pendingApprovals = this.pendingApprovals.filter(a => a.id !== data.id); this.setPhase(this.messages[msgIndex], "Working"); }
+                        if (data.type === "snapshot") { this.turnSnapshot = {id: data.snapshot_id, files: data.files, workspace: data.workspace}; this.undoResult = ""; }
                         if (data.done) {
                             if (this._streamFlushTimer) {
                                 clearTimeout(this._streamFlushTimer);
@@ -2711,9 +2949,176 @@ export function athenaApp() {
                     this.messages[msgIndex].content = "⚠️ Error: " + e.message;
                 }
             } finally {
+                clearInterval(this._approvalTimer);
                 this.sending = false;
                 this.sendingSessionId = null;
                 this.currentAbortController = null;
+            }
+        },
+        // --- notifications on this device ---
+        async refreshPush() {
+            try { this.push.devices = (await (await fetch("/api/push/status")).json()).devices || 0; } catch (e) { /* leave as it was */ }
+            if (!this.push.supported) return;
+            try {
+                const reg = await navigator.serviceWorker.getRegistration("/");
+                const sub = reg ? await reg.pushManager.getSubscription() : null;
+                this.push.enabled = !!sub && Notification.permission === "granted";
+            } catch (e) { /* leave as it was */ }
+        },
+        async enablePush() {
+            if (!this.push.supported || this.push.busy) return;
+            this.push.busy = true;
+            this.push.message = "";
+            try {
+                const permission = await Notification.requestPermission();
+                if (permission !== "granted") { this.push.message = "The browser did not allow notifications. You can change that in its site settings."; return; }
+                const reg = await navigator.serviceWorker.register("/sw.js", {scope: "/"});
+                await navigator.serviceWorker.ready;
+                const key = (await (await fetch("/api/push/key")).json()).key;
+                const raw = atob(key.replace(/-/g, "+").replace(/_/g, "/").padEnd(key.length + (4 - key.length % 4) % 4, "="));
+                const sub = await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, c => c.charCodeAt(0))});
+                const json = sub.toJSON();
+                const resp = await fetch("/api/push/subscribe", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({endpoint: json.endpoint, keys: json.keys, label: navigator.userAgent.slice(0, 80)})});
+                if (!(await resp.json()).ok) throw new Error("Athena did not accept the subscription.");
+                this.push.message = "Notifications are on for this device.";
+            } catch (e) {
+                this.push.message = "Could not turn notifications on: " + (e && e.message ? e.message : e);
+            } finally {
+                this.push.busy = false;
+                this.refreshPush();
+            }
+        },
+        async disablePush() {
+            this.push.busy = true;
+            try {
+                const reg = await navigator.serviceWorker.getRegistration("/");
+                const sub = reg ? await reg.pushManager.getSubscription() : null;
+                if (sub) {
+                    await fetch("/api/push/unsubscribe", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({endpoint: sub.endpoint})});
+                    await sub.unsubscribe();
+                }
+                this.push.message = "Notifications are off for this device.";
+            } finally {
+                this.push.busy = false;
+                this.refreshPush();
+            }
+        },
+        async testPush() {
+            this.push.message = "Sending…";
+            try {
+                const out = await (await fetch("/api/push/test", {method: "POST"})).json();
+                this.push.message = out.sent ? "Sent. It should arrive in a moment." : (out.note || "Nothing was sent: " + (out.failed || 0) + " device(s) failed.");
+            } catch (e) { this.push.message = "Could not send: " + e; }
+        },
+
+        // --- asking the person ---
+        addApproval(request) {
+            if (!this.pendingApprovals.some(a => a.id === request.id)) this.pendingApprovals.push(request);
+            this.$nextTick(() => this.scrollToBottom && this.scrollToBottom());
+        },
+        async refreshApprovals() {
+            try {
+                const resp = await fetch("/api/approvals/pending?session_id=" + encodeURIComponent(this.sendingSessionId || this.sessionId));
+                this.pendingApprovals = (await resp.json()).requests || [];
+            } catch (e) { /* the next poll tries again */ }
+        },
+        async answerApproval(request, decision, text) {
+            this.pendingApprovals = this.pendingApprovals.filter(a => a.id !== request.id);
+            delete this.approvalText[request.id];
+            delete this.approvalDeclining[request.id];
+            try {
+                await fetch("/api/approvals/" + request.id, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({decision, text: text || ""})});
+            } catch (e) { console.error("Could not send the answer:", e); }
+        },
+        savePlanApprovalAll() {
+            fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({plan_approval_all: this.planApprovalAll})}).catch(e => console.error("Failed to save the plan approval setting:", e));
+        },
+        // One word for what Athena is doing right now, taken from her own stream events (so it is the same whatever engine is behind her):
+        // Thinking (reasoning), Speaking (writing the reply), Working (a tool is running, or between steps), Waiting (queued, or for a yes).
+        // An engine that never streams its reasoning just never says Thinking. Once everything has finished it reads Thoughts.
+        phaseFromSnapshot(snap) {
+            const running = (snap.tool_calls || []).filter(t => t.status === "running");
+            if (running.length) return "Working";
+            if (snap.queue || (snap.approvals || []).length) return "Waiting";
+            return snap.content ? "Speaking" : (snap.thinking ? "Thinking" : "Working");
+        },
+        setPhase(msg, word) {
+            msg.phase = word;
+            msg.phaseAt = Date.now();
+        },
+        followSnapshot(msg, snap) {
+            // A reconnected generation is only seen through polled snapshots, so "Thinking" and "Speaking" are decided by whether the text grew.
+            const content = (snap.content || "").length, thinking = (snap.thinking || "").length;
+            const spoke = content > (msg._seenContent || 0), thought = thinking > (msg._seenThinking || 0);
+            msg._seenContent = content;
+            msg._seenThinking = thinking;
+            const running = (snap.tool_calls || []).some(t => t.status === "running");
+            if (running) return this.setPhase(msg, "Working");
+            if (snap.queue || (snap.approvals || []).length) return this.setPhase(msg, "Waiting");
+            if (spoke) return this.setPhase(msg, "Speaking");
+            if (thought) return this.setPhase(msg, "Thinking");
+        },
+        activityLabel(msg, list) {
+            if (!this.isLive(msg, list)) return "Thoughts";
+            this.clockTick;   // read so the label is re-checked every second, not only when a stream event arrives
+            const word = msg.phase || "Working";
+            // Thinking and Speaking mean words are arriving. A gap longer than a few seconds is something else (a model preparing a tool call or
+            // a long write, or reading its prompt), and saying "Speaking" through it is wrong.
+            if ((word === "Thinking" || word === "Speaking") && Date.now() - (msg.phaseAt || 0) > 2500) return "Working";
+            return word;
+        },
+        isLive(msg, list) {
+            // The message being generated right now: the last one, while a reply is on its way (or a reconnected one is still running).
+            if (!list || list[list.length - 1] !== msg) return false;
+            return !!msg._isLiveSnapshot || (list === this.messages ? this.sending : this.botConversationLoading);
+        },
+        planPages(msg) {
+            // Every plan a prompt made is one page; ticking steps updates the page it belongs to (results without a page number are page 1).
+            const pages = {};
+            for (const call of (msg && msg.toolCalls) || []) {
+                const out = (call.tool === "plan" || call.tool === "step_done") && call.output;
+                if (!out || typeof out.plan !== "string") continue;
+                pages[out.plan_page || 1] = out.plan.split("\n").map(line => {
+                    const m = line.match(/^(\d+)\. \[(.)\] (.*?)(?: -- (.*))?$/);
+                    return m ? {number: m[1], state: m[2] === "x" ? "done" : m[2] === "~" ? "doing" : m[2] === "!" ? "failed" : "todo", text: m[3], note: m[4] || ""} : null;
+                }).filter(Boolean);
+            }
+            return Object.keys(pages).map(Number).sort((a, b) => a - b).map(n => ({page: n, steps: pages[n]}));
+        },
+        planViewIndex(msg) {
+            const pages = this.planPages(msg);
+            const chosen = msg && Number.isInteger(msg.planView) ? msg.planView : pages.length - 1;
+            return Math.min(Math.max(chosen, 0), Math.max(pages.length - 1, 0));
+        },
+        planChecklist(msg) {
+            const pages = this.planPages(msg);
+            return pages.length ? pages[this.planViewIndex(msg)].steps : [];
+        },
+        planFlip(msg, delta) {
+            msg.planView = Math.min(Math.max(this.planViewIndex(msg) + delta, 0), Math.max(this.planPages(msg).length - 1, 0));
+        },
+        planProgress(msg) {
+            const steps = this.planChecklist(msg);
+            return steps.filter(s => s.state === "done").length + " of " + steps.length + " done";
+        },
+        approvalItems(request) {
+            const items = request.items || [];
+            if (request.kind === "plan") return items;
+            return items.length > 8 ? [...items.slice(0, 8), "and " + (items.length - 8) + " more"] : items;
+        },
+        async undoTurn() {
+            if (!this.turnSnapshot || this.undoBusy) return;
+            this.undoBusy = true;
+            try {
+                const resp = await fetch("/api/workspace/undo", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({workspace: this.turnSnapshot.workspace, snapshot_id: this.turnSnapshot.id})});
+                const data = await resp.json();
+                this.undoResult = data.error ? data.error : "Put back " + data.restored + " file" + (data.restored === 1 ? "" : "s") + (data.moved_aside_count ? ", and moved " + data.moved_aside_count + " newer one" + (data.moved_aside_count === 1 ? "" : "s") + " to the trash folder" : "") + ".";
+                if (!data.error) this.turnSnapshot = null;
+                if (this.fileBrowserOpen) this.loadFileBrowser(this.fileBrowserPath);
+            } catch (e) {
+                this.undoResult = "Could not undo: " + e;
+            } finally {
+                this.undoBusy = false;
             }
         },
         stopGeneration() {
@@ -2793,6 +3198,33 @@ export function athenaApp() {
         },
         async previewFile(name) {
             const relPath = this.fileBrowserPath ? this.fileBrowserPath + "/" + name : name;
+            if (/\.html?$/i.test(name)) { this.htmlChoice = {name, path: relPath}; return; }       // a web page: view it, or read its text
+            await this.previewFileText(relPath);
+        },
+        async openHtmlAsText() {
+            const path = this.htmlChoice && this.htmlChoice.path;
+            this.htmlChoice = null;
+            if (path) await this.previewFileText(path);
+        },
+        async openHtmlInTab(relPath) {
+            // The tab is opened first, straight from the click, so the browser does not take it for a pop-up; the page is put in it once the
+            // link is ready. Athena serves it inside a sandbox (see workspace_view.py), so it cannot reach her or the person's account.
+            const tab = window.open("", "_blank");
+            if (!tab) { alert("Your browser blocked the new tab. Allow pop-ups for this site and try again."); return; }
+            try { tab.opener = null; } catch (e) { /* the page's own isolation covers this too */ }
+            try { tab.document.write("<p style='font-family:sans-serif;color:#555'>Opening the page\u2026</p>"); } catch (e) { /* not needed */ }
+            try {
+                const resp = await fetch("/api/workspace/view-link", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({workspace: this.workspace, path: relPath})});
+                const data = await resp.json();
+                if (!resp.ok || data.error || data.detail) { tab.close(); alert(data.error || data.detail || "Could not open that page."); return; }
+                tab.location.href = new URL(data.url, window.location.origin).href;
+                this.htmlChoice = null;
+            } catch (e) {
+                tab.close();
+                alert("Could not open that page: " + e.message);
+            }
+        },
+        async previewFileText(relPath) {
             try {
                 const resp = await fetch(`/api/workspace/read?workspace=${encodeURIComponent(this.workspace)}&path=${encodeURIComponent(relPath)}`);
                 const data = await resp.json();
@@ -2802,6 +3234,7 @@ export function athenaApp() {
                 }
                 this.filePreviewPath = data.path;
                 this.filePreviewContent = data.content;
+                this.filePreviewCut = data.has_more ? data.total_chars : 0;
                 this.filePreviewBinary = !!data.binary;
                 this.filePreviewKind = data.kind || "";
                 this.filePreviewEditing = false;
@@ -2822,7 +3255,7 @@ export function athenaApp() {
             return ["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(this.filePreviewKind);
         },
 
-        // The preview above is a capped, lossy read (20k chars, bad bytes replaced), so editing
+        // The preview above is a lossy read (bad bytes replaced, and a file over about 2 million characters is cut), so editing
         // loads the whole file separately and saves it back with a version check.
         fileEditDirty() { return this.filePreviewEditing && this.fileEdit.text !== this.fileEdit.original; },
         async startFileEdit() {
@@ -3117,6 +3550,167 @@ export function athenaApp() {
             };
             this.mediaRecorder.start();
             this.isRecording = true;
+        },
+
+        // --- research ---
+        researchModelOptions() {
+            return this.allAvailableModels().map(m => ({key: m.value + "\u0001" + (m.endpointUrl || ""), label: m.label, m}));
+        },
+        researchChoice(key) {
+            const found = this.researchModelOptions().find(o => o.key === key);
+            if (!found) return null;
+            const m = found.m;
+            return {model: m.value, label: m.label, provider: m.provider || "", endpoint_url: m.endpointUrl || "", api_key: m.apiKey || ""};
+        },
+        researchEffectiveModelKey() {
+            const options = this.researchModelOptions();
+            if (options.some(o => o.key === this.research.modelKey)) return this.research.modelKey;
+            const current = options.find(o => o.m.value === this.model && (o.m.endpointUrl || "") === (this.modelEndpointUrl || ""));
+            return (current || options[0] || {}).key || "";
+        },
+        setResearchPref(field, value) {
+            this.research[field] = value;
+            const store = {depth: "athena_research_depth", modelKey: "athena_research_model", checkKey: "athena_research_check"}[field];
+            if (store) localStorage.setItem(store, value);
+        },
+        setNotesTab(tab) {
+            this.notesTab = tab;
+            localStorage.setItem("athena_notes_tab", tab);
+            if (tab === "research") this.loadResearch();
+        },
+        researchActive(run) {
+            return !!run && (run.status === "queued" || run.status === "running");
+        },
+        async loadResearch() {
+            try {
+                const resp = await fetch("/api/research");
+                this.research.runs = (await resp.json()).runs || [];
+                if (this.research.openId) await this.refreshOpenResearch();
+            } catch (e) {
+                console.error("Failed to load research:", e);
+            }
+            this.scheduleResearchPoll();
+        },
+        async refreshOpenResearch() {
+            const resp = await fetch("/api/research/" + this.research.openId + "/thread");
+            const data = await resp.json();
+            if (data.error) { this.research.openId = null; this.research.thread = []; localStorage.removeItem("athena_research_open"); return; }
+            this.research.thread = data.runs;
+        },
+        scheduleResearchPoll() {
+            clearTimeout(this.research.timer);
+            this.research.timer = null;
+            const watching = this.currentPage === "notes" && this.notesTab === "research";
+            if (watching && (this.research.runs.some(r => this.researchActive(r)) || this.research.thread.some(r => this.researchActive(r)))) {
+                this.research.timer = setTimeout(() => this.loadResearch(), 2000);
+            }
+        },
+        async openResearch(id) {
+            this.research.openId = id;
+            localStorage.setItem("athena_research_open", id);
+            this.research.thread = [];
+            this.research.evidenceOpen = {};
+            this.research.followup = "";
+            await this.refreshOpenResearch();
+            this.scheduleResearchPoll();
+        },
+        closeResearch() {
+            this.research.openId = null;
+            localStorage.removeItem("athena_research_open");
+            this.research.thread = [];
+            this.loadResearch();
+        },
+        async startResearch() {
+            const question = (this.research.question || "").trim();
+            if (!question || this.research.starting) return;
+            const planModel = this.researchChoice(this.researchEffectiveModelKey());
+            if (!planModel) { this.research.error = "Add a model on the Models page first."; return; }
+            const checkModel = this.research.checkKey ? this.researchChoice(this.research.checkKey) : null;
+            this.research.starting = true;
+            this.research.error = "";
+            try {
+                const resp = await fetch("/api/research", {method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({question, depth: this.research.depth, plan_model: planModel, check_model: checkModel})});
+                const data = await resp.json();
+                if (data.error) { this.research.error = data.error; return; }
+                this.research.question = "";
+                await this.loadResearch();
+                await this.openResearch(data.id);
+            } catch (e) {
+                this.research.error = "Could not start the research: " + e;
+            } finally {
+                this.research.starting = false;
+            }
+        },
+        researchDeleteClick(id) {
+            if (this.research.confirmDeleteId === id) {
+                this.research.confirmDeleteId = null;
+                this.deleteResearch(id);
+                return;
+            }
+            this.research.confirmDeleteId = id;
+            setTimeout(() => { if (this.research.confirmDeleteId === id) this.research.confirmDeleteId = null; }, 4000);
+        },
+        researchLastDone() {
+            return [...this.research.thread].reverse().find(r => r.status === "done") || null;
+        },
+        researchThreadBusy() {
+            return this.research.thread.some(r => this.researchActive(r));
+        },
+        async startFollowup() {
+            const question = (this.research.followup || "").trim();
+            const parent = this.researchLastDone();
+            if (!question || !parent || this.researchThreadBusy() || this.research.starting) return;
+            const planModel = this.researchChoice(this.researchEffectiveModelKey());
+            if (!planModel) { this.research.error = "Add a model on the Models page first."; return; }
+            const checkModel = this.research.checkKey ? this.researchChoice(this.research.checkKey) : null;
+            this.research.starting = true;
+            this.research.error = "";
+            try {
+                const resp = await fetch("/api/research", {method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({question, depth: this.research.depth, plan_model: planModel, check_model: checkModel, parent_id: parent.id})});
+                const data = await resp.json();
+                if (data.error) { this.research.error = data.error; return; }
+                this.research.followup = "";
+                await this.refreshOpenResearch();
+                this.scheduleResearchPoll();
+                this.$nextTick(() => document.getElementById("research-end")?.scrollIntoView({behavior: "smooth", block: "end"}));
+            } catch (e) {
+                this.research.error = "Could not start the follow-up: " + e;
+            } finally {
+                this.research.starting = false;
+            }
+        },
+        useSuggestion(text) {
+            this.research.followup = text;
+            this.$nextTick(() => document.getElementById("research-followup")?.focus());
+        },
+        async cancelResearch(id) {
+            await fetch("/api/research/" + id + "/cancel", {method: "POST"});
+            await this.loadResearch();
+        },
+        async deleteResearch(id) {
+            await fetch("/api/research/" + id, {method: "DELETE"});
+            if (this.research.openId === id) { this.research.openId = null; this.research.thread = []; localStorage.removeItem("athena_research_open"); }
+            await this.loadResearch();
+        },
+        researchStatusLabel(run) {
+            return {queued: "Waiting", running: run.detail || "Working", done: "Done", cancelled: "Cancelled", error: "Stopped"}[run.status] || run.status;
+        },
+        researchSources(run) {
+            return (run.sources || []).filter(s => s.status === "read");
+        },
+        researchUsedClaims(run) {
+            const used = run.used_claim_ids ? new Set(run.used_claim_ids) : null;
+            return (run.claims || []).filter(c => c.supported && (!used || used.has(c.id)));
+        },
+        researchEvidence(run) {
+            const claims = this.researchUsedClaims(run);
+            return (run.sources || []).map(s => ({source: s, claims: claims.filter(c => c.source === s.id)})).filter(g => g.claims.length);
+        },
+        researchCounts(run) {
+            const fresh = (run.claims || []).filter(c => !c.inherited);
+            return {extracted: fresh.length, verified: fresh.filter(c => c.supported).length, used: this.researchUsedClaims(run).length};
         },
 
         // --- notes ---

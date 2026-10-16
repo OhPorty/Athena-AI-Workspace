@@ -41,6 +41,33 @@ python3 main.py
 
 By default the app serves on the port configured in your settings. For always-on use, running it as a systemd service (or an equivalent process manager) behind a reverse proxy for HTTPS is recommended.
 
+## Safety and recovery
+
+Athena's tools run commands inside a sandbox container (build it once with `docker build -t athena-sandbox:latest sandbox/`). Anything that deletes files asks you first, in plain language, every time. Before a turn changes a workspace, Athena saves a snapshot of it, and the chat offers **Undo this turn**. Her own settings, passwords, databases and logs are never available to the model's tools, even if you point a workspace at Athena's own folder (which lets her edit herself).
+
+If an edit ever stops Athena from starting, restore the last snapshot without needing her:
+
+```bash
+python3 recover.py            # list the latest snapshots of Athena's own folder
+python3 recover.py latest     # go back to the newest one
+```
+
+## Plans and small models
+
+Before doing anything beyond conversation, Athena writes a short plan and waits for you to approve it. If you decline she asks what to change and plans again. After approval she works one step at a time, in order, and ticks each off as she goes. This is always on for small models (they do far better on small steps) and can be turned on for every model under **Settings → Defaults**. Scheduled and background runs have nobody to approve, so they skip it.
+
+## Accounts
+
+The account you create at first start is the **main** account. In **Settings → Accounts** (visible only to it) it can add more.
+
+- Every account has its own chats, memory, notes, research, tasks, bots, rooms, pins, ratings and push devices, and its own theme, default model and workspace. Local models, MCP servers and skills are shared.
+- Passwords you choose (first setup, changing it) need 10+ characters with upper and lower case, a number and a symbol, nothing common like "password" or 12345, and not your username. The same applies to every account.
+- A new account always starts with a **temporary password** (typed by you, or generated), which it must change at first sign-in. Unless you tick **Reuse my authenticator**, it must also set up its own authenticator before using anything. Reusing gives it the same authenticator as yours, which is handy for accounts that are all you.
+- **Full access to this computer** is a per-account choice. Without it an account can only use workspaces inside its own folder (`user_data/<name>/workspaces/`) and cannot change MCP servers or skills.
+- Only the main account adds local models and endpoints. Other accounts can add online models with their own API key, which only they see.
+- **One prompt at a time** (for smaller computers): while one account's prompt runs on a model on this machine, anyone who sends another is told and queued, first come first served. Prompts to online models are never held back.
+- Removing an account erases its chats, memory, notes, bots and files. **Clear this account's notes and saved browser data** (Settings → Data) only ever touches the account you are signed in as.
+
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.

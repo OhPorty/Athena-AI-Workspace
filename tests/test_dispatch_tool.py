@@ -42,10 +42,10 @@ def test_custom_unknown_tool_message_used_for_disallowed_name():
 
 
 def test_routes_read_file_to_file_tools(monkeypatch):
-    monkeypatch.setattr(file_tools, "read_file", lambda ws, path, offset: {"path": path, "offset": offset})
+    monkeypatch.setattr(file_tools, "read_file", lambda ws, path, offset, chunk, **kw: {"path": path, "offset": offset, "chunk": chunk, **kw})
     ctx = make_ctx(workspace="/ws")
     result = main.dispatch_tool("read_file", {"path": "a.py", "offset": 5}, ctx)
-    assert result == {"path": "a.py", "offset": 5}
+    assert result == {"path": "a.py", "offset": 5, "chunk": file_tools.MODEL_READ_WINDOW, "start_line": None, "end_line": None, "line_aligned": True}
 
 
 def test_routes_bash_read_only_to_bash_tools(monkeypatch):

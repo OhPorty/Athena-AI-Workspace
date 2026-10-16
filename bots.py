@@ -8,15 +8,16 @@ import hashlib
 import subprocess
 import threading
 from typing import Optional, List
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 import settings
+from loop_guard import detect_text_loop as _detect_text_loop
 import activity
 import task_context
-import laya_gate
 import lcm_client
 import host_locks
 from host_locks import OLLAMA_URL
@@ -26,6 +27,8 @@ import lsp_tools
 import web_tools
 from logging_setup import logger, log_trace_event
 import db
+import ownership
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
@@ -68,6 +71,8 @@ def _bots_conn():
             created_at REAL NOT NULL
         )
     """)
+    ownership.ensure_owner_column(conn, "bots")
+    ownership.ensure_owner_column(conn, "rooms")
     return conn
 
 
@@ -96,9 +101,10 @@ _BOT_COLUMNS = "id, name, endpoint_url, provider, api_key, model, description, a
 
 @router.get("/api/bots")
 def list_bots():
+    where, params = ownership.owner_filter()
     conn = _bots_conn()
     try:
-        rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots ORDER BY created_at ASC").fetchall()
+        rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE {where} ORDER BY created_at ASC", params).fetchall()
         return [_row_to_bot(r) for r in rows]
     finally:
         conn.close()
@@ -106,14 +112,16 @@ def list_bots():
 
 @router.post("/api/bots")
 def create_bot(req: BotIn):
+    if ownership.endpoint_kind(req.provider, req.endpoint_url or "") is None:
+        return JSONResponse(status_code=403, content={"error": "This account cannot use that model endpoint."})
     conn = _bots_conn()
     try:
         cur = conn.execute("""
-            INSERT INTO bots (name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bots (name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at, owner)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             req.name, req.endpoint_url, req.provider, req.api_key or "", req.model, req.description,
-            json.dumps(effective_tools(req.allowed_tools)), req.unload_strategy, time.time(),
+            json.dumps(effective_tools(req.allowed_tools)), req.unload_strategy, time.time(), ownership.stored_owner(),
         ))
         conn.commit()
         return {"id": cur.lastrowid}
@@ -123,14 +131,17 @@ def create_bot(req: BotIn):
 
 @router.put("/api/bots/{bot_id}")
 def update_bot(bot_id: int, req: BotIn):
+    if ownership.endpoint_kind(req.provider, req.endpoint_url or "") is None:
+        return JSONResponse(status_code=403, content={"error": "This account cannot use that model endpoint."})
+    where, owner_params = ownership.owner_filter()
     conn = _bots_conn()
     try:
-        conn.execute("""
+        conn.execute(f"""
             UPDATE bots SET name=?, endpoint_url=?, provider=?, api_key=?, model=?, description=?, allowed_tools_json=?, unload_strategy=?
-            WHERE id=?
+            WHERE id=? AND {where}
         """, (
             req.name, req.endpoint_url, req.provider, req.api_key or "", req.model, req.description,
-            json.dumps(effective_tools(req.allowed_tools)), req.unload_strategy, bot_id,
+            json.dumps(effective_tools(req.allowed_tools)), req.unload_strategy, bot_id, *owner_params,
         ))
         conn.commit()
         return {"id": bot_id}
@@ -140,9 +151,10 @@ def update_bot(bot_id: int, req: BotIn):
 
 @router.delete("/api/bots/{bot_id}")
 def delete_bot(bot_id: int):
+    where, owner_params = ownership.owner_filter()
     conn = _bots_conn()
     try:
-        conn.execute("DELETE FROM bots WHERE id=?", (bot_id,))
+        conn.execute(f"DELETE FROM bots WHERE id=? AND {where}", (bot_id, *owner_params))
         conn.commit()
         return {"id": bot_id}
     finally:
@@ -200,7 +212,7 @@ def _call_bot_endpoint(bot, chat_messages):
         think="none",
     )
     target_url = (endpoint_url.rstrip("/") + "/api/chat") if endpoint_url and provider == "" else (OLLAMA_URL if provider == "" else "")
-    _settings_snapshot = settings.load_settings()
+    _settings_snapshot = settings.load_effective()
     workspace = _settings_snapshot.get("workspace") or ""
     search_url = _settings_snapshot.get("search_url") or ""
     ptc_enabled = bool(_settings_snapshot.get("bot_ptc_enabled"))
@@ -427,7 +439,7 @@ def _roster_lines():
         f"- {b['name']} (id {b['id']}): can {b['can']}. {b['description'][:140].rstrip()}" for b in roster)
 
 
-def _get_bot_delegation_prompt_section(workspace=None, async_enabled=False, laya_gating_enabled=False):
+def _get_bot_delegation_prompt_section(workspace=None, async_enabled=False):
     base = """
 
 ## Stay On the Current Task
@@ -456,13 +468,7 @@ Bots should be broad specialists (for example web research, frontend code, backe
             "When it finishes, its findings arrive as a brand new message in this same conversation; react to "
             "it then. A 'pending' status is not a failure: don't retry, poll or wait on it, just continue your turn."
         )
-    if laya_gating_enabled:
-        base += (
-            "\n\n## Automatic Fabrication Screening\n"
-            "A step returning \"possibly_fabricated\" failed an automatic check of the bot's note against its actual "
-            "tool calls: don't use its findings. A \"done\" step passed that check."
-        )
-    defaults = (settings.load_settings().get("bot_creation_defaults") or {})
+    defaults = (settings.load_effective().get("bot_creation_defaults") or {})
     naming_guidance = defaults.get("naming_guidance")
     if naming_guidance:
         base += f"\n\nWhen naming a new bot: {naming_guidance}"
@@ -479,9 +485,10 @@ Bots should be broad specialists (for example web research, frontend code, backe
 
 
 def _list_bots_tool():
+    where, params = ownership.owner_filter()
     conn = _bots_conn()
     try:
-        rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots ORDER BY created_at ASC").fetchall()
+        rows = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE {where} ORDER BY created_at ASC", params).fetchall()
         return [_row_to_bot(r) for r in rows]
     finally:
         conn.close()
@@ -635,23 +642,6 @@ def _read_tool_call_history(bot_name):
 
 _NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*(?:\d+[\.\)]|[-*])\s+\S")
 
-# Below this single-topic probability, Laya's compound-instruction check
-# flags an instruction even though the regex above found nothing --
-# backs up the regex on prose-phrased compound asks it structurally can't
-# see (e.g. "check X and also see if Y", no numbering/bullets involved).
-# Picked from standalone testing: true compound instructions scored
-# 0.231-0.370 single-topic-probability, while most genuinely single-topic
-# instructions scored 0.42-0.48 -- some overlap exists (this check has
-# real recall over precision, accepted deliberately: a false positive
-# here just costs an unnecessarily cautious plan_delegation call, not a
-# wrong answer). Originally 0.4; lowered to 0.3 after real usage showed
-# it was flagging genuinely single-topic instructions too often -- still
-# catches every true-compound case from standalone testing except the
-# single highest-scoring one (0.370), trading a small amount of recall
-# for less over-flagging.
-_LAYA_COMPOUND_THRESHOLD = 0.3
-
-
 def _instruction_is_compound(instruction):
     """Cheap structural check: does this instruction try to cram
     multiple distinct asks into one step? A numbered/bulleted list of
@@ -664,10 +654,6 @@ def _instruction_is_compound(instruction):
         return True, f"contains {len(items)} numbered/bulleted items"
     if len(instruction) > 1200:
         return True, f"is {len(instruction)} characters long (over the 1200 char guideline for a single-topic step)"
-    if settings.load_settings().get("laya_gating_enabled"):
-        p_single_topic = laya_gate.check_single_topic(instruction)
-        if p_single_topic is not None and p_single_topic < _LAYA_COMPOUND_THRESHOLD:
-            return True, "was flagged by the compound-instruction checker as covering more than one distinct topic"
     return False, ""
 
 # Async delegation job tracking (see _run_delegation_step_async_tool /
@@ -676,36 +662,6 @@ def _instruction_is_compound(instruction):
 # background unit of work, hand back an id immediately" for background
 # bash processes. Not pruned, consistent with _bg_processes never being
 # pruned either.
-
-# Below this accuracy probability, the fabrication check flags a scratch
-# note as not grounded in what the bot's tools actually returned this
-# step. Picked from standalone testing: a genuinely grounded note scored
-# 0.724 "accurate", while fabricated/vague variants scored 0.385 or
-# lower -- 0.45 sits in that gap with margin on both sides.
-_LAYA_FABRICATION_THRESHOLD = 0.45
-
-
-def _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history):
-    """Returns a possibly_fabricated result dict to use INSTEAD of a
-    "done" status, or None if the note looks fine (or the checker is off/
-    unavailable). Reads only the bytes appended since before_size, so this
-    checks exactly the note this step just wrote, not earlier steps'
-    accumulated content in the same scratch file."""
-    if not settings.load_settings().get("laya_gating_enabled"):
-        return None
-    with open(scratch_path, "r", encoding="utf-8") as f:
-        f.seek(before_size)
-        new_note = f.read()
-    p_accurate = laya_gate.check_note_accurate(new_note, step_history)
-    if p_accurate is not None and p_accurate < _LAYA_FABRICATION_THRESHOLD:
-        return {
-            "status": "possibly_fabricated",
-            "detail": f"This note doesn't look grounded in this step's actual tool activity (Laya's estimate: {p_accurate:.2f} probability it's accurate) -- treat this as a failed step, not a usable finding. Use read_tool_call_history to check what the bot actually did, and read_scratch_file to see the note itself before deciding whether to retry.",
-            "bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history),
-        }
-    return None
-
-
 
 # ---------- what a step hands the bot, and what it hands back ----------
 _FINDINGS_INLINE_LIMIT = 3500       # characters of findings returned with the step; the scratch file keeps everything
@@ -788,7 +744,7 @@ def verify_citations(findings, workspace, limit=20):
 
 def _step_result(bot, instruction, step_history, scratch_path, before_size, retried, findings_limit):
     findings = _read_new_findings(scratch_path, before_size)
-    workspace = settings.load_settings().get("workspace") or ""
+    workspace = settings.load_effective().get("workspace") or ""
     cites = verify_citations(findings, workspace)
     base = {"bot": bot["name"], "instruction": instruction, "tool_calls_recorded": len(step_history)}
     if cites["checked"] >= 2 and len(cites["not_found"]) * 2 >= cites["checked"]:
@@ -869,12 +825,6 @@ def _run_delegation_step_tool(bot_id, instruction, known=None, report=None, task
             }
     _append_tool_call_history(bot["name"], instruction, step_history)
     result = _step_result(bot, instruction, step_history, scratch_path, before_size, retried, findings_limit)
-    # Cited files and lines that really exist are evidence; the optional scoring model is only an estimate (a real
-    # run was rejected at 0.43 against a 0.45 line). So it is consulted only when the report cites too little to check.
-    if result["status"] == "done" and result.get("citations", {}).get("checked", 0) < 2:
-        fabrication_flag = _maybe_flag_fabrication(bot, instruction, scratch_path, before_size, step_history)
-        if fabrication_flag is not None:
-            return fabrication_flag
     return result
 
 
@@ -923,7 +873,7 @@ def _plan_delegation_tool(steps, task_text=""):
             return i, {"step": i, "bot_id": bot_id, **r}
 
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            for i, r in executor.map(_run, runnable):
+            for i, r in executor.map(lambda item: contextvars.copy_context().run(_run, item), runnable):
                 results[i] = r
 
     return {"plan_results": results}
@@ -936,17 +886,18 @@ def _message_bot_tool(bot_id, content):
         return {"error": "A delegation task is already active this turn -- message_bot cannot be used mid-delegation, including as a workaround for a failed or rejected step. Use run_delegation_step or plan_delegation instead, even if a prior step failed."}
     conn = _bots_conn()
     try:
+        where, owner_params = ownership.owner_filter()
         room_row = conn.execute(
-            "SELECT " + rooms._ROOM_COLUMNS + " FROM rooms WHERE kind = 'dm' AND human_party = 'athena' AND member_bot_ids_json = ?",
-            (json.dumps([bot_id]),)
+            "SELECT " + rooms._ROOM_COLUMNS + " FROM rooms WHERE kind = 'dm' AND human_party = 'athena' AND member_bot_ids_json = ? AND " + where,
+            (json.dumps([bot_id]), *owner_params)
         ).fetchone()
         if room_row:
             room = rooms._row_to_room(room_row)
         else:
             now = time.time()
             cur = conn.execute(
-                "INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active) VALUES ('dm', 'athena', ?, ?, ?, ?)",
-                (f"Athena & bot #{bot_id}", json.dumps([bot_id]), now, now)
+                "INSERT INTO rooms (kind, human_party, label, member_bot_ids_json, created_at, last_active, owner) VALUES ('dm', 'athena', ?, ?, ?, ?, ?)",
+                (f"Athena & bot #{bot_id}", json.dumps([bot_id]), now, now, ownership.stored_owner())
             )
             conn.commit()
             room = rooms._row_to_room(conn.execute(f"SELECT {rooms._ROOM_COLUMNS} FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
@@ -965,11 +916,13 @@ def _create_bot_tool(name, description, allowed_tools):
     pre-configured default (set via Athena2's Agent Defaults menu)
     instead, removing the guess entirely rather than just warning
     about it."""
-    current_settings = settings.load_settings()
+    current_settings = settings.load_effective()
     defaults = current_settings.get("bot_creation_defaults") or {}
     model = defaults.get("model")
     endpoint_url = defaults.get("endpoint_url")
     provider = defaults.get("provider", "")
+    if model and ownership.endpoint_kind(provider, endpoint_url or "") is None:
+        return {"error": "This account cannot use the endpoint set as the default for new bots. Choose a different default in Athena's Agent Defaults menu."}
     if not model:
         return {"error": "No default model is configured for bot creation yet. Ask the person to set one in Athena's Agent Defaults menu before creating a bot."}
     if not allowed_tools:
@@ -979,13 +932,14 @@ def _create_bot_tool(name, description, allowed_tools):
         return {"error": "No valid read-only tools were provided for this bot. Call draft_bot_prompt first with a real tools list (or pass allowed_tools directly) -- a bot can't be created with no tools."}
     conn = _bots_conn()
     try:
-        existing_names = [r[0] for r in conn.execute("SELECT name FROM bots").fetchall()]
+        own_where, own_params = ownership.owner_filter()
+        existing_names = [r[0] for r in conn.execute(f"SELECT name FROM bots WHERE {own_where}", own_params).fetchall()]
         if name.strip().lower() in (n.lower() for n in existing_names):
             return {"error": f"A bot named '{name}' already exists. Existing bots: {', '.join(existing_names)}. Choose a genuinely different name, not a numbered variant."}
         cur = conn.execute("""
-            INSERT INTO bots (name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at)
-            VALUES (?, ?, ?, '', ?, ?, ?, 'ollama_keep_alive', ?)
-        """, (name, endpoint_url, provider, model, description, json.dumps(allowed_tools), time.time()))
+            INSERT INTO bots (name, endpoint_url, provider, api_key, model, description, allowed_tools_json, unload_strategy, created_at, owner)
+            VALUES (?, ?, ?, '', ?, ?, ?, 'ollama_keep_alive', ?, ?)
+        """, (name, endpoint_url, provider, model, description, json.dumps(allowed_tools), time.time(), ownership.stored_owner()))
         conn.commit()
         return _row_to_bot(conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ?", (cur.lastrowid,)).fetchone())
     finally:
@@ -998,9 +952,10 @@ def _update_bot_tool(bot_id, description=None, allowed_tools=None):
     and tool access as it learns what works, but identity fields
     (name, model, endpoint) are left to the person managing the
     roster via the UI, not something Athena rewrites on its own."""
+    where, owner_params = ownership.owner_filter()
     conn = _bots_conn()
     try:
-        existing = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ?", (bot_id,)).fetchone()
+        existing = conn.execute(f"SELECT {_BOT_COLUMNS} FROM bots WHERE id = ? AND {where}", (bot_id, *owner_params)).fetchone()
         if not existing:
             return {"error": _unknown_bot_message(bot_id)}
         current = _row_to_bot(existing)
@@ -1309,21 +1264,6 @@ def _tool_call_fingerprint(tc):
     raw = fn.get("name", "") + "|" + args_str
     return hashlib.md5(raw.encode()).hexdigest()
 
-
-
-def _detect_text_loop(text):
-    """Shared with generate()'s own text-loop detector -- same layered
-    tail-repeat check (40 chars/3 repeats, 18 chars/5 repeats), so a
-    bot narrating a fake tool call as repeated text gets caught the
-    same way a stuck main-chat generation does."""
-    def _tail_repeats(window, min_repeats):
-        if len(text) < window * min_repeats:
-            return False
-        tail = text[-window:]
-        if len(tail.strip()) < window * 0.5:
-            return False
-        return text.count(tail) >= min_repeats
-    return _tail_repeats(40, 3) or _tail_repeats(18, 5)
 
 
 # --- Programmatic Tool Calling (PTC) for bots -----------------------------

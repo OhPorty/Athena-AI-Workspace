@@ -45,13 +45,12 @@ _load_failed_reason = None  # cache a load failure so we don't re-attempt a slow
 
 
 def _get_embedder():
-    """Lazy singleton, same shape as laya_gate.py's _get_agent, including
-    caching a load failure rather than retrying it -- the first real use
+    """Lazy singleton that caches a load failure rather than retrying it -- the first real use
     downloads the model from HuggingFace (~130MB), which can legitimately
     take a while, but if it fails (or gets stuck on a bad network path),
     every call after that would otherwise re-attempt the same slow
     operation from scratch instead of failing fast. A cached failure only
-    clears on process restart, same as Laya's own precedent."""
+    clears on process restart."""
     global _embedder, _load_failed_reason
     if _embedder is not None or _load_failed_reason is not None:
         return _embedder

@@ -75,6 +75,9 @@
        implicit `auto` minimum, which is its content's min-content size, so
        it never actually reaches zero height while collapsed. */
     grid-template-rows: minmax(0, 0fr);
+    /* Same reasoning for the one column: a bare implicit column is as wide as its widest unbreakable
+       content, so a long string with no spaces stretched the whole message past the screen. */
+    grid-template-columns: minmax(0, 1fr);
     transition: grid-template-rows var(--duration-base) var(--ease-snap);
 }
 .disclosure-rows.is-open {

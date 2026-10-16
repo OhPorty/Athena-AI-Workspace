@@ -10,7 +10,7 @@ from pydantic import BaseModel
 # Voice: faster-whisper (local, free) for STT, Piper (local, free, ONNX) for TTS
 # ---------------------------------------------------------------------------
 WHISPER_MODEL_SIZE = os.environ.get("ATHENA_WHISPER_MODEL", "large-v3-turbo")
-PIPER_VOICE_PATH = os.environ.get("ATHENA_PIPER_VOICE_PATH", "/home/ohporty/athena/voices/en_US-lessac-medium.onnx")
+PIPER_VOICE_PATH = os.environ.get("ATHENA_PIPER_VOICE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "voices", "en_US-lessac-medium.onnx"))
 
 router = APIRouter()
 

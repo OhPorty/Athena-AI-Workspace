@@ -3,8 +3,11 @@ round goes wrong. These are the failure shapes seen in a real session (a Qwen3.6
 with only closing tool-call tags, and a repeat-block that fired after the page had changed)."""
 import asyncio
 import json
+import threading
+import time
 import logging_setup
 
+import approvals
 import file_tools
 import lcm_client
 import main
@@ -32,16 +35,18 @@ LOST_CALL = [  # exactly what Ollama streamed in the real failure: thinking only
 BLANK = [{"message": {}, "done": True}]
 
 
-def run_turn(monkeypatch, tmp_path, rounds, ctx_sizes=None, max_ctx=0, files=None):
+def run_turn(monkeypatch, tmp_path, rounds, ctx_sizes=None, max_ctx=0, files=None, search_url="", tools_seen=None, answerer=None, interactive=True):
     """-> (events, messages_seen_per_round, saved_assistant_replies, workspace)"""
     ws = tmp_path / "ws"
     ws.mkdir()
     for name, content in (files or {}).items():
-        (ws / name).write_text(content)
+        (ws / name).write_bytes(content) if isinstance(content, bytes) else (ws / name).write_text(content)
     seen, saved, counter = [], [], [0]
 
     def fake_stream(req, target_url, messages, tools, ctx_size, cancel_flag, timeout=None):
         seen.append(list(messages))
+        if tools_seen is not None:
+            tools_seen.append([t["function"]["name"] for t in (tools or [])])
         if ctx_sizes is not None:
             ctx_sizes.append(ctx_size)
         yield from rounds[min(len(seen) - 1, len(rounds) - 1)]
@@ -57,8 +62,17 @@ def run_turn(monkeypatch, tmp_path, rounds, ctx_sizes=None, max_ctx=0, files=Non
     monkeypatch.setattr(lcm_client, "get_lcm_context", lambda sid: [{"role": "user", "content": "do the thing"}])
     monkeypatch.setattr(lcm_client, "get_lcm_tools", lambda: [])
     monkeypatch.setattr(main, "_get_memory_context", lambda: "")
-    req = main.ChatIn(session_id="loop-test", message="do the thing", model="m", endpoint_url="http://127.0.0.1:1", workspace=str(ws), think="", max_ctx=max_ctx)
+    req = main.ChatIn(session_id="loop-test", message="do the thing", model="m", endpoint_url="http://127.0.0.1:1", workspace=str(ws), think="", max_ctx=max_ctx, search_url=search_url, interactive=interactive)
     response = main.chat_stream(req)
+    stop = threading.Event()
+    if answerer:
+        def person():                          # answers requests the way the page would
+            while not stop.is_set():
+                for pending in approvals.pending("loop-test"):
+                    decision, text = answerer(pending)
+                    approvals.answer(pending["id"], decision, text)
+                time.sleep(0.05)
+        threading.Thread(target=person, daemon=True).start()
 
     async def drain():
         return [chunk async for chunk in response.body_iterator]
@@ -66,6 +80,7 @@ def run_turn(monkeypatch, tmp_path, rounds, ctx_sizes=None, max_ctx=0, files=Non
     events = []
     for chunk in asyncio.run(drain()):
         events += [json.loads(line[6:]) for line in chunk.split("\n") if line.startswith("data: ")]
+    stop.set()
     return events, seen, saved, ws
 
 
@@ -255,3 +270,34 @@ def test_ungrounded_paths_unit_rules(tmp_path):
     assert check("ghost.py again", this_turn, base=1) == ["ghost.py"]                                               # this turn's own words, and the nudges, never vouch
     (tmp_path / "real.py").write_text("x")
     assert check("real.py", [], ws=str(tmp_path)) == [] and check("version 1.2.3 and example.com", []) == []
+
+
+# ---------- text before and after a tool call ----------
+
+def test_text_written_in_two_rounds_never_runs_together(monkeypatch, tmp_path):
+    rounds = [[{"message": {"content": "I will look at the file. Notice the space?"}, "done": False}, {"message": {"tool_calls": [call("read_file", path="a.txt")]}, "done": True}],
+              [{"message": {"content": "I just ran a tool call"}, "done": False}, {"message": {"content": " and it went fine."}, "done": False}, {"message": {}, "done": True}]]
+    events, seen, saved, ws = run_turn(monkeypatch, tmp_path, rounds, files={"a.txt": "x"})
+    streamed = "".join(e.get("delta", "") for e in events)
+    assert streamed == "I will look at the file. Notice the space?\n\nI just ran a tool call and it went fine."
+    assert saved[-1] == streamed                                         # what is saved is what was shown, so a reload looks the same
+
+
+def test_no_extra_gap_when_the_text_already_ends_or_starts_with_space(monkeypatch, tmp_path):
+    rounds = [[{"message": {"content": "First part.\n\n"}, "done": False}, {"message": {"tool_calls": [call("read_file", path="a.txt")]}, "done": True}],
+              [{"message": {"content": "Second part."}, "done": False}, {"message": {}, "done": True}]]
+    events, seen, saved, ws = run_turn(monkeypatch, tmp_path, rounds, files={"a.txt": "x"})
+    assert "".join(e.get("delta", "") for e in events) == "First part.\n\nSecond part."
+    rounds = [[{"message": {"content": "First part."}, "done": False}, {"message": {"tool_calls": [call("read_file", path="a.txt")]}, "done": True}],
+              [{"message": {"content": "\nSecond part."}, "done": False}, {"message": {}, "done": True}]]
+    (tmp_path / "again").mkdir()
+    events, seen, saved, ws = run_turn(monkeypatch, tmp_path / "again", rounds, files={"a.txt": "x"})
+    assert "".join(e.get("delta", "") for e in events) == "First part.\nSecond part."
+
+
+def test_a_round_with_no_text_adds_no_separator(monkeypatch, tmp_path):
+    rounds = [[{"message": {"content": "Looking."}, "done": False}, {"message": {"tool_calls": [call("read_file", path="a.txt")]}, "done": True}],
+              [{"message": {"tool_calls": [call("read_file", path="a.txt")]}, "done": True}],
+              [{"message": {"content": "Done."}, "done": False}, {"message": {}, "done": True}]]
+    events, seen, saved, ws = run_turn(monkeypatch, tmp_path, rounds, files={"a.txt": "x"})
+    assert "".join(e.get("delta", "") for e in events) == "Looking.\n\nDone."

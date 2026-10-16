@@ -32,9 +32,9 @@ TIERS = ("small", "standard", "large")
 # models get more room before a checkpoint fires. Starting values -- turn_start
 # trace records carry the tier, so tune these from real sessions.
 GATE_THRESHOLDS = {
-    "small": {"plan_required": 3, "plan_checkin": 4, "self_investigation": 6, "workspace_search": 6},
-    "standard": {"plan_required": 4, "plan_checkin": 5, "self_investigation": 8, "workspace_search": 8},
-    "large": {"plan_required": 6, "plan_checkin": 8, "self_investigation": 12, "workspace_search": 12},
+    "small": {"plan_checkin": 4, "self_investigation": 6, "workspace_search": 6},
+    "standard": {"plan_checkin": 5, "self_investigation": 8, "workspace_search": 8},
+    "large": {"plan_checkin": 8, "self_investigation": 12, "workspace_search": 12},
 }
 
 HOSTED_PROVIDERS = {"openai", "openrouter", "anthropic", "google"}

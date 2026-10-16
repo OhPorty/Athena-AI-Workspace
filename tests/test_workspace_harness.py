@@ -41,7 +41,7 @@ def test_progress_resets_calls_without_plan_and_is_neutral_for_checkin_cadence()
     assert main._credit_progress("bash_exec", {"exit_code": 2}, 5, 4) == (5, 4)
 
 
-def test_a_building_turn_never_trips_the_plan_gate_but_pure_exploration_still_does():
+def test_building_calls_are_credited_as_progress_but_pure_exploration_is_not():
     # Simulate the loop's own bookkeeping: +1 per call, then credit on the result.
     def run(calls):
         without_progress, since_touch = 0, 0
@@ -53,8 +53,8 @@ def test_a_building_turn_never_trips_the_plan_gate_but_pure_exploration_still_do
 
     build = [("write_file", {"path": f"f{i}"}) for i in range(10)] + [("bash_exec", {"exit_code": 0})] * 5
     assert run(build) == (0, 0)
-    explore = [("web_fetch", {"ok": 1})] * main._PLAN_REQUIRED_THRESHOLD
-    assert run(explore)[0] >= main._PLAN_REQUIRED_THRESHOLD
+    explore = [("web_fetch", {"ok": 1})] * 5
+    assert run(explore)[0] == 5
     mixed = [("read_file", {"ok": 1}), ("read_file", {"ok": 1}), ("write_file", {"path": "a"}), ("read_file", {"ok": 1})]
     assert run(mixed)[0] == 1
 
@@ -62,15 +62,15 @@ def test_a_building_turn_never_trips_the_plan_gate_but_pure_exploration_still_do
 # ---------- build vs maintain ----------
 
 def test_search_first_gate_is_skipped_for_build_tasks_only():
-    blocked = main._check_tool_gate("workspace", "read_file", set(), 0, 0)
+    blocked = main._check_tool_gate("workspace", "read_file", set(), 0)
     assert blocked and "search_codebase first" in blocked["error"]
-    assert main._check_tool_gate("workspace", "read_file", set(), 0, 0, build_task=True) is None
-    assert main._check_tool_gate("workspace", "bash_read_only", set(), 0, 0, build_task=True) is None
+    assert main._check_tool_gate("workspace", "read_file", set(), 0, build_task=True) is None
+    assert main._check_tool_gate("workspace", "bash_read_only", set(), 0, build_task=True) is None
 
 
 def test_build_tool_set_is_lean_and_ungated():
-    maintain = tool_names(main._get_mode_tools("workspace", _Req()))
-    build = tool_names(main._get_mode_tools("workspace", _Req(), build_task=True))
+    maintain = tool_names(main._get_mode_tools_legacy("workspace", _Req()))
+    build = tool_names(main._get_mode_tools_legacy("workspace", _Req(), build_task=True))
     for name in ("search_codebase", "find_definition", "find_references", "type_info", "backup_file"):
         assert name in maintain and name not in build, name
     for name in ("write_file", "edit_file", "read_file", "list_files", "bash_exec", "bash_read_only", "write_plan"):
@@ -79,38 +79,30 @@ def test_build_tool_set_is_lean_and_ungated():
 
 
 def test_build_task_has_no_effect_outside_workspace_mode():
-    assert tool_names(main._get_mode_tools("casual", _Req(), build_task=True)) == tool_names(main._get_mode_tools("casual", _Req()))
+    assert tool_names(main._get_mode_tools_legacy("casual", _Req(), build_task=True)) == tool_names(main._get_mode_tools_legacy("casual", _Req()))
 
 
 def test_build_tool_set_is_materially_smaller():
     size = lambda tools: len(json.dumps(tools))
-    assert size(main._get_mode_tools("workspace", _Req(), build_task=True)) < 0.85 * size(main._get_mode_tools("workspace", _Req(), called_tool_names={"search_codebase"}))
+    assert size(main._get_mode_tools_legacy("workspace", _Req(), build_task=True)) < 0.85 * size(main._get_mode_tools_legacy("workspace", _Req(), called_tool_names={"search_codebase"}))
 
 
 # ---------- profile thresholds ----------
 
 def test_thresholds_default_to_the_module_constants():
     t = main._default_gate_thresholds()
-    assert (t["plan_required"], t["plan_checkin"]) == (main._PLAN_REQUIRED_THRESHOLD, main._PLAN_CHECKIN_THRESHOLD)
+    assert t["plan_checkin"] == main._PLAN_CHECKIN_THRESHOLD and "plan_required" not in t
 
 
 def test_larger_tier_allows_more_calls_before_each_checkpoint():
     small, large = model_profile.GATE_THRESHOLDS["small"], model_profile.GATE_THRESHOLDS["large"]
-    n = small["plan_required"]
-    assert main._check_tool_gate("casual", "web_fetch", set(), 0, n, thresholds=small)
-    assert main._check_tool_gate("casual", "web_fetch", set(), 0, n, thresholds=large) is None
     k = small["plan_checkin"]
-    args = dict(pre_round_called={"write_plan"}, pre_round_exploration_count=0, pre_round_total_count=0,
+    args = dict(pre_round_called={"write_plan"}, pre_round_exploration_count=0,
                 pre_round_plan_exists=True, pre_round_calls_since_plan_touch=k)
     assert main._check_tool_gate("casual", "web_fetch", **args, thresholds=small)
     assert main._check_tool_gate("casual", "web_fetch", **args, thresholds=large) is None
 
 
-def test_tools_stay_available_longer_for_a_larger_tier():
-    n = model_profile.GATE_THRESHOLDS["small"]["plan_required"]
-    small = tool_names(main._get_mode_tools("casual", _Req(), total_tool_call_count=n, thresholds=model_profile.GATE_THRESHOLDS["small"]))
-    large = tool_names(main._get_mode_tools("casual", _Req(), total_tool_call_count=n, thresholds=model_profile.GATE_THRESHOLDS["large"]))
-    assert small == {"write_plan"} and len(large) > 1
 
 
 # ---------- workspace kind ----------

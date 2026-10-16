@@ -1,6 +1,8 @@
 """
 Athena — a lean, LCM-backed chat/agent workspace with voice support.
 """
+import contextvars
+import types
 import os
 import re
 import subprocess
@@ -19,11 +21,13 @@ import httpx
 import psutil
 import argparse
 import pypdf
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, JSONResponse
 from rag import SimpleCodeRAG
 import rag
 import settings
+import ownership
+import prompt_gate
 import task_context
 import activity
 import generation_streaming
@@ -43,13 +47,27 @@ import model_profile
 import workspace_kind
 import preview_tools
 import background_music
+import mcp_tools
+import file_view
+import vision_images
 import scaffold_tools
 import web_tools
 import host_locks
 import bots
+from loop_guard import detect_text_loop as _detect_text_loop
 import rooms
 import delegation_jobs
 import task_scheduler
+import research
+import approvals
+import agent_tools
+import office_tools
+import safety
+import surface
+import workspace_ops
+import push_notify
+import accounts
+import workspace_view
 from logging_setup import logger, log_trace_event
 from host_locks import OLLAMA_URL
 from fastapi.staticfiles import StaticFiles
@@ -76,6 +94,12 @@ app = FastAPI(title="Athena")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+@app.get("/sw.js")
+def service_worker():
+    """Must be served from the site root to control every page; carries no secrets, so it is reachable without logging in."""
+    return FileResponse("static/sw.js", media_type="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+
+
 @app.get("/api/generated-files/{token}")
 def get_generated_file(token: str):
     path = generated_files.resolve(token)
@@ -96,6 +120,12 @@ app.include_router(file_tools.router)
 app.include_router(bots.router)
 app.include_router(rooms.router)
 app.include_router(task_scheduler.router)
+app.include_router(research.router)
+app.include_router(approvals.router)
+app.include_router(safety.router)
+app.include_router(push_notify.router)
+app.include_router(accounts.router)
+app.include_router(workspace_view.router)
 app.add_middleware(auth_routes.AuthMiddleware)
 
 BASE_SYSTEM_PROMPT = (
@@ -121,12 +151,10 @@ CASUAL_AGENT_SECTIONS = [
      "## When a question needs more than a couple of lookups\n"
      "If answering something is genuinely going to take more than a couple of tool calls -- "
      "several searches, a fetch followed by more fetches to track down the right source, "
-     "cross-checking more than one thing -- call write_plan first with the short ordered list "
-     "of what you're actually going to check, before diving in. This is a real requirement, "
-     "not a suggestion: if you make several tool calls in a row without ever calling "
-     "write_plan, every tool except write_plan disappears until you call it. It does not cap "
-     "how much you can look up afterward -- once you've written a plan, your full tool access "
-     "returns and stays available. A simple one-lookup question never needs this at all."),
+     "cross-checking more than one thing -- call plan first with the short ordered list "
+     "of what you're actually going to check, before diving in. Then work through it one "
+     "step at a time: finish a step, tick it off with step_done, and only then start the next, rather than "
+     "mixing several steps together. A simple one-lookup question never needs a plan."),
 
     ("formatting",
      "## Formatting structured data\n"
@@ -230,14 +258,10 @@ CODING_HARNESS_SECTIONS = [
      "For anything touching more than one file, or more than a couple of lines, or requiring "
      "several tool calls to even figure out the shape of the problem: call write_plan first "
      "with the short ordered list of what you're actually going to do. A trivial one-line fix "
-     "doesn't need one. This is enforced, not just advised: if you make several tool calls in "
-     "a row without ever calling write_plan, every other tool disappears until you call it -- "
-     "so don't be surprised if bash_read_only/read_file/etc. suddenly aren't in your tool list anymore; "
-     "that's this gate, not an error. It never reduces how much you can actually do -- once "
-     "you've written a plan, full tool access returns and stays available for the rest of the "
-     "turn. A plan can be wrong once you see real file contents -- call update_plan_step to "
-     "mark a step done, failed, or in progress as you go, and call write_plan again if the "
-     "whole approach needs to change -- but skipping it and improvising edit-by-edit is how "
+     "doesn't need one. Work the plan in order, one step at a time: mark a step in progress, "
+     "do only that step, mark it done with update_plan_step, and only then look at the next. A plan "
+     "can be wrong once you see real file contents -- mark a step failed and call write_plan again "
+     "if the whole approach needs to change -- but skipping it and improvising edit-by-edit is how "
      "partial, inconsistent changes happen."),
 
     ("grounded_claims",
@@ -320,6 +344,55 @@ CODING_HARNESS_SYSTEM_PROMPT = _assemble_prompt_sections(
     CODING_HARNESS_SECTIONS,
     ["identity", "plan_before_acting", "grounded_claims", "loop_signals", "tool_selection", "research_discipline"],
 )
+# The workspace sessions (not the delegation session, which keeps the engine tool names above) are told about the rebuilt tool list.
+# Own sections, own wording: each mode's layer is tuned on its own terms.
+WORKSPACE_SECTIONS = [
+    ("plan_before_acting_v2",
+     "## Before you act\n"
+     "For anything touching more than one file, or needing several tool calls just to understand the problem, call plan first "
+     "with the short ordered list of what you will do. A trivial one-line fix does not need one. Work it in order, one step at a "
+     "time: do only the next step, then call step_done with its number, then look at the next. Never rewrite the plan just to tick a "
+     "step off. If the approach really changes, call plan with new steps."),
+
+    ("tool_selection_v2",
+     "## Picking the right tool\n"
+     "Before reading or searching files yourself on a question about this codebase, call search_codebase: it points you to the right "
+     "file in one call. Then read_file (it also lists folders), search_files for exact text, edit_file to change things (old_text and "
+     "new_text, or a line range when you know the lines), and run for everything else: tests, git, scripts, installs. Use "
+     "find_definition, find_references and type_info for questions about a symbol, not text search. To check that a web page really "
+     "works, preview it with actions (click, press a key, type) and look at the result."),
+
+    ("tool_selection_build_v2",
+     "## Picking the right tool\n"
+     "Look at files with read_file (it also lists folders) and search_files; create and change them with write_file and edit_file; "
+     "run things with run (npm, node, python3, pip, git, anything). make with kind scaffold copies in working starter code (a bare "
+     "page, a game loop) so you do not retype plumbing. preview opens an HTML page in a real browser, tells you what is wrong with it, "
+     "and can use it first: give it actions (click, press a key, type, scroll) to play the game or try the form and see the result, not "
+     "just the page as it first loads."),
+
+    ("asking_and_safety",
+     "## Asking, and what needs a yes\n"
+     "Use ask_user when a decision is the person's to make or you cannot find something out yourself, rather than guessing what they "
+     "want. Do not use it to confirm something you have just done, or to ask what the task is when they have already told you. Removing anything (the delete tool, or a command that deletes) always stops and asks them first; if they say no, carry on "
+     "without it instead of finding another way. Every turn that changes files is snapshotted first, and they can undo it. Some of "
+     "Athena's own files (settings, passwords, databases, logs, backups) are not available to tools at all."),
+
+    ("editing_athena",
+     "## You are editing Athena herself\n"
+     "This folder is the program you are running in. Changes take effect only when the person restarts her, and a Python file that "
+     "does not compile stops her from starting, so after editing check that it still compiles (check, what syntax) and keep each "
+     "change small and purposeful. Do not touch files you do not need to. If something goes wrong the person can undo the turn."),
+]
+WORKSPACE_ALL_SECTIONS = CODING_HARNESS_SECTIONS + WORKSPACE_SECTIONS
+WORKSPACE_PROMPT = _assemble_prompt_sections(
+    WORKSPACE_ALL_SECTIONS,
+    ["identity", "plan_before_acting_v2", "grounded_claims", "loop_signals", "tool_selection_v2", "asking_and_safety", "research_discipline"],
+)
+WORKSPACE_BUILD_PROMPT = _assemble_prompt_sections(
+    WORKSPACE_ALL_SECTIONS,
+    ["identity", "plan_before_acting_v2", "grounded_claims", "loop_signals", "tool_selection_build_v2", "build_loop", "asking_and_safety", "research_discipline"],
+)
+
 CODING_HARNESS_BUILD_PROMPT = _assemble_prompt_sections(
     CODING_HARNESS_SECTIONS,
     ["identity", "plan_before_acting", "grounded_claims", "loop_signals", "tool_selection_build", "build_loop", "research_discipline"],
@@ -379,15 +452,56 @@ def _resolve_mode_and_workspace(req):
     frontend never actually populates) falls back to the configured
     default workspace instead of silently downgrading her to casual
     chat -- which is what was actually happening before this existed."""
-    if req.session_id == bots.ATHENA_BOTS_SESSION_ID:
-        workspace = req.workspace or settings.load_settings().get("workspace") or ""
+    if ownership.is_bots_session(req.session_id):
+        workspace = req.workspace or _effective_settings().get("workspace") or ""
         return "athena_delegation", workspace
     if req.workspace:
         return "workspace", req.workspace
     return "casual", ""
 
 
-def _get_mode_system_prompt(mode, req, build_task=False):
+SEEING_NOTE = (
+    "## Seeing\n"
+    "You can see images. If you are asked to look at a picture, screenshot or PDF, open it with read_file and you will be shown it; "
+    "preview and web_fetch with screenshot show you pages the same way. Do not say you cannot view images."
+)
+
+# When the person has to approve plans (always for small models, optionally for all), each mode's prompt layer says so in its own words.
+PLAN_APPROVAL_CASUAL = (
+    "## Plans need approval\n"
+    "When a request is to make something (a document, a file, a track) or is a job of several steps, do not start. Call plan with the "
+    "steps first, each one small enough to finish and check by itself. The person reads it and approves it or tells you what to change; "
+    "the tools that make things do not work until a plan is approved. If they say no, take their reason on board and plan again. Once it "
+    "is approved, do one step at a time: only the next step, then tick it off with step_done (its number), and only then look at the one "
+    "after. Never rewrite the plan to tick a step off. Never do several steps in one go. Looking things up, reading, and answering "
+    "questions need no plan: just do them.\n"
+    "Example, for \"make me a one-page resume PDF\": 1. Ask for or gather the details the resume needs. 2. Lay out the sections. "
+    "3. Make the PDF. 4. Check it and tell the person. One action per step, never the whole job in one step."
+)
+PLAN_APPROVAL_WORKSPACE = (
+    "## Plans need approval\n"
+    "Before you change or build anything in this project, call plan with the steps. (You can read, search and look at images without one.) Keep each step small and checkable: one file, "
+    "one fix, one run, one look at the page. The person approves the plan or tells you what to change, and no other tool works until "
+    "they approve one. If they decline, use their reason and plan again. After approval, work strictly in order: the current step is "
+    "marked in progress for you, so do only that step, check it worked (run it, preview it, read it back), tick it off with step_done, and "
+    "only then start the next. Reading files to understand a step is part of the step. If something you assumed turns out to be wrong "
+    "(a file is somewhere else), carry on with the same plan. An approved plan cannot be rewritten just to tick a step off; if the steps "
+    "themselves must change, call plan with the new steps, replace true and a reason, and the person approves the change. "
+    "Looking at files, images or pages, searching, and answering questions or giving an opinion need no plan and work at any time; "
+    "only changing things waits for an approved plan.\n"
+    "Example, for \"a page with a button that shows a message\": 1. Create index.html with the button and an empty message area. "
+    "2. Create style.css to style the page. 3. Create script.js so clicking the button fills in the message. 4. Preview the page and fix "
+    "what is wrong. Make a plan that small, with one file or one action per step; never put the whole job in one step."
+)
+PLAN_APPROVAL_DELEGATION = (
+    "## Plans need approval\n"
+    "Before you delegate or touch any file, call write_plan with the ordered steps. The person approves it or says what to change, and "
+    "no other tool works until a plan is approved. After approval, take one step at a time: update_plan_step to in_progress, do only "
+    "that step, update_plan_step to done, then the next. Plain conversation needs no plan."
+)
+
+
+def _get_mode_system_prompt(mode, req, build_task=False, plan_approval=False):
     """The stable identity and rules only -- memory, skills, and
     pinned-message context are deliberately NOT concatenated in here.
     They're dynamic, situational material that changes every request,
@@ -396,14 +510,25 @@ def _get_mode_system_prompt(mode, req, build_task=False):
     block as the model's actual operating instructions, the same
     distinction DeepSeek Harness draws between a stable system prompt
     and dynamically-sourced runtime context."""
-    if mode == "workspace" and build_task:
-        base = CODING_HARNESS_BUILD_PROMPT
-    elif mode in ("workspace", "athena_delegation"):
+    if mode == "workspace":
+        base = WORKSPACE_BUILD_PROMPT if build_task else WORKSPACE_PROMPT
+        if safety.touches_athena(req.workspace):
+            base = base + "\n\n" + dict(WORKSPACE_SECTIONS)["editing_athena"]
+    elif mode == "athena_delegation":
         base = CODING_HARNESS_SYSTEM_PROMPT
     else:
         base = BASE_SYSTEM_PROMPT + AGENT_SYSTEM_SUFFIX
     if mode == "athena_delegation":
-        base = base + bots._get_bot_delegation_prompt_section(req.workspace, async_enabled=bool(settings.load_settings().get("delegation_async_enabled")), laya_gating_enabled=bool(settings.load_settings().get("laya_gating_enabled")))
+        base = base + bots._get_bot_delegation_prompt_section(req.workspace, async_enabled=bool(settings.load_settings().get("delegation_async_enabled")))
+    elif mode in ("workspace", "casual"):
+        seen = types.SimpleNamespace(**{k: getattr(req, k, d) for k, d in (("search_url", ""), ("allowed_tools", None), ("provider", ""), ("interactive", True), ("workspace", ""))})
+        more = surface.catalog(_get_mode_tools_legacy(mode, seen, called_tool_names={"search_codebase"}, build_task=build_task), mode, seen)
+        if more:
+            base = base + "\n\n" + more
+    if mode != "athena_delegation" and _vision_of(req):
+        base = base + "\n\n" + SEEING_NOTE
+    if plan_approval:
+        base = base + "\n\n" + {"workspace": PLAN_APPROVAL_WORKSPACE, "athena_delegation": PLAN_APPROVAL_DELEGATION}.get(mode, PLAN_APPROVAL_CASUAL)
     return base
 
 
@@ -424,7 +549,7 @@ def _get_dynamic_context_message(req):
 # tool_selection section) but enforced structurally: a model can drift
 # off a prompt instruction under pressure, it can't call a tool that
 # isn't in its tool list.
-_SEARCH_GATED_TOOL_NAMES = {"bash_read_only", "read_file"}
+_SEARCH_GATED_TOOL_NAMES = {"bash_read_only", "read_file", "search_files"}
 
 # The full set of self-investigation tools, cut off once a turn has
 # leaned on them past the threshold below AND no delegation has
@@ -437,7 +562,7 @@ _SEARCH_GATED_TOOL_NAMES = {"bash_read_only", "read_file"}
 # of her own follow-up digging on top of real delegation findings --
 # e.g. confirming something a bot's scratch note pointed to.
 _EXPLORATION_TOOL_NAMES = {
-    "bash_read_only", "read_file", "list_files", "search_codebase",
+    "bash_read_only", "read_file", "list_files", "search_codebase", "search_files",
     "find_definition", "find_references", "type_info",
 }
 _DELEGATION_TOOL_NAMES = {"run_delegation_step", "plan_delegation"}
@@ -457,20 +582,9 @@ _SELF_INVESTIGATION_TOOL_THRESHOLD = 6
 # trip this and block a tool that was never the problem.
 _WORKSPACE_SEARCH_CODEBASE_THRESHOLD = _SELF_INVESTIGATION_TOOL_THRESHOLD
 
-# Below this many total tool calls in one turn (any tool, any mode), a
-# turn is small enough not to need an explicit plan. At or past it,
-# _get_mode_tools narrows the tool list down to write_plan alone until
-# it's called -- a real structural checkpoint, not a prose reminder,
-# replacing what used to be enforced only by CODING_HARNESS_SECTIONS'
-# plan_before_acting sentence. Deliberately mode-independent (unlike
-# _SELF_INVESTIGATION_TOOL_THRESHOLD, which only applies in
-# athena_delegation): the observed failure mode -- 23 tool calls
-# rediscovering a fixed weather API endpoint -- happened in plain casual
-# chat, which had no per-turn structure of any kind before this existed.
-# This is NOT a cap on how much work can happen -- once write_plan has
-# been called, the gate never re-applies for the rest of the turn, so
-# total tool-call volume is unaffected; it only forces one checkpoint.
-_PLAN_REQUIRED_THRESHOLD = 3
+# A plan used to be forced by a call count: after a few tool calls with no plan, every tool but write_plan disappeared. That is gone.
+# Now the person approves a plan before any work starts (see _plan_approval_required and the write_plan handler in dispatch_tool):
+# always for small models, and for every model when the person turns it on.
 
 # Writing a plan once isn't enough on its own: a real incident (a weather
 # lookup, but the same shape applies to anything) showed a model write a
@@ -497,14 +611,16 @@ _PLAN_CHECKIN_THRESHOLD = 4
 # plan" count and doesn't count toward the plan check-in cadence. It never
 # unlocks anything or caps anything -- a failed call earns no credit, and the
 # repeat-call and similar-search blocks still apply to every tool.
-_PROGRESS_TOOL_NAMES = {"write_file", "edit_file", "replace_lines", "bash_exec", "bash_exec_start", "generate_pdf", "generate_background_music", "preview", "scaffold"}
+_PROGRESS_TOOL_NAMES = {"write_file", "edit_file", "replace_lines", "bash_exec", "bash_exec_start", "run", "delete", "generate_pdf", "generate_background_music", "generate_docx", "generate_xlsx", "generate_pptx", "preview", "scaffold"}
 
 
 def _result_is_progress(tool_name, result):
+    if mcp_tools.is_mcp_tool(tool_name):
+        return isinstance(result, dict) and not result.get("error")
     if tool_name not in _PROGRESS_TOOL_NAMES or not isinstance(result, dict) or result.get("error"):
         return False
-    if tool_name == "bash_exec":
-        return result.get("exit_code") == 0
+    if tool_name in ("bash_exec", "run"):
+        return result.get("exit_code") == 0 or result.get("status") == "started"
     return True
 
 
@@ -561,6 +677,113 @@ def _ungrounded_paths(reply, messages, turn_base, workspace):
     return unseen
 
 
+def _can_see_images(ctx):
+    req = ctx.req
+    return req is not None and bool(model_profile.resolve(req.provider, req.endpoint_url, req.api_key, req.model)["vision"])
+
+
+def _attach_screenshot(result, shot, ctx):
+    """Put a captured page's picture on a web_fetch result when the model can look at images. It rides along as _images
+    (the chat loop sizes it to the model's budget and shows it to the model); the text result is unchanged."""
+    if not _can_see_images(ctx):
+        result["screenshot"] = "not taken: this model cannot view images"
+        return
+    result["_images"] = [preview_tools._model_image(shot["png"])]
+    result["screenshot_urls"] = {"page": generated_files.url_for(generated_files.store(shot["png"], "page.png"))}
+    result["screenshot"] = f"attached ({shot['width']}x{shot['height']}px" + (", cut off at the bottom" if shot["truncated"] else "") + ")"
+
+
+def _attach_pdf_pages(result):
+    """The pages of a PDF just made, so a model that can see checks the layout itself instead of trusting it."""
+    path = generated_files.resolve(str(result.get("url", "")).rsplit("/", 1)[-1])
+    if not path:
+        return
+    try:
+        pages = file_view.pdf_pages_b64(path)
+    except Exception:
+        return
+    result["_images"] = pages
+    result["screenshot_urls"] = {f"page {i + 1}": _store_view(png, f"pdf-page-{i + 1}") for i, png in enumerate(pages)}
+    result["pages_shown"] = f"all {len(pages)} page(s) are shown to you"
+
+
+def _store_view(png_b64, label):
+    generated_files.prune("viewed-", max_age_days=30)
+    return generated_files.url_for(generated_files.store(base64.b64decode(png_b64), f"viewed-{label}.png"))
+
+
+def _view_for_model(workspace, rel_path, page, ctx):
+    """What a model gets when it looks at a file: the picture (vision models only) and a plain note about it.
+    -> fields to merge into a tool result."""
+    if not _can_see_images(ctx):
+        return {"viewed": "not shown: this model cannot view images"}
+    seen = file_view.view(workspace, rel_path, page)
+    if "error" in seen:
+        return {"viewed": seen["error"]}
+    label = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(rel_path))[:40]
+    return {"_images": [seen["png"]], "screenshot_urls": {"image": _store_view(seen["png"], label)}, "viewed": seen["note"] + " (shown to you)"}
+
+
+_PAGE_TEXT_LIMIT = 8000
+
+
+def _web_fetch_tool(args, ctx):
+    """web_fetch: text of a page (and optionally a picture), or -- with actions -- the page after clicking, typing,
+    holding keys, scrolling and waiting on it."""
+    url, actions = args.get("url", ""), args.get("actions")
+    if actions:
+        shot = preview_tools.capture_public_page(url, actions=actions)
+        if "error" in shot:
+            return {"url": url, "error": shot["error"]}
+        text = shot["text"]
+        result = {"url": shot["final_url"], "title": shot["title"], "content": text[:_PAGE_TEXT_LIMIT], "interactive": shot["interactive"]}
+        if len(text) > _PAGE_TEXT_LIMIT:
+            result["content_truncated"] = True
+        if args.get("screenshot") is not False:
+            _attach_screenshot(result, shot, ctx)
+        return result
+    if args.get("raw") or args.get("save_to"):
+        return _web_fetch_source(url, args, ctx)
+    result = web_tools.web_fetch(url, args.get("offset", 0))
+    if args.get("screenshot") and isinstance(result, dict):
+        shot = preview_tools.capture_public_page(url)
+        if "error" in shot:
+            result["screenshot"] = shot["error"]
+        else:
+            _attach_screenshot(result, shot, ctx)
+    return result
+
+
+def _web_fetch_source(url, args, ctx):
+    """web_fetch with raw: the page's real source. With save_to it goes into the workspace as a file (through write_file, so every
+    protection and the undo snapshot apply) and only a short preview comes back; otherwise it comes back in chunks like any long text."""
+    source = web_tools.fetch_source(url)
+    if "error" in source:
+        return source
+    text, save_to = source["text"], str(args.get("save_to") or "").strip()
+    note = source.get("note")
+    if save_to:
+        if not ctx.workspace:
+            return {"error": "save_to needs a workspace to save into. Ask the person to bind one, or leave save_to out to read the source here."}
+        saved = dispatch_tool("write_file", {"path": save_to, "content": text}, ctx)
+        if isinstance(saved, dict) and saved.get("error"):
+            return saved
+        result = {"url": source["url"], "saved_to": save_to, "chars": len(text), "lines": text.count("\n") + 1, "preview": text[:1500],
+                  "next": f"The full source is in {save_to}. Read the parts you need with read_file (a line range or search), or work on the file directly."}
+        if isinstance(saved, dict) and saved.get("change"):
+            result["change"] = saved["change"]       # so the tool list shows the file and its line count
+        if source.get("truncated"):
+            result["truncated"] = "The page was larger than 5 MB; only the first 5 MB was saved."
+        if note:
+            result["note"] = note
+        return result
+    result = web_tools._chunk_content(source["url"], text, args.get("offset", 0))
+    result["source"] = True
+    if note:
+        result["note"] = note
+    return result
+
+
 def _leaked_tool_markup(*texts):
     """Only the tail counts: a call that was started and lost leaves its remnants at the very end of the
     output, whereas an answer that merely discusses tool syntax mentions it mid-text."""
@@ -571,7 +794,7 @@ def _leaked_tool_markup(*texts):
 # read_file, a test run) can legitimately answer differently, so it stops counting as a repeat.
 # Identical *writes* stay counted: rewriting the same thing over and over is still a loop. A look
 # (even a successful preview) never clears anything -- preview, preview, preview is still a loop.
-_STATE_CHANGING_TOOL_NAMES = {"write_file", "edit_file", "replace_lines", "scaffold", "generate_pdf", "generate_background_music", "bash_exec", "bash_exec_start"}
+_STATE_CHANGING_TOOL_NAMES = {"write_file", "edit_file", "replace_lines", "scaffold", "generate_pdf", "generate_background_music", "generate_docx", "generate_xlsx", "generate_pptx", "bash_exec", "bash_exec_start", "run", "delete"}
 _REPEAT_COUNTED_AFTER_CHANGE = {"write_file", "edit_file", "replace_lines", "scaffold", "generate_pdf", "generate_background_music"}
 
 
@@ -589,7 +812,7 @@ def _gate_thresholds_for(mode, profile):
 def _default_gate_thresholds():
     """Read at call time (not import time) so the module constants stay authoritative."""
     return {
-        "plan_required": _PLAN_REQUIRED_THRESHOLD, "plan_checkin": _PLAN_CHECKIN_THRESHOLD,
+        "plan_checkin": _PLAN_CHECKIN_THRESHOLD,
         "self_investigation": _SELF_INVESTIGATION_TOOL_THRESHOLD, "workspace_search": _WORKSPACE_SEARCH_CODEBASE_THRESHOLD,
     }
 
@@ -604,8 +827,35 @@ def _plan_is_complete(plan_state):
     return bool(plan_state) and all(s.get("status") in ("done", "failed") for s in plan_state)
 
 
-def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False, thresholds=None, build_task=False):
-    """The seven structural tool-availability gates, checked against a
+def _checkin_instruction(mode):
+    """What to do when the plan has to be brought up to date, in the tool names the model actually has."""
+    if mode == "athena_delegation":
+        return ("Call update_plan_step now for the step you are on: mark it done, or failed if it did not work -- or, if you are still working on it, "
+                "give that step the status in_progress to carry on.")
+    return ("Say where you are on the step you are on: if it is finished, call step_done with its number; if it did not work, call plan with that step "
+            "and the status failed; if you are still working on it, call plan with that step and the status in_progress to carry on.")
+
+
+# What needs an approved plan: anything that changes the project or starts work. Looking (reading, searching, previewing, a command that
+# only reads, the web) never does, so a model can orient itself, look at images, and answer a question without a plan.
+_PLAN_GATED_DELEGATION = {"message_bot", "message_room", "create_bot", "update_bot", "run_delegation_step", "plan_delegation"}
+_COMMAND_TOOLS = {"bash_exec", "bash_exec_start", "run"}
+_PLAN_BLOCK_PREFIX = "BLOCKED: this changes things, and the person has to approve a plan"
+
+
+def _needs_approved_plan(name, args=None):
+    """Whether this call has to wait for an approved plan. `args` is the call's arguments when known; a command is only allowed through
+    when it is plainly read-only, and without arguments (building the tool list) it is not."""
+    if name in _COMMAND_TOOLS:
+        command = (args or {}).get("command") if isinstance(args, dict) else None
+        if isinstance(args, dict) and not command and (args.get("check") is not None or args.get("stop") is not None):
+            return False                                           # looking at, or stopping, a command that is already running
+        return not (isinstance(command, str) and workspace_ops.is_read_only(command))
+    return name in _STATE_CHANGING_TOOL_NAMES or name in _PLAN_GATED_DELEGATION
+
+
+def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False, thresholds=None, build_task=False, plan_approval_pending=False, call_args=None):
+    """The structural tool-availability gates, checked against a
     snapshot of state as of the START of the current round (not the
     live-updating turn totals) -- so a tool unlocked by a call earlier
     THIS round (e.g. search_codebase and bash_read_only requested in the same
@@ -620,6 +870,13 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
     in a small new project there is nothing for search_codebase to find, so
     forcing it before read_file is a wasted call, not orientation."""
     th = thresholds or _default_gate_thresholds()
+    if plan_approval_pending and _needs_approved_plan(name, call_args if call_args is not None else {}) and name not in ("write_plan", "update_plan_step"):
+        return {"error": (
+            _PLAN_BLOCK_PREFIX + " before any change starts; there is no approved plan yet. "
+            "Reading, searching, looking at images and answering questions need no plan and work now. If you only need to answer or give an opinion, "
+            "do that. Otherwise call plan now with the short ordered list of steps (each one small enough to do and check on its own); "
+            "the person will approve it or tell you what to change."
+        )}
     if mode in ("workspace", "athena_delegation") and name in _SEARCH_GATED_TOOL_NAMES and "search_codebase" not in pre_round_called and not build_task:
         return {"error": f"BLOCKED: '{name}' is not available yet this turn -- call search_codebase first before using bash_read_only or read_file directly, so you're working from search results rather than blind exploration."}
     if (mode == "athena_delegation" and name in _EXPLORATION_TOOL_NAMES
@@ -648,13 +905,6 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
             "back incomplete, do not work around it with a one-off run_delegation_step call: fix the step (or "
             "steps) and call plan_delegation again with the corrected list."
         )}
-    if pre_round_total_count >= th["plan_required"] and "write_plan" not in pre_round_called and name != "write_plan":
-        return {"error": (
-            "BLOCKED: you've made several tool calls this turn without writing a plan. Every tool except "
-            "write_plan is now unavailable until you call it. This does not limit how much you can do for the "
-            "rest of this turn -- once you call write_plan with the ordered steps you're actually going to "
-            "take, full tool access returns and stays available. Call write_plan now."
-        )}
     if pre_round_plan_complete and name != "write_plan":
         return {"error": (
             "BLOCKED: every step in your plan is now marked done or failed, so this tool is no longer "
@@ -666,21 +916,18 @@ def _check_tool_gate(mode, name, pre_round_called, pre_round_exploration_count, 
             and pre_round_calls_since_plan_touch >= th["plan_checkin"]
             and name not in ("write_plan", "update_plan_step")):
         return {"error": (
-            f"BLOCKED: you've made {pre_round_calls_since_plan_touch} tool calls since you last touched your "
-            "plan. Only update_plan_step (or write_plan, if the plan itself needs to change) is available "
-            "until you check in. Call update_plan_step now for whichever step your recent calls actually "
-            "addressed -- if it's already done, say so and stop looking for more sources to confirm it."
+            "BLOCKED: your plan needs updating before anything else. Only the plan tools are available until you do. " + _checkin_instruction(mode)
         )}
     return None
 
 
-def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0, total_tool_call_count=0, search_codebase_call_count=0, plan_exists=False, calls_since_plan_touch=0, plan_complete=False, thresholds=None, build_task=False):
+def _get_mode_tools_legacy(mode, req, called_tool_names=None, exploration_call_count=0, search_codebase_call_count=0, plan_exists=False, calls_since_plan_touch=0, plan_complete=False, thresholds=None, build_task=False, plan_approval_pending=False):
     """Casual chat no longer carries bash_read_only/backup_file -- a mode only
     gets tools it actually needs, matching the same principle behind
     bots never getting write tools at the registration level rather
     than being told not to use them.
 
-    called_tool_names/exploration_call_count/total_tool_call_count/
+    called_tool_names/exploration_call_count/
     search_codebase_call_count/plan_exists/calls_since_plan_touch/
     plan_complete let a caller recompute this per round within one turn
     (see chat_stream's generation loop) so tool availability can shift as
@@ -703,6 +950,8 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
         tools = tools + bash_tools.BASH_TOOL_SCHEMAS + backup_tools.BACKUP_TOOL_SCHEMAS + RAG_TOOL_SCHEMAS + file_tools.FILE_TOOL_SCHEMAS + lsp_tools.LSP_TOOL_SCHEMAS + tool_output.CONTEXT_TOOL_SCHEMAS + preview_tools.PREVIEW_TOOL_SCHEMAS + background_music.BACKGROUND_MUSIC_TOOL_SCHEMAS
     if skills.scan_skills():
         tools = tools + skills.SKILL_TOOL_SCHEMAS
+    if mode != "athena_delegation" and ownership.can_use_whole_host(getattr(req, "owner", "") or None):
+        tools = tools + mcp_tools.schemas()          # only servers the person switched on for models, only the tools they left enabled
     if mode == "athena_delegation":
         tools = tools + bots._bot_delegation_tool_schemas_for_mode(bool(settings.load_settings().get("delegation_async_enabled")))
     called = called_tool_names or set()
@@ -723,9 +972,7 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
             # plan_delegation step led to abandoning the plan entirely
             # in favor of reworded, one-at-a-time retries.
             tools = [t for t in tools if t.get("function", {}).get("name") != "run_delegation_step"]
-    if total_tool_call_count >= th["plan_required"] and "write_plan" not in called:
-        tools = [t for t in tools if t.get("function", {}).get("name") == "write_plan"]
-    elif plan_complete:
+    if plan_complete:
         # Every step is done/failed -- the only way forward is to
         # explicitly declare more work via a fresh write_plan, or just
         # answer now that there's nothing left to justify another call.
@@ -734,21 +981,32 @@ def _get_mode_tools(mode, req, called_tool_names=None, exploration_call_count=0,
         # Forced check-in: report progress against the existing plan
         # before making any other kind of call.
         tools = [t for t in tools if t.get("function", {}).get("name") in ("write_plan", "update_plan_step")]
+    if plan_approval_pending:
+        # Until the person approves a plan the tools that change things are not on offer at all, so a model cannot spend minutes writing a whole
+        # file into a call that would only be refused. Looking tools stay. (Execution is gated too, for a model that calls one by name anyway.)
+        tools = [t for t in tools if not _needs_approved_plan(t.get("function", {}).get("name", ""))]
     if req.allowed_tools is not None:
-        # write_plan/update_plan_step are mode-independent governance
-        # infrastructure (see PLAN_TOOL_SCHEMAS), not an opt-in capability --
-        # a restricted caller (currently only task_scheduler.py) was never
-        # meant to be able to omit them. Without this, a task whose
-        # enabled_tools doesn't happen to list "write_plan" hits the
-        # plan-required gate above with an empty tools list once it crosses
-        # _PLAN_REQUIRED_THRESHOLD (the gate narrows to write_plan-only,
-        # then this filter strips write_plan right back out) -- the model
-        # still has "call write_plan" in its system prompt but nothing
-        # structured to call, so it falls back to emitting a fake
-        # <tool_call> text block instead of a real one.
+        # write_plan/update_plan_step are governance, not an opt-in capability: the plan-complete and check-in gates above narrow
+        # the list to them, so a restricted caller (a task) that left them out would be left with no tool at all.
         _allowed = set(req.allowed_tools) | {"write_plan", "update_plan_step"}
         tools = [t for t in tools if t.get("function", {}).get("name") in _allowed]
     return tools
+
+
+def _vision_of(req):
+    """Whether the model this request goes to can look at images (what the engine says it supports); None when that is not known."""
+    try:
+        return bool(model_profile.resolve(getattr(req, "provider", "") or "", getattr(req, "endpoint_url", "") or "", getattr(req, "api_key", "") or "",
+                                          getattr(req, "model", "") or "")["vision"])
+    except Exception:
+        return None
+
+
+def _get_mode_tools(mode, req, *args, **kwargs):
+    """The tool list a model is shown. The gates above decide which tools exist this round (under their engine names);
+    surface.py turns that into the rebuilt, smaller list. Delegation sessions keep the engine names."""
+    legacy = _get_mode_tools_legacy(mode, req, *args, **kwargs)
+    return legacy if mode == "athena_delegation" else surface.to_surface(legacy, mode, req, vision=_vision_of(req))
 
 
 # Direct port of Odysseus's proven _pick_dynamic_ctx formula and step
@@ -790,6 +1048,7 @@ class ChatIn(BaseModel):
     message: str
     model: str = DEFAULT_MODEL
     max_ctx: int = 0  # 0 = dynamic sizing; any other value is an explicit override
+    interactive: bool = True  # False for scheduled and background runs: nobody is there to approve a deletion or answer a question
     workspace: str = ""  # empty = no workspace bound; file tools stay disabled
     endpoint_url: str = ""  # empty = use the default OLLAMA_URL
     search_url: str = ""  # SearXNG base URL; empty = web_search/web_fetch tools unavailable
@@ -799,6 +1058,7 @@ class ChatIn(BaseModel):
     allowed_skills: Optional[List[str]] = None  # same, for which skills load_skill can actually load
     provider: str = ""  # "" = Ollama-native (default); "openai"/"openrouter"/"custom"/"anthropic"/"google" route through an adapter in _stream_completion
     api_key: str = ""  # only used when provider is set
+    owner: str = ""  # the account this runs for; set by the server from the login, whatever a client sends
     think: str = "high"  # Athena's own (main-agent) default; ""=don't ask at all, "none"=explicitly off, or "low"/"medium"/"high"/"max" -- Ollama-native only for now, see _stream_completion. Callers that build a ChatIn without specifying this (task_scheduler.py, delegation_jobs.py) inherit this default for free.
 
 
@@ -891,7 +1151,8 @@ class ToolContext:
     def __init__(self, session_id="", workspace="", search_url="", bot=None, session_key=None,
                  req=None, plan_state=None, passthrough_session_id=None,
                  require_athena_bots_session=False,
-                 unknown_tool_message_template="'{name}' is not a tool available in this context."):
+                 unknown_tool_message_template="'{name}' is not a tool available in this context.",
+                 turn_state=None, approved=False, interactive=True, plan_approval=False):
         self.session_id = session_id
         self.workspace = workspace
         self.search_url = search_url
@@ -902,20 +1163,157 @@ class ToolContext:
         self.passthrough_session_id = passthrough_session_id  # None disables the generic LCM tools/call fallback entirely
         self.require_athena_bots_session = require_athena_bots_session
         self.unknown_tool_message_template = unknown_tool_message_template
+        self.turn_state = turn_state      # per-turn scratch (the turn's one snapshot lives here)
+        self.approved = approved          # True only when the person just said yes to exactly this call
+        self.interactive = interactive
+        self.plan_approval = plan_approval  # True when a plan has to be approved by the person before it takes effect
 
 
-def _render_plan_state(plan_state):
+def _first_unfinished_step(plan_state):
+    return next((i for i, step in enumerate(plan_state) if step["status"] not in ("done", "failed")), None)
+
+
+def _plan_page(ctx, new=False):
+    """Which plan of this turn a result belongs to (1, 2, ...). A fresh plan opens the next page; ticking steps stays on the current one."""
+    state = ctx.turn_state
+    if state is None:
+        return 1
+    if new or "plan_page" not in state:
+        state["plan_page"] = state.get("plan_page", 0) + 1
+    return state["plan_page"]
+
+
+def _render_plan_state(plan_state, first=0, lead="", page=None):
     if not plan_state:
         return {"plan": [], "note": "No plan recorded yet -- call write_plan first."}
     lines = []
     for i, step in enumerate(plan_state):
         marker = {"done": "[x]", "failed": "[!]", "in_progress": "[~]"}.get(step["status"], "[ ]")
         note = f" -- {step['note']}" if step.get("note") else ""
-        lines.append(f"{i}. {marker} {step['text']}{note}")
-    return {"plan": "\n".join(lines)}
+        lines.append(f"{i + first}. {marker} {step['text']}{note}")
+    current = _first_unfinished_step(plan_state)
+    if current is None:
+        now = "Every step is finished. Give your answer now."
+    else:
+        tick = f"call step_done with step {current + first}" if first == 1 else f"mark it done with update_plan_step (index {current}, status done)"
+        now = (f"{lead}Step {current + first} is next: {plan_state[current]['text']}. Do only this step, then {tick} "
+               "before you look at the one after it. Do not rewrite the plan to tick a step off.")
+    result = {"plan": "\n".join(lines), "now": now}
+    if page is not None:
+        result["plan_page"] = page
+    return result
+
+
+def _call_with_keepalive(fn):
+    """Runs fn() in a thread while yielding SSE comments, so a long tool (a build, a research run) never lets a proxy drop the stream.
+    A generator: use `result = yield from _call_with_keepalive(fn)`."""
+    box = {}
+
+    def work():
+        try:
+            box["result"] = fn()
+        except BaseException as e:           # surfaced to the caller below, never lost in the thread
+            box["error"] = e
+
+    context = contextvars.copy_context()           # the tool sees the same context variables (e.g. the task id) as the chat thread
+    thread = threading.Thread(target=lambda: context.run(work), daemon=True)
+    thread.start()
+    while thread.is_alive():
+        thread.join(8)
+        if thread.is_alive():
+            yield ": working\n\n"
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _wait_for_person(request, cancel_flag):
+    """Yields keep-alives until the person answers, the turn is stopped, or the time runs out. Returns the decision."""
+    waited = 0
+    while True:
+        decision = approvals.wait(request, 5)
+        if decision is not None:
+            return decision
+        if cancel_flag.is_set():
+            approvals.finish(request, "cancelled")
+            return "cancelled"
+        waited += 5
+        if waited >= approvals.WAIT_SECONDS:
+            approvals.finish(request, "timeout")
+            return "timeout"
+        yield ": waiting for the person\n\n"
+
+
+_FILE_PATH_TOOLS = {"read_file", "list_files", "write_file", "edit_file", "replace_lines", "preview"}
+def _tool_target(tc):
+    """What a tool call is about, for the person's tool list: a file path, or the start of a command."""
+    args = (tc.get("function") or {}).get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return ""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("path", "file_path", "filename", "command", "pattern", "url", "query"):
+        if isinstance(args.get(key), str) and args[key].strip():
+            return args[key].strip().splitlines()[0][:120]
+    return ""
+
+
+_WRITE_TOOLS = {"write_file", "edit_file", "replace_lines"}
+_CHANGING_TOOLS = _WRITE_TOOLS | {"generate_pdf", "generate_background_music", "scaffold", "generate_docx", "generate_xlsx", "generate_pptx"}
+
+
+def _model_file_path(name, args, ctx):
+    """The absolute path a file tool call names, or None when it names none (the tool then reports its own error)."""
+    if name not in _FILE_PATH_TOOLS or not ctx.workspace or not isinstance(args.get("path", "."), str):
+        return None
+    try:
+        return file_tools.resolve_workspace_path(ctx.workspace, args.get("path") or ".")
+    except ValueError:
+        return None
 
 
 def dispatch_tool(name, args, ctx, allowed_names=None):
+    """Runs one tool call. Around the engines (_dispatch_tool_inner) this adds what every caller needs: the new tools, a refusal to touch
+    Athena's private files, the turn's snapshot before anything changes, folders readable through read_file, and an immediate syntax
+    check when Athena's own Python files are edited."""
+    if allowed_names is not None and name not in allowed_names:
+        return {"error": ctx.unknown_tool_message_template.format(name=name)}
+    args = args if isinstance(args, dict) else {}
+    if name == "_surface_error":
+        return args
+    handled, result = agent_tools.handle(name, args, ctx)
+    if handled:
+        return result
+    resolved = _model_file_path(name, args, ctx)
+    if resolved is not None:
+        problem = safety.check_model_path(resolved, write=name in _WRITE_TOOLS)
+        if problem:
+            return {"error": problem}
+    if name in _CHANGING_TOOLS and ctx.workspace:
+        safety.ensure_turn_snapshot(ctx.turn_state, ctx.workspace, ctx.session_id)
+    if name == "read_file" and resolved is not None and os.path.isdir(resolved):
+        name = "list_files"
+    before_text = workspace_ops.read_text(resolved) if name in _WRITE_TOOLS and resolved is not None else None
+    existed = resolved is not None and os.path.exists(resolved)
+    result = _dispatch_tool_inner(name, args, ctx)
+    if name in _WRITE_TOOLS and resolved is not None and isinstance(result, dict) and not result.get("error"):
+        after_text = workspace_ops.read_text(resolved)
+        if after_text is not None:
+            added, removed = workspace_ops.line_counts(before_text if existed else "", after_text)
+            result["change"] = {"path": os.path.relpath(resolved, os.path.realpath(ctx.workspace)), "created": not existed, "added": added, "removed": removed}
+    if name == "list_files" and isinstance(result, dict) and isinstance(result.get("entries"), list) and resolved is not None:
+        result["entries"] = [e for e in result["entries"] if safety.classify(os.path.join(resolved, e["name"])) != "secret"]
+    if name in _WRITE_TOOLS and resolved is not None and isinstance(result, dict) and not result.get("error") and safety.touches_athena(ctx.workspace):
+        problem = safety.check_edited_file(resolved)
+        if problem:
+            result = {**result, "python_error": problem, "warning": "This Python file no longer compiles. Fix it before Athena is restarted, or she will not start."}
+    return result
+
+
+def _dispatch_tool_inner(name, args, ctx, allowed_names=None):
     """Single shared tool dispatcher -- replaces what used to be three
     independently hand-written copies (chat_stream's own closure,
     bots._execute_bot_tool_call, rooms._dispatch_athena_room_tool_call),
@@ -934,7 +1332,10 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
             return {"error": "No search engine is configured (search_url is empty in Athena's settings) -- web_search is unavailable until one is set."}
         return web_tools.web_search(ctx.search_url, args.get("query", ""))
     if name == "web_fetch":
-        return web_tools.web_fetch(args.get("url", ""), args.get("offset", 0))
+        return _web_fetch_tool(args, ctx)
+    if name == "inspect_page":
+        return preview_tools.inspect_public_page(args.get("url", ""), args.get("selector"), args.get("actions"), args.get("depth"), args.get("limit"),
+                                                 bool(args.get("html")), args.get("styles"))
     if name == "load_skill":
         return skills.load_skill(args.get("name", ""))
     if name == "bash_read_only":
@@ -971,7 +1372,16 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
     if name == "list_files":
         return file_tools.list_files(ctx.workspace, args.get("path", "."))
     if name == "read_file":
-        return file_tools.read_file(ctx.workspace, args.get("path", ""), args.get("offset", 0))
+        result = file_tools.read_file(ctx.workspace, args.get("path", ""), args.get("offset", 0), file_tools.MODEL_READ_WINDOW,
+                                      start_line=args.get("start_line"), end_line=args.get("end_line"), line_aligned=True)
+        path = args.get("path", "")
+        if isinstance(result, dict) and "error" not in result and file_view.is_viewable(path):
+            raster = os.path.splitext(path)[1].lower() in file_view.RASTER
+            if _can_see_images(ctx):
+                result.update(_view_for_model(ctx.workspace, path, args.get("page"), ctx))
+            elif raster or args.get("page"):
+                result["viewed"] = "not shown: this model cannot view images"
+        return result
     if name == "write_file":
         return file_tools.write_file(ctx.workspace, args.get("path", ""), args.get("content", ""), bool(args.get("append")))
     if name == "edit_file":
@@ -979,10 +1389,18 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
     if name == "replace_lines":
         return file_tools.replace_lines(ctx.workspace, args.get("path", ""), args.get("start_line"), args.get("end_line"), args.get("new_content", ""), args.get("expected_content", ""))
     if name == "generate_pdf":
-        return pdf_tools.generate_pdf(args, ctx.workspace)
+        result = pdf_tools.generate_pdf(args, ctx.workspace)
+        if isinstance(result, dict) and "error" not in result and _can_see_images(ctx):
+            _attach_pdf_pages(result)
+        return result
     if name == "generate_background_music":
         return background_music.generate_background_music(args, ctx.workspace)
+    if name in ("generate_docx", "generate_xlsx", "generate_pptx"):
+        return office_tools.generate(name[len("generate_"):], args, ctx.workspace)
     if name == "preview":
+        if file_view.is_viewable(args.get("path", "")) and not str(args.get("path", "")).lower().endswith(".html"):
+            seen = _view_for_model(ctx.workspace, args["path"], args.get("page"), ctx)    # an image or PDF: just look at it
+            return {"path": args["path"], **seen}
         return preview_tools.preview(ctx.workspace, args)
     if name == "scaffold":
         return scaffold_tools.scaffold(ctx.workspace, args)
@@ -992,7 +1410,7 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
         return backup_tools.restore_file(args.get("path", ""), args.get("snapshot_id", ""), args.get("restore_hash", ""), args.get("restore_timestamp"))
 
     if name in _BOT_DELEGATION_CLUSTER_NAMES:
-        if ctx.require_athena_bots_session and ctx.session_id != bots.ATHENA_BOTS_SESSION_ID:
+        if ctx.require_athena_bots_session and not ownership.is_bots_session(ctx.session_id):
             return {"error": "Bot delegation tools are only available in the dedicated Athena Bots session."}
         if name == "list_bots":
             return bots._list_bots_for_model()
@@ -1027,6 +1445,11 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
                 return delegation_jobs._plan_delegation_async_tool(ctx.req, args.get("steps", []), task_text)
             return bots._plan_delegation_tool(args.get("steps", []), task_text)
 
+    if mcp_tools.is_mcp_tool(name):
+        if not ownership.can_use_whole_host(getattr(ctx.req, "owner", "") or None):
+            return {"error": "This account does not have full access to this computer, so it cannot use these tools."}
+        return mcp_tools.call(name, args)
+
     if name == "search_codebase":
         return _search_codebase(args.get("query", ""), args.get("limit", 3), workspace=ctx.workspace)
 
@@ -1034,11 +1457,44 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
         if ctx.plan_state is None:
             return {"error": "Planning is not available in this context."}
         steps = args.get("steps", [])
+        if isinstance(steps, list):
+            # A model that treats plan like a status list sends {"step": 1, "status": ..., "note": "what the step is"}: the wording is in there.
+            steps = [next((str(v) for k in ("text", "title", "description", "step_text", "note", "name") if isinstance(v := s.get(k), str) and v.strip()), s) if isinstance(s, dict) else s
+                     for s in steps]
         if not steps or not isinstance(steps, list) or not all(isinstance(s, str) and s.strip() for s in steps):
-            return {"error": "steps must be a non-empty list of non-empty strings."}
+            return {"error": "steps must be a list of plain sentences, one per step, for example [\"Create index.html\", \"Create style.css\"]. To tick a step off use step_done."}
+        old_texts = [s["text"].casefold() for s in ctx.plan_state]
+        new_texts = [s.strip().casefold() for s in steps]
+        dropped = len(old_texts) - len(new_texts)
+        if ctx.plan_state and not _plan_is_complete(ctx.plan_state) and dropped >= 1 and new_texts == old_texts[dropped:]:
+            # The same plan with its first steps left off: the model is ticking them off by rewriting the plan. That is read as "these are
+            # finished" (it changes nothing the person approved, so it needs no new approval) and the plan keeps its history.
+            for step in ctx.plan_state[:dropped]:
+                if step["status"] not in ("done", "failed"):
+                    step["status"], step["note"] = "done", step.get("note") or "ticked off by rewriting the plan"
+            shown = _render_plan_state(ctx.plan_state, args.get("_numbering", 0), page=_plan_page(ctx))
+            shown["note"] = (f"The {dropped} step{'s' if dropped != 1 else ''} you left out {'are' if dropped != 1 else 'is'} ticked off as finished. "
+                             "Next time call step_done with the step number instead of rewriting the plan.")
+            return shown
+        changing = bool(ctx.plan_state) and not _plan_is_complete(ctx.plan_state)
+        if ctx.plan_approval and changing and not args.get("replace"):
+            return {"error": ("You already have an approved plan, so it cannot be silently rewritten. To tick a step off, call step_done with its number. "
+                              "If the steps themselves really must change, call plan again with the new steps, replace true, and a reason; the person "
+                              "will be asked to approve the change.")}
+        if ctx.plan_approval and not ctx.approved:
+            first_number = args.get("_numbering", 0)
+            reason = str(args.get("reason") or "").strip()
+            return {"_approval": {"kind": "plan", "title": "Athena wants to change the plan" if changing else "Athena has a plan and wants your approval before starting",
+                                  "summary": (f"Why: {reason}. " if changing and reason else "") + "Nothing is changed until you approve. She then does the steps one at a time, in order, and ticks each off.",
+                                  "items": [f"{i + first_number}. {s.strip()}" for i, s in enumerate(steps)], "reason": "", "danger": False,
+                                  "undo_note": "", "options": []}}
         ctx.plan_state.clear()
-        ctx.plan_state.extend({"text": s, "status": "pending", "note": ""} for s in steps)
-        return _render_plan_state(ctx.plan_state)
+        ctx.plan_state.extend({"text": s.strip(), "status": "pending", "note": ""} for s in steps)
+        if ctx.plan_approval:
+            if ctx.turn_state is not None:
+                ctx.turn_state["plan_approved"] = True
+            ctx.plan_state[0]["status"] = "in_progress"           # she starts on step one; the model only has to say when it is done
+        return _render_plan_state(ctx.plan_state, args.get("_numbering", 0), lead="The person approved this plan. " if ctx.plan_approval else "", page=_plan_page(ctx, new=True))
     if name == "update_plan_step":
         if ctx.plan_state is None:
             return {"error": "Planning is not available in this context."}
@@ -1046,13 +1502,23 @@ def dispatch_tool(name, args, ctx, allowed_names=None):
             return {"error": "No plan recorded yet -- call write_plan first."}
         index = args.get("index")
         status = args.get("status", "")
+        first = args.get("_numbering", 0)
         if not isinstance(index, int) or not (0 <= index < len(ctx.plan_state)):
-            return {"error": f"index must be between 0 and {len(ctx.plan_state) - 1}, got {index!r}."}
+            shown = index + first if isinstance(index, int) else index
+            return {"error": f"step must be between {first} and {len(ctx.plan_state) - 1 + first}, got {shown!r}."}
         if status not in ("pending", "in_progress", "done", "failed"):
             return {"error": f"status must be one of pending/in_progress/done/failed, got {status!r}."}
+        current = _first_unfinished_step(ctx.plan_state)
+        if current is not None and index > current and status != "pending":
+            return {"error": f"Do the steps in order, one at a time: step {current + first} ({ctx.plan_state[current]['text']}) is not finished yet. "
+                             f"Finish it and mark it done (or failed) first; then step {index + first} is next."}
         ctx.plan_state[index]["status"] = status
         ctx.plan_state[index]["note"] = args.get("note", "")
-        return _render_plan_state(ctx.plan_state)
+        if ctx.plan_approval and status in ("done", "failed"):
+            following = _first_unfinished_step(ctx.plan_state)
+            if following is not None and ctx.plan_state[following]["status"] == "pending":
+                ctx.plan_state[following]["status"] = "in_progress"
+        return _render_plan_state(ctx.plan_state, first, page=_plan_page(ctx))
 
     if ctx.passthrough_session_id is not None:
         args = dict(args)
@@ -1075,6 +1541,8 @@ def index_codebase(req: RAGIndexIn):
     """Manually triggers RAG indexing for a workspace directory.
     Call this after codebase changes to keep the index up to date."""
     workspace = req.workspace or "."
+    if not ownership.workspace_allowed(workspace):
+        return {"error": "This account can only use workspaces inside its own folder."}
     try:
         rag.index_codebase(workspace)
         return {"ok": True}
@@ -1087,15 +1555,17 @@ def get_model_stats():
     """Aggregate up/down counts per model, for showing real quality
     signal on the Models page -- computed fresh from current rows every
     call, so it's always correct even after votes change or get removed."""
+    where, owner_params = ownership.owner_filter()
     conn = annotations.ratings_conn()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT model,
                    SUM(CASE WHEN rating = 'up' THEN 1 ELSE 0 END) as up_count,
                    SUM(CASE WHEN rating = 'down' THEN 1 ELSE 0 END) as down_count
             FROM ratings
+            WHERE {where}
             GROUP BY model
-        """).fetchall()
+        """, owner_params).fetchall()
         return {r[0]: {"up": r[1], "down": r[2]} for r in rows}
     finally:
         conn.close()
@@ -1106,7 +1576,17 @@ def get_model_stats():
 @app.get("/", response_class=HTMLResponse)
 def index():
     with open("static/index.html") as f:
-        return f.read()
+        html = f.read()
+    user = ownership.acting_user()
+    if not ownership.is_main(user):
+        # Browser storage is shared by everyone who signs in on this browser; another account gets its own keys so the chat, model and
+        # preferences of one never show up for another.
+        prefix = json.dumps(f"acct:{user}:")
+        shim = ("<script>(function(){var p=" + prefix + ",S=Storage.prototype,g=S.getItem,s=S.setItem,r=S.removeItem;"
+                "S.getItem=function(k){return g.call(this,p+k)};S.setItem=function(k,v){return s.call(this,p+k,v)};"
+                "S.removeItem=function(k){return r.call(this,p+k)};})();</script>")
+        html = html.replace("<head>", "<head>" + shim, 1)
+    return html
 
 
 class DetectModelsIn(BaseModel):
@@ -1124,6 +1604,10 @@ def detect_models(req: DetectModelsIn):
     below). Returns plain model-id strings in every case, so the
     frontend's enabledModels/detectedModels handling stays identical
     regardless of which kind of endpoint this was called for."""
+    if req.type == "local" and not ownership.is_main():
+        return {"error": "Only the main account can add local models. You can add an online provider instead."}
+    if req.type != "local" and ownership.endpoint_kind(req.provider, req.url) != "online" and not ownership.is_main():
+        return {"error": "That address is not an online provider this account may use."}
     try:
         if req.type == "local":
             base = req.url.rstrip("/")
@@ -1190,6 +1674,8 @@ def get_model_profile(req: ModelProfileIn):
     """What the harness knows about a model and which tier it runs under -- for the
     Models page. Probes the endpoint (cached), so the first call can take ~2s. POST
     so an API key never lands in a URL (and from there in access logs)."""
+    if ownership.endpoint_kind(req.provider, req.url) is None:
+        return {"error": "This account cannot use that model endpoint."}
     p = model_profile.resolve(req.provider, req.url, req.api_key, req.model)
     return {
         "tier": p["tier"], "tier_source": p["tier_source"], "vision": p["vision"],
@@ -1205,7 +1691,11 @@ def browse_workspace(path: str = ""):
     can't be files) and the save-as-file picker (files are shown too,
     read-only, so the user can see what's already there and avoid an
     accidental overwrite). Defaults to the user's home directory."""
-    target = os.path.realpath(path) if path else os.path.expanduser("~")
+    restricted = not ownership.can_use_whole_host()
+    root = os.path.realpath(ownership.workspace_root()) if restricted else None
+    target = os.path.realpath(path) if path else (root or os.path.expanduser("~"))
+    if restricted and not ownership.workspace_allowed(target):
+        return {"error": "This account can only browse its own workspaces folder."}
     if not os.path.isdir(target):
         return {"error": f"Not a directory: {target}"}
     try:
@@ -1221,6 +1711,8 @@ def browse_workspace(path: str = ""):
     except PermissionError:
         return {"error": f"Permission denied: {target}"}
     parent = os.path.dirname(target) if target != "/" else None
+    if restricted and target == root:
+        parent = None
     return {"path": target, "parent": parent, "directories": dirs, "files": files}
 
 
@@ -1241,6 +1733,8 @@ def save_note_to_file(req: SaveNoteFileIn):
     if not req.filename or "/" in req.filename or req.filename in (".", ".."):
         return {"error": "Invalid filename."}
     base = os.path.realpath(req.path)
+    if not ownership.workspace_allowed(base):
+        return {"error": "This account can only save inside its own workspaces folder."}
     if not os.path.isdir(base):
         return {"error": f"Not a directory: {base}"}
     target = os.path.join(base, req.filename)
@@ -1258,6 +1752,8 @@ def mkdir_workspace(req: MkdirIn):
     if not req.name or "/" in req.name or req.name in (".", ".."):
         return {"error": "Invalid folder name."}
     base = os.path.realpath(req.path)
+    if not ownership.workspace_allowed(base):
+        return {"error": "This account can only create folders inside its own workspaces folder."}
     if not os.path.isdir(base):
         return {"error": f"Not a directory: {base}"}
     new_dir = os.path.join(base, req.name)
@@ -1964,9 +2460,44 @@ def _extract_pdf_text(b64_data: str) -> str:
         return f"[Could not read PDF: {e}]"
 
 
+def _speak_tools(mode, text):
+    """A note to the model written with the engine's tool names, put in the names its own tool list uses."""
+    return text if mode == "athena_delegation" else surface.rename_text(text)
+
+
+def _plan_approval_needed(req, profile):
+    """Whether the person must approve a plan before this turn's work starts: always for small models (they do best with small, checked
+    steps), and for every model when the account turned that on. Nobody is there to approve a scheduled or background run."""
+    if not req.interactive:
+        return False
+    if profile.get("tier") == "small":
+        return True
+    return bool(settings.load_effective().get("plan_approval_all"))
+
+
+def _account_refusal(req):
+    """Why this account may not make this request (a message to show), or None. The same checks cover a scheduled task or a
+    delegated result, which run as the account that set them up."""
+    if not ownership.session_allowed(req.session_id, req.owner, claim=True):
+        return "That chat belongs to another account."
+    if ownership.endpoint_kind(req.provider, req.endpoint_url, req.owner) is None:
+        return "This account cannot use that model endpoint. Pick a model from the list, or add an online model of your own."
+    if not ownership.workspace_allowed(req.workspace, req.owner):
+        return "This account can only use workspaces inside its own folder."
+    return None
+
+
 @app.post("/api/chat")
 def chat_stream(req: ChatIn):
     activity.touch()
+    req.owner = ownership.acting_user()
+    req.session_id = ownership.resolve_session(req.session_id)
+    refusal = _account_refusal(req)
+    if refusal:
+        def _refused():
+            yield f"data: {json.dumps({'delta': refusal})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        return StreamingResponse(_refused(), media_type="text/event-stream")
     logger.debug(f"model={req.model!r} endpoint_url={req.endpoint_url!r}")
     effective_message = req.message
     for att in req.attachments:
@@ -2001,7 +2532,8 @@ def chat_stream(req: ChatIn):
     profile = model_profile.resolve(req.provider, req.endpoint_url, req.api_key, req.model)
     _thresholds = _gate_thresholds_for(mode, profile)
     _build_task = mode == "workspace" and workspace_kind.is_build_task(effective_workspace)
-    system_prompt = _get_mode_system_prompt(mode, req, build_task=_build_task)
+    _plan_approval_required = _plan_approval_needed(req, profile)
+    system_prompt = _get_mode_system_prompt(mode, req, build_task=_build_task, plan_approval=_plan_approval_required)
     # The maximum tool set this turn could ever reach (as if
     # search_codebase were already called) -- used for ctx_size estimation
     # below, and as round 0's starting tools payload. generate()'s round
@@ -2041,13 +2573,16 @@ def chat_stream(req: ChatIn):
     else:
         ctx_size = pick_dynamic_ctx(messages, tools, max_ctx=min(MAX_CTX_DEFAULT, model_max_ctx or MAX_CTX_DEFAULT))
     prompt_tokens = estimate_tokens(messages, tools)
+    if _plan_approval_required:       # sized for the full list above; the first round only offers planning
+        tools = _get_mode_tools(mode, req, called_tool_names={"search_codebase"}, thresholds=_thresholds, build_task=_build_task, plan_approval_pending=True)
 
     # Per-turn plan state, mutated in place (never rebound) via
     # ToolContext.plan_state -- see dispatch_tool. Each entry:
     # {"text": str, "status": str, "note": str}.
     _current_plan = []
+    _turn_state = {}   # the turn's one snapshot is recorded here, the first time a tool changes anything
 
-    def _execute_tool_call(tool_call, pre_round_called, pre_round_exploration_count, pre_round_total_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False):
+    def _execute_tool_call(tool_call, pre_round_called, pre_round_exploration_count, pre_round_search_codebase_count=0, pre_round_plan_exists=False, pre_round_calls_since_plan_touch=0, pre_round_plan_complete=False, approved=False):
         """Thin per-turn wrapper around the shared dispatch_tool: build a
         ToolContext from this request/turn's own state, then dispatch.
         allowed_names=None (the default) since _get_mode_tools already
@@ -2069,9 +2604,10 @@ def chat_stream(req: ChatIn):
             except json.JSONDecodeError:
                 args = {}
         gate_error = _check_tool_gate(
-            mode, name, pre_round_called, pre_round_exploration_count, pre_round_total_count,
+            mode, name, pre_round_called, pre_round_exploration_count,
             pre_round_search_codebase_count, pre_round_plan_exists, pre_round_calls_since_plan_touch, pre_round_plan_complete,
             thresholds=_thresholds, build_task=_build_task,
+            plan_approval_pending=_plan_approval_required and not _turn_state.get("plan_approved"), call_args=args,
         )
         if gate_error is not None:
             return gate_error
@@ -2083,13 +2619,45 @@ def chat_stream(req: ChatIn):
             plan_state=_current_plan,
             passthrough_session_id=req.session_id,
             require_athena_bots_session=True,
+            turn_state=_turn_state, approved=approved, interactive=req.interactive, plan_approval=_plan_approval_required,
         )
-        return dispatch_tool(name, args, ctx)
+        result = dispatch_tool(name, args, ctx)
+        if mode != "athena_delegation" and isinstance(result, dict):
+            result = {**result, **{k: surface.rename_text(result[k]) for k in ("error", "note") if isinstance(result.get(k), str)}}
+        return result
 
     def generate():
         nonlocal tools  # reassigned each round below as gate state changes; must bind to chat_stream's own `tools`, not shadow it locally
         cancel_flag = threading.Event()
         generation_streaming.cancel_flags[req.session_id] = cancel_flag
+
+        def _execute_with_person(tc, *gate_state):
+            """Runs one tool call. A tool that needs the person (every removal, and ask_user) returns a request instead of acting: it is
+            shown, the turn waits (with keep-alives), and an approved call is then run for real. Used as `yield from`."""
+            result = yield from _call_with_keepalive(lambda: _execute_tool_call(tc, *gate_state))
+            request = result.get("_approval") if isinstance(result, dict) else None
+            if not request:
+                return result
+            pending = approvals.register(req.session_id, request["kind"], request["title"], summary=request.get("summary", ""), items=request.get("items"),
+                                         reason=request.get("reason", ""), options=request.get("options"), danger=request.get("danger", False),
+                                         undo_note=request.get("undo_note", ""))
+            yield f"data: {json.dumps({'type': 'approval_request', **pending.public()})}\n\n"
+            decision = yield from _wait_for_person(pending, cancel_flag)
+            yield f"data: {json.dumps({'type': 'approval_result', 'id': pending.id, 'decision': decision})}\n\n"
+            approvals.forget(pending.id)
+            if request["kind"] == "question":
+                if decision == "answered" and pending.answer.strip():
+                    return {"answer": pending.answer.strip()}
+                return {"no_answer": "The person did not answer. Carry on with a sensible assumption and say what you assumed."}
+            if request["kind"] == "plan" and decision != "approved":
+                reason = pending.answer.strip()
+                return {"error": ("DENIED: the person did not approve this plan." + (f" Their reason: {reason}" if reason else
+                                  " They gave no reason, so ask them what they want changed (ask_user) before you write another plan.")
+                                  + " Nothing was started. Write a revised plan that takes their reason into account, or ask what they would like instead.")}
+            if decision == "approved":
+                return (yield from _call_with_keepalive(lambda: _execute_tool_call(tc, *gate_state, approved=True)))
+            return {"error": f"DENIED: the person did not allow this ({request['title']}). Nothing was changed. Do not try another way to do the same thing: "
+                             "carry on without it, or ask what they would like instead."}
         # Doom-loop detection: fingerprint each tool call (name + exact
         # arguments) and track the last 20 in this turn. If the same
         # fingerprint would be executed a 3rd time, refuse to run it
@@ -2111,35 +2679,6 @@ def chat_stream(req: ChatIn):
                 args_str = str(args)
             raw = fn.get("name", "") + "|" + args_str
             return hashlib.md5(raw.encode()).hexdigest()
-        def _detect_text_loop(text):
-            """Model-agnostic loop detector for plain-text generation.
-            Catches a model stuck repeating itself -- restated reasoning,
-            a hallucinated fake tool call written as plain text instead
-            of a real structured one, anything -- by watching for actual
-            repeated content, not by pattern-matching any one model's
-            own tool-call syntax. Syntax-matching would only ever work
-            for the specific model it was written against, which is the
-            opposite of what this harness needs: it has to hold up for
-            whatever model someone points it at, including small,
-            resource-constrained models on edge-case hardware that show
-            this failure mode worst.
-
-            Layered rather than one fixed check: a longer window (40
-            chars, 3 repeats) catches a whole sentence or reasoning
-            fragment being restated; a shorter window (18 chars, 5
-            repeats) catches a shorter recurring phrase that doesn't
-            happen to line up as an exact 40-char match -- interspersed
-            with slightly different surrounding text each time, which
-            the single long-window check alone would miss entirely."""
-            def _tail_repeats(window, min_repeats):
-                if len(text) < window * min_repeats:
-                    return False
-                tail = text[-window:]
-                if len(tail.strip()) < window * 0.5:
-                    return False  # mostly whitespace -- not a meaningful signal
-                return text.count(tail) >= min_repeats
-            return _tail_repeats(40, 3) or _tail_repeats(18, 5)
-
         def _log_turn_end(outcome, **extra):
             log_trace_event(
                 req.session_id, "turn_end", mode=mode, round=_round,
@@ -2165,6 +2704,9 @@ def chat_stream(req: ChatIn):
         consecutive_ungrounded_claims = 0
         consecutive_lost_tool_calls = 0
         consecutive_empty_final_answers = 0
+        _tried_work_without_plan = False
+        plan_request_nudges = 0
+        plan_close_nudges = 0
         made_any_tool_calls_this_turn = False
         # Tool availability is recomputed every round from the counters
         # below (see the `tools = _get_mode_tools(...)` reassignment further
@@ -2182,9 +2724,19 @@ def chat_stream(req: ChatIn):
         _total_tool_call_count = 0
         _calls_without_progress = 0
         _preview_image_msg = None
-        _plan_gate_notified = False
         _delegation_commitment_notified = False
         _calls_since_plan_touch = 0
+        def _touch_pressure():
+            """What the plan check-in gate sees. With a plan the person approved it sees nothing: a step may take as many reads, searches and
+            edits as it needs, and a model that has not ticked a step is reminded in each result instead of being locked out."""
+            return 0 if _plan_approval_required else _calls_since_plan_touch
+
+        def _plan_finished():
+            """Whether the 'every step is done, only planning is left' gate applies. Once a plan is finished, anything more the model wants to
+            do has to be written down as a new plan first (and approved), so the rest of the work is in writing before it is done."""
+            return _plan_is_complete(_current_plan)
+
+
 
         for _round in range(MAX_ROUNDS):
             round_reply = ""
@@ -2227,9 +2779,12 @@ def chat_stream(req: ChatIn):
                             yield f"data: {json.dumps({'thinking': thinking_delta})}\n\n"
                         delta = msg.get("content", "")
                         if delta:
+                            # Text from an earlier round (before a tool call or a stretch of thinking) is already in the reply: start this
+                            # round's text on a new paragraph, or "...sentence.Next sentence" runs together with no space.
+                            joiner = "\n\n" if (not round_reply and full_reply and not full_reply[-1].isspace() and not delta[0].isspace()) else ""
                             round_reply += delta
-                            full_reply += delta
-                            yield f"data: {json.dumps({'delta': delta})}\n\n"
+                            full_reply += joiner + delta
+                            yield f"data: {json.dumps({'delta': joiner + delta})}\n\n"
                             if _detect_text_loop(round_reply):
                                 loop_detected = True
                                 break
@@ -2388,6 +2943,35 @@ def chat_stream(req: ChatIn):
                     continue
                 consecutive_empty_final_answers = 0
 
+                # The model reached for a work tool before any plan was approved, was refused, and is now ending the turn with a plain
+                # reply: the request clearly needs work, so it is asked for the plan instead of being left with nothing done.
+                if (_plan_approval_required and _tried_work_without_plan and not _turn_state.get("plan_approved") and plan_request_nudges < 2):
+                    plan_request_nudges += 1
+                    if round_reply.strip():
+                        _messages.append({"role": "assistant", "content": round_reply})
+                    _messages.append({"role": "user", "content": _speak_tools(mode, (
+                        "You tried to start work, so this request needs a plan, and none is approved yet -- nothing has been done. Call write_plan now with the "
+                        "short ordered list of steps; the person will approve it or tell you what to change."
+                    ))})
+                    continue
+
+                # The turn is about to end with steps of its plan still showing as unfinished. A model that did the work usually just
+                # forgot to tick it off, and the person is left looking at a plan that seems stuck. Ask for the ticks (at most twice);
+                # a step it did not do can be marked failed, so this never forces a false "done".
+                if _current_plan and not _plan_is_complete(_current_plan) and plan_close_nudges < 2:
+                    plan_close_nudges += 1
+                    _base = 0 if mode == "athena_delegation" else 1             # the delegation session numbers its steps from 0
+                    _first = _first_unfinished_step(_current_plan)
+                    _open = [f"{i + _base}. {s['text']}" for i, s in enumerate(_current_plan) if s["status"] not in ("done", "failed")]
+                    if round_reply.strip():
+                        _messages.append({"role": "assistant", "content": round_reply})
+                    _messages.append({"role": "user", "content": (
+                        "Your plan still shows these steps as unfinished: " + "; ".join(_open) + ". Before you finish, tick them off: for each step you "
+                        + ("actually completed call step_done with its step number" if _base == 1 else "actually completed call update_plan_step with its index and status done")
+                        + f" (in order, starting with step {_first + _base}); for one you did not do, mark it failed. Then end with a short closing line, not your whole answer again."
+                    )})
+                    continue
+
                 _msg_id = lcm_client.send_to_lcm(req.session_id, "assistant", full_reply, model=req.model, thinking=full_thinking, tool_calls=full_tool_calls)
                 tokens_per_sec = round(last_eval_count / (last_eval_duration / 1e9), 1) if last_eval_count and last_eval_duration else None
                 _log_turn_end("completed")
@@ -2396,13 +2980,15 @@ def chat_stream(req: ChatIn):
 
             made_any_tool_calls_this_turn = True
             consecutive_ungrounded_claims = 0
+            # What the model wrote stays in its history exactly as written; what the engine runs is the translated call.
+            model_tool_calls = round_tool_calls
+            round_tool_calls = [surface.engine_call(tc, mode) for tc in model_tool_calls]
 
             _gate_was_open = _exploration_call_count < _thresholds["self_investigation"]
             _search_gate_was_open = _search_codebase_call_count < _thresholds["workspace_search"]
-            _plan_gate_was_open = _calls_without_progress < _thresholds["plan_required"]
             _delegation_commitment_was_open = "plan_delegation" not in _called_tool_names
-            _plan_was_complete = _plan_is_complete(_current_plan)
-            _checkin_gate_was_open = (not _plan_was_complete) and _calls_since_plan_touch < _thresholds["plan_checkin"]
+            _plan_was_complete = _plan_finished()
+            _checkin_gate_was_open = (not _plan_was_complete) and _touch_pressure() < _thresholds["plan_checkin"]
             # Snapshot of gate state as of the START of this round, before
             # this round's own calls get folded into the running totals
             # below -- passed into _execute_tool_call so a tool unlocked by
@@ -2411,9 +2997,8 @@ def chat_stream(req: ChatIn):
             _pre_round_called = set(_called_tool_names)
             _pre_round_exploration_count = _exploration_call_count
             _pre_round_search_codebase_count = _search_codebase_call_count
-            _pre_round_total_count = _calls_without_progress
             _pre_round_plan_exists = bool(_current_plan)
-            _pre_round_calls_since_plan_touch = _calls_since_plan_touch
+            _pre_round_calls_since_plan_touch = _touch_pressure()
             _pre_round_plan_complete = _plan_was_complete
             for tc in round_tool_calls:
                 _tc_name = tc.get("function", {}).get("name", "")
@@ -2432,12 +3017,13 @@ def chat_stream(req: ChatIn):
             # Model wants to call tool(s) -- execute each, tell the
             # frontend what's happening, then loop back with results
             # appended so the model can use them for its next turn.
-            _messages.append({"role": "assistant", "content": round_reply, "tool_calls": round_tool_calls})
+            _messages.append({"role": "assistant", "content": round_reply, "tool_calls": model_tool_calls})
             _round_shots = []
             for tc in round_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "unknown")
-                log_trace_event(req.session_id, "tool_call", round=_round, tool=tool_name, args=tc.get("function", {}).get("arguments"))
-                yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
+                shown_name = tc.get("_shown") or tool_name       # the name the model used, which is what the person sees
+                log_trace_event(req.session_id, "tool_call", round=_round, tool=shown_name, args=tc.get("function", {}).get("arguments"))
+                yield f"data: {json.dumps({'type': 'tool_start', 'tool': shown_name, 'target': _tool_target(tc)})}\n\n"
                 fingerprint = _tool_call_fingerprint(tc)
                 repeat_count = _tool_call_fingerprints.count((tool_name, fingerprint))
                 similar_query = None
@@ -2468,13 +3054,15 @@ def chat_stream(req: ChatIn):
                         f"already returned, or search for something genuinely different if you actually need it."
                     }
                 else:
-                    result = _execute_tool_call(
-                        tc, _pre_round_called, _pre_round_exploration_count, _pre_round_total_count, _pre_round_search_codebase_count,
+                    result = yield from _execute_with_person(
+                        tc, _pre_round_called, _pre_round_exploration_count, _pre_round_search_codebase_count,
                         _pre_round_plan_exists, _pre_round_calls_since_plan_touch, _pre_round_plan_complete,
                     )
                     _tool_call_fingerprints.append((tool_name, fingerprint))
                     if len(_tool_call_fingerprints) > 20:
                         _tool_call_fingerprints.pop(0)
+                    if isinstance(result, dict) and isinstance(result.get("error"), str) and result["error"].startswith("BLOCKED:"):
+                        _tool_call_fingerprints.pop()          # a gate refused it, so it never ran: it must not count toward "made N times"
                     if tool_name in _SIMILARITY_CHECKED_TOOL_NAMES:
                         fn_args = tc.get("function", {}).get("arguments", {})
                         if isinstance(fn_args, str):
@@ -2495,24 +3083,40 @@ def chat_stream(req: ChatIn):
                 if tool_name in _STATE_CHANGING_TOOL_NAMES and _result_is_progress(tool_name, result):
                     _tool_call_fingerprints[:] = _forget_stale_repeats(_tool_call_fingerprints)
                 _result_error = result.get("error") if isinstance(result, dict) else None
+                if isinstance(_result_error, str) and _result_error.startswith(_PLAN_BLOCK_PREFIX):
+                    _tried_work_without_plan = True
                 log_trace_event(
                     req.session_id, "tool_blocked" if isinstance(_result_error, str) and _result_error.startswith("BLOCKED:") else "tool_result",
-                    round=_round, tool=tool_name, success=_result_error is None, output=result,
+                    round=_round, tool=shown_name, success=_result_error is None, output=result,
                 )
-                yield f"data: {json.dumps({'type': 'tool_output', 'tool': tool_name, 'output': result})}\n\n"
+                _snap = _turn_state.get("snapshot")
+                if isinstance(_snap, dict) and _snap.get("snapshot_id") and not _turn_state.get("announced"):
+                    _turn_state["announced"] = True        # tell the page once, so it can offer "undo this turn"
+                    yield f"data: {json.dumps({'type': 'snapshot', 'snapshot_id': _snap['snapshot_id'], 'files': _snap['files'], 'workspace': _snap['workspace']})}\n\n"
+                yield f"data: {json.dumps({'type': 'tool_output', 'tool': shown_name, 'output': result})}\n\n"
                 # Saved in the same shape the frontend's own live tool-call
                 # display already uses (tool/status/output) -- NOT the raw
                 # LLM tool_calls format, which has no result field at all
                 # and uses function.name instead of a plain tool name, so
                 # a reloaded history entry actually matches what streaming
                 # already shows instead of rendering empty.
-                full_tool_calls.append({"tool": tool_name, "status": "done", "output": result})
+                full_tool_calls.append({"tool": shown_name, "status": "done", "output": result})
                 # The person always sees the real, full result above (nothing hidden) --
                 # only what actually goes back into the model's own context gets compressed,
                 # since that's the thing burning tokens, not what's shown in the UI.
                 # The UI gets screenshot URLs; the model has no use for them (and every token costs prefill time).
                 _context_source = {k: v for k, v in result.items() if k != "screenshot_urls"} if tool_name == "preview" and isinstance(result, dict) else result
                 _result_for_context = _context_source if tool_name in tool_output.UNCOMPRESSED_TOOL_NAMES else tool_output.compress_tool_result(_context_source)
+                if (_plan_approval_required and _current_plan and not _plan_is_complete(_current_plan) and isinstance(_result_for_context, dict)
+                        and tool_name not in ("write_plan", "update_plan_step")):
+                    # Only the model sees this (the person's list shows the real result): a small model easily forgets to tick a step off
+                    # once it is deep in the work, so every result says which step is current and how to finish it.
+                    _now = _first_unfinished_step(_current_plan)
+                    _num = _now if mode == "athena_delegation" else _now + 1             # the delegation session numbers its steps from 0
+                    _tick = (f"call step_done with step {_num}" if mode != "athena_delegation" else f"call update_plan_step with index {_now} and status done")
+                    _result_for_context = {**_result_for_context, "plan_reminder": (
+                        f"Your plan: step {_num} of {len(_current_plan)} is the current one ({_current_plan[_now]['text']}). If you have finished it, {_tick} now; "
+                        "if not, carry on with it. Do not write a new plan unless the steps themselves must change.")}
                 _messages.append({"role": "tool", "content": json.dumps(_result_for_context)})
 
             # Screenshots go to the model only if it can see them, and only the latest
@@ -2521,7 +3125,8 @@ def chat_stream(req: ChatIn):
             if _round_shots and profile["vision"]:
                 if _preview_image_msg in _messages:
                     _messages.remove(_preview_image_msg)
-                _preview_image_msg = {"role": "user", "content": "Screenshots from the preview you just ran (desktop first, then mobile):", "images": _round_shots}
+                _preview_image_msg = {"role": "user", "content": "Screenshots from the tool call you just made, in order (for a preview: desktop first, then mobile):",
+                                      "images": vision_images.fit_images(_round_shots, profile["tier"], ctx_size)}
                 _messages.append(_preview_image_msg)
 
             # Recomputed here (after this round's calls actually ran, not
@@ -2543,12 +3148,12 @@ def chat_stream(req: ChatIn):
                 mode, req,
                 called_tool_names=_called_tool_names,
                 exploration_call_count=_exploration_call_count,
-                total_tool_call_count=_calls_without_progress,
                 search_codebase_call_count=_search_codebase_call_count,
                 plan_exists=bool(_current_plan),
-                calls_since_plan_touch=_calls_since_plan_touch,
-                plan_complete=_plan_is_complete(_current_plan),
+                calls_since_plan_touch=_touch_pressure(),
+                plan_complete=_plan_finished(),
                 thresholds=_thresholds, build_task=_build_task,
+                plan_approval_pending=_plan_approval_required and not _turn_state.get("plan_approved"),
             )
 
             if (_gate_was_open and _exploration_call_count >= _thresholds["self_investigation"]
@@ -2574,16 +3179,6 @@ def chat_stream(req: ChatIn):
                     "the same search."
                 )})
 
-            if (_plan_gate_was_open and _calls_without_progress >= _thresholds["plan_required"]
-                    and not _plan_gate_notified and "write_plan" not in _called_tool_names):
-                _plan_gate_notified = True
-                _messages.append({"role": "user", "content": (
-                    "You've made several tool calls this turn without writing a plan. Every tool except "
-                    "write_plan is now unavailable until you call it. This does not limit how much you can "
-                    "do for the rest of this turn -- once you call write_plan with the ordered steps you're "
-                    "actually going to take, full tool access returns and stays available. Call write_plan now."
-                )})
-
             if (mode == "athena_delegation" and _delegation_commitment_was_open
                     and "plan_delegation" in _called_tool_names and not _delegation_commitment_notified):
                 _delegation_commitment_notified = True
@@ -2594,25 +3189,22 @@ def chat_stream(req: ChatIn):
                     "fix the step (or steps) and call plan_delegation again with the corrected list."
                 )})
 
-            _plan_now_complete = _plan_is_complete(_current_plan)
+            _plan_now_complete = _plan_finished()
             if not _plan_was_complete and _plan_now_complete:
-                _messages.append({"role": "user", "content": (
+                _messages.append({"role": "user", "content": _speak_tools(mode, (
                     "Every step in your plan is now marked done or failed -- no other tool is available until "
                     "you either give your actual answer now (if you have a real result, more tool calls will "
-                    "not improve on it) or call write_plan again with genuinely new steps if more work is "
-                    "actually needed."
-                )})
+                    "not improve on it) or call write_plan again with a new plan of exactly what still needs "
+                    "doing, which the person approves before you carry on."
+                ))})
             # Not a one-shot notice like the gates above: _calls_since_plan_touch
             # resets on every write_plan/update_plan_step call, so this can
             # legitimately re-arm and fire again later in a long turn --
             # that recurrence is the whole point, not a bug to dedupe away.
             elif (_checkin_gate_was_open and not _plan_now_complete
-                    and _current_plan and _calls_since_plan_touch >= _thresholds["plan_checkin"]):
+                    and _current_plan and _touch_pressure() >= _thresholds["plan_checkin"]):
                 _messages.append({"role": "user", "content": (
-                    f"You've made {_calls_since_plan_touch} tool calls since you last touched your plan. Only "
-                    "update_plan_step or write_plan are available until you check in -- call update_plan_step "
-                    "now for whichever step your recent calls actually addressed. If it's already answered, "
-                    "mark it done and stop looking for more sources to confirm it."
+                    "Your plan needs updating before you do anything else. Only the plan tools are available until you do. " + _checkin_instruction(mode)
                 )})
         else:
             fallback_msg = "I wasn't able to settle on an answer after several tool calls -- the search results may be inconsistent or the page I need isn't easily fetchable. Try rephrasing, or ask me to check a specific source directly."
@@ -2627,11 +3219,27 @@ def chat_stream(req: ChatIn):
     # into a queue rather than handing it directly to this response --
     # this is the whole mechanism that lets it survive a closed tab or
     # navigation away. generate() itself is completely unmodified.
-    gen = generate()
+    def generate_in_turn():
+        """With one-prompt-at-a-time on, a prompt for a model on this network waits its turn first (see prompt_gate)."""
+        slot = None
+        if prompt_gate.applies(req.provider, req.endpoint_url):
+            waiting = threading.Event()
+            generation_streaming.cancel_flags[req.session_id] = waiting       # Stop works while queued, too
+            slot = yield from prompt_gate.wait_turn(req.owner, req.session_id, waiting)
+            if slot is None:
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
+        try:
+            yield from generate()
+        finally:
+            if slot is not None:
+                prompt_gate.release(slot)
+
+    gen = generate_in_turn()
     event_queue = queue.Queue()
     generation_streaming.active_generations[req.session_id] = event_queue
-    generation_streaming.generation_snapshots[req.session_id] = {"thinking": "", "content": "", "tool_calls": []}
-    threading.Thread(target=generation_streaming.drain_generator_to_queue, args=(gen, event_queue, req.session_id), daemon=True).start()
+    generation_streaming.generation_snapshots[req.session_id] = {"thinking": "", "content": "", "tool_calls": [], "model": req.model, "endpoint_url": req.endpoint_url or "", "provider": req.provider or ""}
+    threading.Thread(target=contextvars.copy_context().run, args=(generation_streaming.drain_generator_to_queue, gen, event_queue, req.session_id), daemon=True).start()   # runs as the account that asked
 
     def _stream_from_queue():
         while True:
@@ -2646,6 +3254,9 @@ def chat_stream(req: ChatIn):
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str):
+    session_id = ownership.resolve_session(session_id)
+    if not ownership.session_allowed(session_id):
+        return []
     try:
         resp = httpx.get(f"{lcm_client.LCM_URL}/messages/{session_id}", timeout=3)
         if resp.status_code == 200:
@@ -2678,7 +3289,7 @@ def list_memory():
     try:
         resp = httpx.get(f"{lcm_client.LCM_URL}/facts", timeout=10)
         if resp.status_code == 200:
-            return resp.json()
+            return ownership.own_facts(resp.json())
         return {"error": f"LCM error: HTTP {resp.status_code}"}
     except Exception as e:
         return {"error": f"LCM error: {e}"}
@@ -2688,16 +3299,21 @@ def add_memory(req: MemoryIn):
     try:
         resp = httpx.post(f"{lcm_client.LCM_URL}/facts", json={"content": req.content, "manual": True}, timeout=10)
         if resp.status_code == 200:
-            return resp.json()
+            made = resp.json()
+            ownership.record_fact(made["id"])
+            return made
         return {"error": f"LCM error: HTTP {resp.status_code}"}
     except Exception as e:
         return {"error": f"LCM error: {e}"}
 
 @app.delete("/api/memory/{fact_id}")
 def delete_memory(fact_id: int):
+    if not ownership.fact_allowed(fact_id):
+        return {"error": "No such memory."}
     try:
         resp = httpx.delete(f"{lcm_client.LCM_URL}/facts/{fact_id}", timeout=10)
         if resp.status_code == 200:
+            ownership.forget_fact(fact_id)
             return resp.json()
         return {"error": f"LCM error: HTTP {resp.status_code}"}
     except Exception as e:
@@ -2706,6 +3322,9 @@ def delete_memory(fact_id: int):
 @app.delete("/api/messages/{message_id}")
 def delete_message(message_id: int):
     try:
+        owner_session = httpx.get(f"{lcm_client.LCM_URL}/message-session/{message_id}", timeout=10).json().get("session_id")
+        if not owner_session or not ownership.session_allowed(owner_session):
+            return {"error": "message not found"}
         resp = httpx.delete(f"{lcm_client.LCM_URL}/messages/{message_id}", timeout=10)
         if resp.status_code == 200:
             return resp.json()
@@ -2725,13 +3344,16 @@ def list_sessions_proxy():
     try:
         resp = httpx.get(f"{lcm_client.LCM_URL}/sessions", timeout=10)
         if resp.status_code == 200:
-            return resp.json()
+            return ownership.own_sessions(resp.json())
         return {"error": f"LCM error: HTTP {resp.status_code}"}
     except Exception as e:
         return {"error": f"LCM error: {e}"}
 
 @app.post("/api/sessions")
 def upsert_session_proxy(req: SessionMetaIn):
+    req.id = ownership.resolve_session(req.id)
+    if not ownership.session_allowed(req.id, claim=True):
+        return {"error": "That chat belongs to another account."}
     try:
         resp = httpx.post(f"{lcm_client.LCM_URL}/sessions", json=req.model_dump(), timeout=10)
         if resp.status_code == 200:
@@ -2750,10 +3372,17 @@ def fork_session_proxy(session_id: str, req: ForkSessionProxyIn):
     session containing everything up to and including message_id,
     letting the user rewind to a point in a conversation and continue
     down a different path without losing or altering the original."""
+    session_id = ownership.resolve_session(session_id)
+    if not ownership.session_allowed(session_id):
+        return {"error": "That chat belongs to another account."}
     try:
         resp = httpx.post(f"{lcm_client.LCM_URL}/sessions/{session_id}/fork", json=req.model_dump(), timeout=15)
         if resp.status_code == 200:
-            return resp.json()
+            forked = resp.json()
+            new_id = forked.get("id") or forked.get("session_id")
+            if new_id:
+                ownership.session_allowed(new_id, claim=True)
+            return forked
         return {"error": f"LCM error: HTTP {resp.status_code}"}
     except Exception as e:
         return {"error": f"LCM error: {e}"}
@@ -2762,6 +3391,9 @@ def fork_session_proxy(session_id: str, req: ForkSessionProxyIn):
 def delete_history(session_id: str):
     """Delete a chat session's messages and summary nodes from LCM --
     real data deletion, not just removing it from the sidebar list."""
+    session_id = ownership.resolve_session(session_id)
+    if not ownership.session_allowed(session_id):
+        return {"error": "That chat belongs to another account."}
     try:
         resp = httpx.delete(f"{lcm_client.LCM_URL}/session/{session_id}", timeout=10)
         if resp.status_code == 200:
@@ -2843,59 +3475,170 @@ class SettingsIn(BaseModel):
     delegation_concurrency: Optional[int] = None
     bot_ptc_enabled: Optional[bool] = None
     delegation_async_enabled: Optional[bool] = None
-    laya_gating_enabled: Optional[bool] = None
     model_profiles: Optional[dict] = None  # {model id: {"tier": "small|standard|large", "vision": bool}} manual overrides
     workspace_mode: Optional[str] = None   # "auto" (default) | "build" | "maintain"
+    plan_approval_all: Optional[bool] = None  # ask the person to approve a plan for every model (small models always do)
 
 class MCPServerIn(BaseModel):
     name: str
-    command: str
+    command: str = ""
     args: Optional[list] = None
+    transport: Optional[str] = None            # stdio (a local program) | http | sse (a web address)
+    url: str = ""
+    env: Optional[object] = None               # {"KEY": "value"} or lines of KEY=VALUE
+    headers: Optional[object] = None           # {"Name": "value"} or lines of Name: value
+    cwd: str = ""
+    timeout: Optional[float] = None
+    model_access: bool = False
+    enabled_tools: Optional[list] = None
 
-@app.get("/api/mcp/servers")
+
+class MCPAccessIn(BaseModel):
+    model_access: bool
+    enabled_tools: Optional[list] = None
+
+
+def _mcp_server_view(raw):
+    """One configured server as the UI shows it: its settings (no secret values), live status, and its tools."""
+    from mcp_manager import mcp_manager, public_view
+    view = public_view(raw)
+    live = next((s for s in mcp_manager.list_servers() if s["name"] == view["name"]), None) or {}
+    enabled = view["enabled_tools"]
+    view.update({"status": live.get("status", "stopped"), "connected": bool(live.get("connected")), "error": live.get("error"),
+                 "tool_count": live.get("tool_count", 0)})
+    view["tools"] = [{"name": t.name, "description": t.description, "inputSchema": t.input_schema, "enabled": enabled is None or t.name in enabled}
+                     for t in mcp_manager.list_tools(view["name"])]
+    return view
+
+
+def _need_whole_host():
+    if not ownership.can_use_whole_host():
+        raise HTTPException(status_code=403, detail="This account does not have full access to this computer.")
+
+
+def _need_main_account():
+    if not ownership.is_main():
+        raise HTTPException(status_code=403, detail="Only the main account can do this.")
+
+
+def _save_mcp_config(cfg):
+    with settings.settings_lock:
+        current = settings.load_settings()
+        servers = [s for s in current.get("mcp_servers", []) if s.get("name") != cfg["name"]]
+        servers.append(cfg)
+        current["mcp_servers"] = servers
+        settings.save_settings(current)
+
+
+@app.get("/api/mcp/servers", dependencies=[Depends(_need_whole_host)])
 def list_mcp_servers():
-    from mcp_manager import mcp_manager
-    servers = mcp_manager.list_servers()
-    for s in servers:
-        tools = mcp_manager.list_tools(s["name"])
-        s["tools"] = [{"name": t.name, "description": t.description, "inputSchema": t.input_schema} for t in tools]
+    from mcp_manager import normalize_config
+    servers = []
+    for raw in settings.load_settings().get("mcp_servers", []):
+        try:
+            normalize_config(raw)
+        except ValueError:
+            continue
+        servers.append(_mcp_server_view(raw))
     return {"servers": servers}
 
-@app.post("/api/mcp/servers")
+
+@app.post("/api/mcp/servers", dependencies=[Depends(_need_whole_host)])
 def add_mcp_server(req: MCPServerIn):
-    """Adds a server to persisted config AND connects immediately,
-    so the person sees real success/failure right away instead of
-    only finding out on the next restart."""
-    from mcp_manager import mcp_manager
-    with settings.settings_lock:
-        current_settings = settings.load_settings()
-        servers = current_settings.setdefault("mcp_servers", [])
-        servers = [s for s in servers if s["name"] != req.name]
-        servers.append({"name": req.name, "command": req.command, "args": req.args or []})
-        current_settings["mcp_servers"] = servers
-        settings.save_settings(current_settings)
+    """Adds a server to the saved config AND connects right away, so the person sees real success or
+    failure now instead of at the next restart. A bad config is refused with a plain message and not saved."""
+    from mcp_manager import mcp_manager, normalize_config
     try:
-        tools = mcp_manager.connect_server(req.name, req.command, req.args or [])
+        cfg = normalize_config(req.model_dump())
+    except ValueError as e:
+        return {"connected": False, "error": str(e)}
+    _save_mcp_config(cfg)
+    try:
+        tools = mcp_manager.connect_server(cfg)
         return {"connected": True, "tool_count": len(tools)}
     except Exception as e:
         return {"connected": False, "error": str(e)}
 
-@app.delete("/api/mcp/servers/{name}")
+
+@app.put("/api/mcp/servers/{name}", dependencies=[Depends(_need_whole_host)])
+def update_mcp_server(name: str, req: MCPServerIn):
+    """Changes a saved server's settings (and may rename it), then reconnects with them. Environment settings and
+    headers hold secrets the UI never sees, so leaving them out keeps what is saved; model access and the
+    tools left ticked are not part of editing and carry over."""
+    from mcp_manager import mcp_manager, normalize_config
+    saved = settings.load_settings().get("mcp_servers", [])
+    current = next((s for s in saved if s.get("name") == name), None)
+    if current is None:
+        return {"connected": False, "error": f"No MCP server named '{name}'."}
+    data = req.model_dump()
+    for secret in ("env", "headers"):
+        if data.get(secret) is None:
+            data[secret] = current.get(secret)
+    data["model_access"] = current.get("model_access", False)
+    data["enabled_tools"] = current.get("enabled_tools")
+    try:
+        cfg = normalize_config(data)
+    except ValueError as e:
+        return {"connected": False, "error": str(e)}
+    if cfg["name"] != name and any(s.get("name") == cfg["name"] for s in saved):
+        return {"connected": False, "error": f"There is already a server named '{cfg['name']}'."}
+    with settings.settings_lock:
+        stored = settings.load_settings()
+        servers = [cfg if s.get("name") == name else s for s in stored.get("mcp_servers", [])]
+        stored["mcp_servers"] = servers
+        settings.save_settings(stored)
+    if cfg["name"] != name:
+        mcp_manager.disconnect_server(name)
+    try:
+        tools = mcp_manager.connect_server(cfg)
+        return {"connected": True, "tool_count": len(tools)}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+@app.put("/api/mcp/servers/{name}/access", dependencies=[Depends(_need_whole_host)])
+def set_mcp_access(name: str, req: MCPAccessIn):
+    """Whether models may use this server's tools, and which of them. Takes effect on the next model turn."""
+    from mcp_manager import mcp_manager, normalize_config
+    current = next((s for s in settings.load_settings().get("mcp_servers", []) if s.get("name") == name), None)
+    if current is None:
+        return {"error": f"No MCP server named '{name}'."}
+    cfg = normalize_config({**current, "model_access": req.model_access, "enabled_tools": req.enabled_tools})
+    _save_mcp_config(cfg)
+    mcp_manager.set_config(cfg)
+    return {"server": _mcp_server_view(cfg)}
+
+
+@app.post("/api/mcp/servers/{name}/reconnect", dependencies=[Depends(_need_whole_host)])
+def reconnect_mcp_server(name: str):
+    from mcp_manager import mcp_manager, normalize_config
+    current = next((s for s in settings.load_settings().get("mcp_servers", []) if s.get("name") == name), None)
+    if current is None:
+        return {"connected": False, "error": f"No MCP server named '{name}'."}
+    try:
+        tools = mcp_manager.connect_server(normalize_config(current))
+        return {"connected": True, "tool_count": len(tools)}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+@app.delete("/api/mcp/servers/{name}", dependencies=[Depends(_need_whole_host)])
 def remove_mcp_server(name: str):
     from mcp_manager import mcp_manager
     mcp_manager.disconnect_server(name)
     with settings.settings_lock:
         current_settings = settings.load_settings()
-        current_settings["mcp_servers"] = [s for s in current_settings.get("mcp_servers", []) if s["name"] != name]
+        current_settings["mcp_servers"] = [s for s in current_settings.get("mcp_servers", []) if s.get("name") != name]
         settings.save_settings(current_settings)
     return {"removed": True}
+
 
 class MCPCallIn(BaseModel):
     server: str
     tool: str
     arguments: Optional[dict] = None
 
-@app.post("/api/mcp/call")
+@app.post("/api/mcp/call", dependencies=[Depends(_need_whole_host)])
 def call_mcp_tool(req: MCPCallIn):
     """Generic tool-call passthrough -- Athena has no idea what any
     given tool does, it just forwards the call and hands back the raw
@@ -2975,24 +3718,24 @@ def _load_mcp_ui_backends():
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 if hasattr(module, "router"):
-                    app.include_router(module.router, prefix=f"/mcp-ui-api/{name}")
+                    app.include_router(module.router, prefix=f"/mcp-ui-api/{name}", dependencies=[Depends(_need_whole_host)])
                     logger.info(f"Loaded custom backend for MCP UI plugin '{name}'")
             except Exception as e:
                 logger.error(f"Failed to load custom backend for MCP UI plugin '{name}': {e}")
 
 _load_mcp_ui_backends()
 
-@app.get("/mcp-ui/{server_name}")
+@app.get("/mcp-ui/{server_name}", dependencies=[Depends(_need_whole_host)])
 def serve_mcp_ui_root(server_name: str):
     return _serve_mcp_ui_file(server_name, "index.html")
 
-@app.get("/mcp-ui/{server_name}/{path:path}")
+@app.get("/mcp-ui/{server_name}/{path:path}", dependencies=[Depends(_need_whole_host)])
 def serve_mcp_ui_file(server_name: str, path: str):
     return _serve_mcp_ui_file(server_name, path)
 
 @app.get("/api/settings")
 def get_settings():
-    return settings.load_settings()
+    return settings.load_effective()
 
 @app.post("/api/settings")
 def update_settings(req: SettingsIn):
@@ -3002,18 +3745,18 @@ def update_settings(req: SettingsIn):
     default model. Lock-guarded end to end (read, merge, write) so two
     devices saving at nearly the same moment serialize safely instead
     of one's update silently clobbering the other's."""
-    with settings.settings_lock:
-        current_settings = settings.load_settings()
-        current_settings.update(req.model_dump(exclude_unset=True))
-        settings.save_settings(current_settings)
-        return current_settings
+    return settings.apply_update(req.model_dump(exclude_unset=True))
 
 @app.get("/api/settings/memory-model")
 def get_memory_model():
+    if not ownership.is_main():
+        return {"model": None}
     return {"model": settings.load_settings().get("memory_extraction_model")}
 
 @app.post("/api/settings/memory-model")
 def set_memory_model(req: MemoryModelIn):
+    if not ownership.is_main():
+        return JSONResponse(status_code=403, content={"error": "Only the main account changes this."})
     current_settings = settings.load_settings()
     current_settings["memory_extraction_model"] = req.model
     settings.save_settings(current_settings)
@@ -3034,6 +3777,9 @@ def _get_memory_context() -> str:
         facts = resp.json()
     except Exception:
         return ""
+    if not facts:
+        return ""
+    facts = ownership.own_facts(facts)
     if not facts:
         return ""
     facts_list = "\n".join(f"- {f['content']}" for f in facts)
@@ -3066,46 +3812,52 @@ def _run_memory_scan(model: str):
     if not new_messages:
         return  # nothing new -- also naturally prevents re-scanning during a long idle stretch
 
-    existing_facts = httpx.get(f"{lcm_client.LCM_URL}/facts", timeout=10).json()
-    existing_facts_text = "\n".join(f"- {f['content']}" for f in existing_facts) or "(none yet)"
-    transcript_text = "\n".join(f"[{m['role']}] {m['content']}" for m in new_messages)
-
     max_id_seen = max(m["id"] for m in new_messages)
-    last_session_id = new_messages[-1]["session_id"]
+    all_facts = httpx.get(f"{lcm_client.LCM_URL}/facts", timeout=10).json()
+    by_owner = {}
+    for m in new_messages:
+        by_owner.setdefault(ownership.owner_of_session(m["session_id"]), []).append(m)
 
     host_key = host_locks.endpoint_host(OLLAMA_URL)
     lock = host_locks.get_host_lock(host_key)
-    try:
-        with lock:
-            resp = httpx.post(OLLAMA_URL, json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": _MEMORY_EXTRACTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Existing facts already known:\n{existing_facts_text}\n\nNew conversation since last scan:\n{transcript_text}"},
-                ],
-                "options": {"num_ctx": 32768},
-                "stream": False,
-                "think": False,
-            }, timeout=120)
-        raw = resp.json()["message"]["content"].strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`").lstrip("json").strip()
-        new_facts = json.loads(raw)
-    except Exception as e:
-        logger.warning(f"Memory scan: extraction failed, will retry next cycle: {e}")
-        return  # deliberately do NOT advance scan-state, so this batch gets retried
+    added = 0
+    for owner, owner_messages in by_owner.items():
+        existing_facts_text = "\n".join(f"- {f['content']}" for f in ownership.own_facts(all_facts, owner)) or "(none yet)"
+        transcript_text = "\n".join(f"[{m['role']}] {m['content']}" for m in owner_messages)
+        try:
+            with lock:
+                resp = httpx.post(OLLAMA_URL, json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": _MEMORY_EXTRACTION_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Existing facts already known:\n{existing_facts_text}\n\nNew conversation since last scan:\n{transcript_text}"},
+                    ],
+                    "options": {"num_ctx": 32768},
+                    "stream": False,
+                    "think": False,
+                }, timeout=120)
+            raw = resp.json()["message"]["content"].strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`").lstrip("json").strip()
+            new_facts = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"Memory scan: extraction failed, will retry next cycle: {e}")
+            return  # deliberately do NOT advance scan-state, so this batch gets retried
 
-    for fact_text in new_facts:
-        if isinstance(fact_text, str) and fact_text.strip():
-            httpx.post(f"{lcm_client.LCM_URL}/facts", json={
-                "content": fact_text.strip(),
-                "source_session_id": last_session_id,
-                "source_message_id": max_id_seen,
-                "manual": False,
-            }, timeout=10)
+        for fact_text in new_facts:
+            if isinstance(fact_text, str) and fact_text.strip():
+                made = httpx.post(f"{lcm_client.LCM_URL}/facts", json={
+                    "content": fact_text.strip(),
+                    "source_session_id": owner_messages[-1]["session_id"],
+                    "source_message_id": max(m["id"] for m in owner_messages),
+                    "manual": False,
+                }, timeout=10).json()
+                if made.get("id") is not None:
+                    ownership.record_fact(made["id"], owner)
+                    added += 1
 
-    if new_facts:
-        logger.info(f"Memory scan: added {len(new_facts)} new fact(s)")
+    if added:
+        logger.info(f"Memory scan: added {added} new fact(s)")
     httpx.post(f"{lcm_client.LCM_URL}/scan-state", json={"last_scanned_message_id": max_id_seen}, timeout=10)
 
 def _memory_scan_loop():
@@ -3208,17 +3960,20 @@ if __name__ == "__main__":
         logger.info("RAG re-index complete.")
     threading.Thread(target=_startup_reindex, daemon=True).start()
 
+    research.mark_interrupted()
     threading.Thread(target=_memory_scan_loop, daemon=True).start()
     threading.Thread(target=task_scheduler._task_scheduler_loop, daemon=True).start()
 
     from mcp_manager import mcp_manager
     mcp_manager.start()
-    for server_cfg in settings.load_settings().get("mcp_servers", []):
-        try:
-            tools = mcp_manager.connect_server(server_cfg["name"], server_cfg["command"], server_cfg.get("args", []))
-            logger.info(f"Connected to MCP server '{server_cfg['name']}' -- {len(tools)} tools discovered")
-        except Exception as e:
-            logger.error(f"Failed to connect to MCP server '{server_cfg['name']}': {e}")
+
+    def _log_mcp_result(name, tools, error):
+        if error:
+            logger.error(f"Failed to connect to MCP server '{name}': {error}")
+        else:
+            logger.info(f"Connected to MCP server '{name}' -- {len(tools)} tools discovered")
+
+    mcp_manager.connect_all(settings.load_settings().get("mcp_servers", []), on_result=_log_mcp_result)
 
     port = int(os.environ.get("ATHENA_PORT", "9500"))
     uvicorn.run(app, host="0.0.0.0", port=port)

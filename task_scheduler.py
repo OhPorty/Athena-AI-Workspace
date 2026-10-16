@@ -7,6 +7,7 @@ from typing import Optional, List
 
 import httpx
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import settings
@@ -18,6 +19,8 @@ import web_tools
 import generation_streaming
 from logging_setup import logger
 import db
+import ownership
+from user_context import as_user
 
 router = APIRouter()
 
@@ -55,6 +58,7 @@ def _tasks_conn():
             created_at REAL NOT NULL
         )
     """)
+    ownership.ensure_owner_column(conn, "tasks")
     return conn
 
 def _available_task_tools():
@@ -87,12 +91,12 @@ class TaskIn(BaseModel):
     enabled_tools: List[str] = []
     enabled_skills: List[str] = []
 
-_TASK_COLUMNS = "id, prompt, session_id, session_label, model, endpoint_url, workspace, schedule_type, run_at, recurrence_json, enabled_tools_json, enabled_skills_json, status, consecutive_failures, last_run_at, last_run_status, next_run_at, created_at"
+_TASK_COLUMNS = "id, prompt, session_id, session_label, model, endpoint_url, workspace, schedule_type, run_at, recurrence_json, enabled_tools_json, enabled_skills_json, status, consecutive_failures, last_run_at, last_run_status, next_run_at, created_at, owner"
 
 def _row_to_task(row):
     (id_, prompt, session_id, session_label, model, endpoint_url, workspace,
      schedule_type, run_at, recurrence_json, enabled_tools_json, enabled_skills_json,
-     status, consecutive_failures, last_run_at, last_run_status, next_run_at, created_at) = row
+     status, consecutive_failures, last_run_at, last_run_status, next_run_at, created_at, owner) = row
     return {
         "id": id_, "prompt": prompt, "session_id": session_id, "session_label": session_label,
         "model": model, "endpoint_url": endpoint_url, "workspace": workspace,
@@ -101,7 +105,7 @@ def _row_to_task(row):
         "enabled_tools": json.loads(enabled_tools_json), "enabled_skills": json.loads(enabled_skills_json),
         "status": status, "consecutive_failures": consecutive_failures,
         "last_run_at": last_run_at, "last_run_status": last_run_status,
-        "next_run_at": next_run_at, "created_at": created_at,
+        "next_run_at": next_run_at, "created_at": created_at, "owner": owner,
     }
 
 def _next_occurrence(recurrence, after_ts):
@@ -181,27 +185,32 @@ def task_capabilities():
 def list_tasks():
     conn = _tasks_conn()
     try:
-        rows = conn.execute(f"SELECT {_TASK_COLUMNS} FROM tasks ORDER BY created_at DESC").fetchall()
+        where, params = ownership.owner_filter()
+        rows = conn.execute(f"SELECT {_TASK_COLUMNS} FROM tasks WHERE {where} ORDER BY created_at DESC", params).fetchall()
         return [_row_to_task(r) for r in rows]
     finally:
         conn.close()
 
 @router.post("/api/tasks")
 def create_task(req: TaskIn):
+    if ownership.endpoint_kind("", req.endpoint_url or "") is None:
+        return JSONResponse(status_code=403, content={"error": "That model endpoint is not available to this account."})
+    if not ownership.workspace_allowed(req.workspace or ""):
+        return JSONResponse(status_code=403, content={"error": "This account can only use workspaces inside its own folder."})
     next_run = _compute_initial_next_run(req.schedule_type, req.run_at, req.recurrence)
     conn = _tasks_conn()
     try:
         cur = conn.execute(f"""
             INSERT INTO tasks (prompt, session_id, session_label, model, endpoint_url, workspace,
                 schedule_type, run_at, recurrence_json, enabled_tools_json, enabled_skills_json,
-                status, consecutive_failures, last_run_at, last_run_status, next_run_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'active\', 0, NULL, NULL, ?, ?)
+                status, consecutive_failures, last_run_at, last_run_status, next_run_at, created_at, owner)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'active\', 0, NULL, NULL, ?, ?, ?)
         """, (
             req.prompt, req.session_id, req.session_label, req.model, req.endpoint_url, req.workspace,
             req.schedule_type, req.run_at,
             json.dumps(req.recurrence) if req.recurrence else None,
             json.dumps(req.enabled_tools), json.dumps(req.enabled_skills),
-            next_run, time.time(),
+            next_run, time.time(), ownership.stored_owner(),
         ))
         conn.commit()
         row = conn.execute(f"SELECT {_TASK_COLUMNS} FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -211,23 +220,28 @@ def create_task(req: TaskIn):
 
 @router.put("/api/tasks/{task_id}")
 def update_task(task_id: int, req: TaskIn):
+    if ownership.endpoint_kind("", req.endpoint_url or "") is None:
+        return JSONResponse(status_code=403, content={"error": "That model endpoint is not available to this account."})
+    if not ownership.workspace_allowed(req.workspace or ""):
+        return JSONResponse(status_code=403, content={"error": "This account can only use workspaces inside its own folder."})
     next_run = _compute_initial_next_run(req.schedule_type, req.run_at, req.recurrence)
+    where, owner_params = ownership.owner_filter()
     conn = _tasks_conn()
     try:
-        conn.execute("""
+        conn.execute(f"""
             UPDATE tasks SET prompt=?, session_id=?, session_label=?, model=?, endpoint_url=?, workspace=?,
                 schedule_type=?, run_at=?, recurrence_json=?, enabled_tools_json=?, enabled_skills_json=?,
                 next_run_at=?, consecutive_failures=0, status=\'active\'
-            WHERE id=?
+            WHERE id=? AND {where}
         """, (
             req.prompt, req.session_id, req.session_label, req.model, req.endpoint_url, req.workspace,
             req.schedule_type, req.run_at,
             json.dumps(req.recurrence) if req.recurrence else None,
             json.dumps(req.enabled_tools), json.dumps(req.enabled_skills),
-            next_run, task_id,
+            next_run, task_id, *owner_params,
         ))
         conn.commit()
-        row = conn.execute(f"SELECT {_TASK_COLUMNS} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(f"SELECT {_TASK_COLUMNS} FROM tasks WHERE id = ? AND {where}", (task_id, *owner_params)).fetchone()
         if not row:
             return {"error": "task not found"}
         return _row_to_task(row)
@@ -236,9 +250,10 @@ def update_task(task_id: int, req: TaskIn):
 
 @router.delete("/api/tasks/{task_id}")
 def delete_task(task_id: int):
+    where, owner_params = ownership.owner_filter()
     conn = _tasks_conn()
     try:
-        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.execute(f"DELETE FROM tasks WHERE id = ? AND {where}", (task_id, *owner_params))
         conn.commit()
         return {"ok": True}
     finally:
@@ -253,9 +268,10 @@ def set_task_status(task_id: int, req: TaskStatusIn):
     recomputes next_run_at from right now -- so a recurring task that
     sat paused through several missed cycles doesn\'t immediately fire
     a burst of catch-up runs for each one."""
+    where, owner_params = ownership.owner_filter()
     conn = _tasks_conn()
     try:
-        row = conn.execute("SELECT schedule_type, run_at, recurrence_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(f"SELECT schedule_type, run_at, recurrence_json FROM tasks WHERE id = ? AND {where}", (task_id, *owner_params)).fetchone()
         if not row:
             return {"error": "task not found"}
         if req.status == "active":
@@ -307,6 +323,11 @@ def _start_task_run(task):
     first if it's gone missing (e.g. deleted by the user) instead of
     erroring out looking for one that no longer exists, keeping the
     same session_label so the recreated session reads the same way."""
+    owner = task.get("owner") or ownership.main_name()
+    with as_user(owner):
+        _start_task_run_as_owner(task, owner)
+
+def _start_task_run_as_owner(task, owner):
     from main import chat_stream, ChatIn  # deferred: main.py imports task_scheduler.py at module load
     task_id = task["id"]
     session_id = task["session_id"]
@@ -322,6 +343,7 @@ def _start_task_run(task):
         except Exception as e:
             logger.warning(f"failed to (re)create session for task {task_id}: {e!r}")
             return
+        ownership.session_allowed(session_id, owner, claim=True)
         conn = _tasks_conn()
         try:
             conn.execute("UPDATE tasks SET session_id=? WHERE id=?", (session_id, task_id))
@@ -350,6 +372,7 @@ def _start_task_run(task):
     enabled_tools = task["enabled_tools"]
     settings_search_url = (settings.load_settings() or {}).get("search_url") or ""
     req = ChatIn(
+        interactive=False,
         session_id=session_id,
         message=task["prompt"],
         model=task["model"],

@@ -18,3 +18,16 @@ tasks.db
 bot_task_scratch/
 logs/
 athena.db
+.venv/
+.env
+.pytest_cache/
+.claude/
+*.pyc
+*.tmp
+*.db-wal
+*.db-shm
+*.db-journal
+.DS_Store
+athena_vapid.pem
+
+user_data/

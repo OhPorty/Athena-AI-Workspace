@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 import db
+import ownership
 
 router = APIRouter()
 
@@ -18,6 +19,7 @@ def ratings_conn():
             updated_at TEXT NOT NULL
         )
     """)
+    ownership.ensure_owner_column(conn, "ratings")
     return conn
 
 
@@ -36,19 +38,21 @@ def rate_message(req: RatingIn):
     aggregates directly from whatever rows currently exist -- a changed
     or removed vote is automatically reflected with no separate
     increment/decrement bookkeeping to get wrong."""
+    if not ownership.session_allowed(ownership.resolve_session(req.session_id)):
+        return {"ok": False}
     conn = ratings_conn()
     try:
         if not req.rating:
             conn.execute("DELETE FROM ratings WHERE message_id = ?", (req.message_id,))
         else:
             conn.execute("""
-                INSERT INTO ratings (message_id, session_id, model, rating, reason, updated_at)
-                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                INSERT INTO ratings (message_id, session_id, model, rating, reason, updated_at, owner)
+                VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
                 ON CONFLICT(message_id) DO UPDATE SET
                     rating = excluded.rating,
                     reason = excluded.reason,
                     updated_at = excluded.updated_at
-            """, (req.message_id, req.session_id, req.model, req.rating, req.reason))
+            """, (req.message_id, req.session_id, req.model, req.rating, req.reason, ownership.stored_owner()))
         conn.commit()
         return {"ok": True}
     finally:
@@ -61,6 +65,9 @@ def get_ratings(session_id: str):
     frontend can re-apply which button should show as selected after
     a reload -- ratings live in this DB, not in the message history
     LCM returns, since LCM has no concept of a 'rating' field."""
+    session_id = ownership.resolve_session(session_id)
+    if not ownership.session_allowed(session_id):
+        return {}
     conn = ratings_conn()
     try:
         rows = conn.execute(
@@ -100,6 +107,8 @@ def pin_message(req: PinIn):
     own auto-compaction of older context, so the pinned copy has to be
     completely independent of whatever LCM does to its own history
     later."""
+    if not ownership.session_allowed(ownership.resolve_session(req.session_id)):
+        return {"ok": False}
     conn = _pins_conn()
     try:
         if not req.pinned:
@@ -123,6 +132,9 @@ def get_pins(session_id: str):
     """Returns {message_id: {content}} for a session, so the frontend
     can re-apply which messages show the pin toggle as active after a
     reload."""
+    session_id = ownership.resolve_session(session_id)
+    if not ownership.session_allowed(session_id):
+        return {}
     conn = _pins_conn()
     try:
         rows = conn.execute(

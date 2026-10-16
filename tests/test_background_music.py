@@ -41,8 +41,23 @@ def test_the_same_settings_and_seed_give_the_same_file_and_a_new_seed_a_differen
     assert (a / "t.wav").read_bytes() == (b / "t.wav").read_bytes() != (c / "t.wav").read_bytes()
 
 
-def test_needs_a_workspace_and_cannot_write_outside_it(tmp_path):
-    assert "workspace" in bm.generate_background_music({}, "")["error"]
+def test_without_a_workspace_the_track_comes_back_as_a_download_link(tmp_path, monkeypatch):
+    import generated_files
+    monkeypatch.setattr(generated_files, "ROOT", str(tmp_path / "gen"))
+    out = bm.generate_background_music({"minutes": 0.25, "seed": 3, "filename": "chill"}, "")
+    assert "error" not in out and out["filename"] == "chill.wav" and out["url"].startswith("/api/generated-files/") and out["size"] > 1000
+    stored = generated_files.resolve(out["url"].rsplit("/", 1)[-1])
+    assert stored and open(stored, "rb").read(4) == b"RIFF" and "path" not in out
+    import tempfile, glob, os
+    assert not glob.glob(os.path.join(tempfile.gettempdir(), "athena_music_*"))              # the scratch folder is cleaned up
+
+
+def test_a_length_in_seconds_is_understood(tmp_path):
+    out = bm.generate_background_music({"duration_seconds": 30, "seed": 4}, str(tmp_path))
+    assert 28 <= float(out["report"].split("WAV audio: ")[1].split(" s")[0]) <= 36
+
+
+def test_cannot_write_outside_the_workspace(tmp_path):
     out = bm.generate_background_music({"minutes": 0.25, "filename": "../../etc/evil.wav"}, str(tmp_path))
     assert out["path"] == "evil.wav" and (tmp_path / "evil.wav").is_file()      # the path part is dropped, never followed
 
@@ -59,9 +74,9 @@ def test_remaking_a_track_keeps_a_restorable_copy_of_the_old_one(tmp_path, monke
 def test_the_tool_is_offered_in_workspace_modes_and_counts_as_progress():
     names = lambda tools: {t["function"]["name"] for t in tools}
     Req = lambda: types.SimpleNamespace(search_url="", allowed_tools=None)
-    assert "generate_background_music" in names(main._get_mode_tools("workspace", Req(), build_task=True))
-    assert "generate_background_music" in names(main._get_mode_tools("workspace", Req()))
-    assert "generate_background_music" not in names(main._get_mode_tools("casual", Req()))
+    assert "generate_background_music" in names(main._get_mode_tools_legacy("workspace", Req(), build_task=True))
+    assert "generate_background_music" in names(main._get_mode_tools_legacy("workspace", Req()))
+    assert "generate_background_music" not in names(main._get_mode_tools_legacy("casual", Req()))
     assert main._result_is_progress("generate_background_music", {"path": "t.wav"})
 
 
@@ -201,3 +216,11 @@ def test_bass_and_drums_stay_audible_next_to_the_chords_for_every_instrument(tmp
         bm._layer_hook = None
     for name, deviations in off_by.items():
         assert max(abs(x) for x in deviations) < 5, (name, [round(x, 1) for x in deviations])
+
+
+def test_a_bad_request_without_a_workspace_leaves_no_scratch_folder_behind(tmp_path, monkeypatch):
+    import generated_files, glob, tempfile, os
+    monkeypatch.setattr(generated_files, "ROOT", str(tmp_path / "gen"))
+    before = set(glob.glob(os.path.join(tempfile.gettempdir(), "athena_music_*")))
+    assert "error" in bm.generate_background_music({"bars_per_chord": 3}, "")
+    assert set(glob.glob(os.path.join(tempfile.gettempdir(), "athena_music_*"))) == before
